@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Photon</string>
+    <string name="notification_channel">Photon</string>
+    <string name="notification_connected">Connected</string>
+    <string name="notification_connecting">Connecting...</string>
+</resources>

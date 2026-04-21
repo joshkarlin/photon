@@ -1,0 +1,183 @@
+# Photon
+
+A minimal, multi-protocol messaging client for the Light Phone III. WhatsApp, Signal, and SMS in one LP3-native interface.
+
+## What it does
+
+Photon connects to WhatsApp, Signal, and SMS and presents your messages in a monochrome, LP3-styled interface. Three messaging platforms, one intentional design.
+
+- **WhatsApp**: Native protocol via [whatsmeow](https://github.com/tulir/whatsmeow) — text, reactions, replies, media send/receive, group chats
+- **Signal**: Native protocol via [libsignal-service-java](https://github.com/AsamK/signal-cli) — text messaging as a linked device
+- **SMS**: Reads from Android's SMS content provider — view and send text messages
+- **All Chats**: Unified view merging all platforms, sorted by most recent
+
+### Ephemeral by design
+
+Messages don't live forever. Photon keeps a configurable rolling window of recent messages (default: 50 per chat or 7 days) and prunes the rest. Media downloads are temporary — viewed then auto-deleted after 5 minutes unless explicitly saved to the device.
+
+## Installation
+
+```bash
+adb install app-release.apk
+```
+
+## Building from source
+
+### Prerequisites
+
+- Go 1.22+ (for the WhatsApp bridge)
+- Android Studio (for the JDK and Android SDK)
+- ADB (included with Android SDK)
+
+### Build
+
+```bash
+# Build Go bridge
+cd gobridge
+GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" \
+  -o ../app/src/main/jniLibs/arm64-v8a/libgobridge.so .
+
+# Build APK (set JAVA_HOME and ANDROID_HOME for your environment)
+./gradlew assembleDebug
+
+# Install
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+## Architecture
+
+```
+┌────────────────────────────────────────────┐
+│  Android App (Kotlin/Compose)              │
+│                                            │
+│  Home ──┬── SMS ── Chat List ── Chat       │
+│         ├── WhatsApp ── Chat List ── Chat  │
+│         ├── Signal ── Chat List ── Chat    │
+│         ├── All Chats (merged view)        │
+│         └── Settings                       │
+│                                            │
+│  Shared: ChatScreenContent, ChatListContent│
+│          ConversationRow, MessageLayouts   │
+│                                            │
+│  ┌──────────────────────────────────────┐  │
+│  │  Foreground Service                  │  │
+│  │  WhatsApp: Go bridge + WebSocket     │  │
+│  │  Signal: libsignal in-process        │  │
+│  │  SMS: ContentProvider + Observer     │  │
+│  └──────────────────────────────────────┘  │
+└────────────┬───────────────────────────────┘
+             │ ws://127.0.0.1:8765
+┌────────────▼───────────────────────────────┐
+│  Go Bridge (whatsmeow)                     │
+│  Cross-compiled for android/arm64          │
+│  Pure Go — no CGO, no NDK                  │
+│  WhatsApp protocol ←→ SQLite (messages)    │
+└────────────────────────────────────────────┘
+```
+
+### WhatsApp
+Go bridge runs as a native subprocess. Handles the WhatsApp protocol, writes to SQLite, communicates with Kotlin over localhost WebSocket. Kotlin reads the database directly (read-only, WAL mode).
+
+### Signal
+In-process Java library (Turasa's signal-service-java + libsignal-android). Own SQLite databases for protocol state and messages. WebSocket connection to Signal servers for receiving. Pre-key management for session establishment.
+
+### SMS
+Reads from Android's `content://sms` content provider. Resolves contact names via `content://contacts`. Sends via `SmsManager`. Real-time updates via `ContentObserver`.
+
+## Pairing
+
+**WhatsApp**: Pairs as a companion device (uses one of 4 linked device slots). QR code (default) or pairing code.
+
+**Signal**: Pairs as a linked device via QR code. Primary device: Signal > Settings > Linked Devices > Link New Device.
+
+**SMS**: No pairing needed — reads from the system SMS store.
+
+## Message layouts
+
+Three display modes, configurable separately for DMs and group chats:
+
+**Terminal** (default for DMs): `[18:42 sender] > message`
+
+**Clean** (tap for timestamps): Left/right aligned, no bubbles
+
+**Transcript** (default for groups): `Name | message | time`
+
+## Settings
+
+Organized into sub-pages:
+
+### Chat
+| Setting | Options | Default |
+|---|---|---|
+| Notifications | On / Off | On |
+| DM layout | Terminal / Clean / Transcript | Terminal |
+| Group layout | Terminal / Clean / Transcript | Transcript |
+| Thumbnails | On / Off | On |
+| Chat scroll | Slow / Medium / Fast | Medium |
+| Menu scroll | 1 Item / 2 Items / 3 Items | 1 Item |
+
+### Storage
+| Setting | Options | Default |
+|---|---|---|
+| Messages per chat | 25 / 50 / 100 / 200 | 50 |
+| Message history | 1 / 3 / 7 / 14 / 30 days | 7 |
+
+### Connections
+Per-platform status, refresh connection, and reset (clear data + re-pair).
+
+## Current features
+
+- [x] WhatsApp: text, reactions, replies, media viewing + sending, group chats, contact names, history sync, mute sync from primary device
+- [x] Signal: text messaging, send/receive, device linking, sync messages from primary, reply-to-message, profile name resolution
+- [x] SMS: read conversations, send messages, contact name resolution, per-conversation read tracking (local)
+- [x] All Chats: unified view with platform icons
+- [x] Three message layouts (Terminal / Clean / Transcript)
+- [x] Reply-to-message: swipe right on any WhatsApp or Signal message (hidden on SMS). Quote tap scrolls to the original.
+- [x] Ephemeral retention (configurable count + days)
+- [x] Message notifications (WhatsApp + Signal, configurable, respects WhatsApp mute)
+- [x] Connection status in notification + settings
+- [x] Reset/refresh per connection
+- [x] LP3-native dark theme, monochrome design
+- [x] Shared UI components across all platforms
+- [x] γ (gamma) app launcher icon
+- [x] Scroll dial support (LP3 hardware wheel — configurable speed for chats and menus)
+
+## Known issues
+
+- **Signal incoming DMs/groups unconfirmed**: Sync transcripts (sent messages from primary) work. Incoming sealed sender messages from other users failed certificate validation on libsignal 0.90.0 — upgraded to 0.92.1 which should fix it, but awaiting confirmation from a real incoming message.
+- **WhatsApp contact names**: Names come from push names and may differ from your address book. History sync names can be overwritten by later push name events.
+- **WhatsApp LID JIDs**: Some conversations use WhatsApp's new Linked Identity format. LID→phone resolution works but may occasionally create duplicate entries during the transition.
+- **Signal pre-key upload**: Uses reflection fallback to upload via PushServiceSocket (KeysApi WebSocket path returns 422). Works but fragile.
+- **Signal history sync**: Not implemented — only new messages after pairing appear. Requires backup/restore mechanism.
+- **Signal contact names**: Only phone numbers shown (from sync message metadata). Profile name fetching not implemented.
+- **Signal device name**: Shows as garbled text on primary device's linked devices list. Device name needs to be encrypted with the identity key before sending — currently sent as plaintext.
+- **Dictation**: LP3 has no built-in STT engine. Android 13's `RecognitionService` framework has a known bug where `PermissionChecker.checkCallingPermissionForDataDelivery()` rejects third-party callers with ERROR_INSUFFICIENT_PERMISSIONS (error 9), even with RECORD_AUDIO granted. No code-level workaround exists — requires a system-level STT service or alternative approach.
+- **Voice notes**: Recording implemented but sending untested on device.
+- **Java Records on Android**: Turasa v143 uses Java Records which Android's desugaring can't serialize via Jackson. Fixed with `AndroidRecordFix.kt` (reflection patch on JsonUtil's ObjectMapper).
+
+
+## Planned features
+
+- [ ] Signal history sync (backup download + restore)
+- [ ] Signal media send (currently a stub; means Signal reply-with-media silently drops the media, though text replies work)
+- [ ] MMS support (picture messages)
+- [ ] Dictation (requires system-level STT or alternative approach)
+- [ ] Voice note send/receive
+- [ ] Sticker rendering
+- [ ] Option to set Photon as default SMS app (enables writing `read`/`seen` to the Android SMS provider so read state syncs with other SMS clients; currently tracked locally via SharedPreferences)
+- [ ] Message search
+- [ ] Public Sans font (LP3 ecosystem font)
+- [ ] New conversation / compose message
+
+## Technical notes
+
+- Go binary cross-compiled with `CGO_ENABLED=0` using `modernc.org/sqlite` (pure Go SQLite). No NDK required.
+- Packaged as `libgobridge.so` in `jniLibs/arm64-v8a/` for Android extraction.
+- SQLite uses WAL mode + `busy_timeout=5000` to prevent concurrent access errors.
+- Signal uses a self-signed CA (bundled as `res/raw/signal_ca.pem`).
+- Kyber pre-keys stored as `is_last_resort=1` to prevent deletion after first use.
+- Kotlin 2.1.0, AGP 8.5.2, core library desugaring enabled.
+
+## License
+
+MIT
