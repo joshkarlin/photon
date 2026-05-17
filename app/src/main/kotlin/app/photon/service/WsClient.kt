@@ -115,6 +115,12 @@ class WsClient(private val port: Int = 8765) {
         })
     }
 
+    suspend fun retryMessage(messageId: String): WsEvent {
+        return request("retry_message", buildJsonObject {
+            put("message_id", messageId)
+        })
+    }
+
     suspend fun sendReaction(jid: String, messageId: String, senderJid: String, emoji: String): WsEvent {
         return request("send_reaction", buildJsonObject {
             put("jid", jid)

@@ -169,6 +169,14 @@ func (b *Bridge) UpdateMessageStatus(id, status string) error {
 	return err
 }
 
+// UpdateMessageStatusAndTimestamp updates both fields together. Used when a
+// "sending" row needs to flip to "sent" and adopt the server-confirmed
+// timestamp on success.
+func (b *Bridge) UpdateMessageStatusAndTimestamp(id, status string, ts int64) error {
+	_, err := b.msgDB.Exec(`UPDATE messages SET status = ?, timestamp = ? WHERE id = ?`, status, ts, id)
+	return err
+}
+
 // UpdateMessageEdit updates a message's text after an edit.
 func (b *Bridge) UpdateMessageEdit(id, newText string, editVersion int) error {
 	_, err := b.msgDB.Exec(`UPDATE messages SET text_body = ?, edit_version = ? WHERE id = ?`, newText, editVersion, id)

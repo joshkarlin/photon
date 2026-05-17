@@ -13,11 +13,18 @@ import android.telephony.SmsManager
 import android.util.Log
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.stateIn
 
-class SmsRepository(private val context: Context) {
+class SmsRepository(private val context: Context, scope: CoroutineScope) {
 
     private val resolver: ContentResolver = context.contentResolver
     private val contactCache = mutableMapOf<String, String>()
@@ -29,6 +36,17 @@ class SmsRepository(private val context: Context) {
 
     private fun lastReadMillis(address: String): Long =
         readPrefs.getLong(normalizeAddress(address), 0L)
+
+    /**
+     * Drop the cached phone→name lookups and nudge the SMS provider so the
+     * conversations flow re-emits with refreshed contact names. Called after
+     * Photon's in-app contact editor writes to ContactsContract — without it
+     * the cached `+447...` would persist until the next SMS write.
+     */
+    fun refreshContactNames() {
+        contactCache.clear()
+        resolver.notifyChange(Telephony.Sms.CONTENT_URI, null)
+    }
 
     fun markAsRead(address: String) {
         val normalized = normalizeAddress(address)
@@ -56,7 +74,7 @@ class SmsRepository(private val context: Context) {
         resolver.notifyChange(Telephony.Sms.CONTENT_URI, null)
     }
 
-    fun conversations(): Flow<List<Conversation>> = callbackFlow {
+    val conversations: StateFlow<List<Conversation>?> = callbackFlow<List<Conversation>?> {
         val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
             override fun onChange(selfChange: Boolean) {
                 trySend(loadConversations())
@@ -65,7 +83,9 @@ class SmsRepository(private val context: Context) {
         resolver.registerContentObserver(Telephony.Sms.CONTENT_URI, true, observer)
         send(loadConversations())
         awaitClose { resolver.unregisterContentObserver(observer) }
-    }
+    }.flowOn(Dispatchers.IO)
+        .distinctUntilChanged()
+        .stateIn(scope, SharingStarted.Eagerly, null)
 
     fun messages(address: String): Flow<List<Message>> = callbackFlow {
         val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
@@ -76,7 +96,7 @@ class SmsRepository(private val context: Context) {
         resolver.registerContentObserver(Telephony.Sms.CONTENT_URI, true, observer)
         send(loadMessages(address))
         awaitClose { resolver.unregisterContentObserver(observer) }
-    }
+    }.flowOn(Dispatchers.IO).distinctUntilChanged()
 
     fun getConversation(address: String): Conversation? {
         return loadConversations().find { it.jid == normalizeAddress(address) }
@@ -90,6 +110,35 @@ class SmsRepository(private val context: Context) {
         } else {
             smsManager.sendMultipartTextMessage(address, null, parts, null, null)
         }
+    }
+
+    /**
+     * Re-attempt a failed SMS. Looks up the original row in the provider by
+     * _id, grabs its address + body, and re-submits via SmsManager. The
+     * original failed row stays in the provider (we can't delete it without
+     * being the default SMS app), so the chat will briefly show both the
+     * failed and the new outbox/sent row until the failed one rolls out of
+     * the limit window. Acceptable trade-off vs. silent failure.
+     */
+    fun retryMessage(messageId: String) {
+        val id = messageId.toLongOrNull() ?: return
+        var address: String? = null
+        var body: String? = null
+        resolver.query(
+            Telephony.Sms.CONTENT_URI,
+            arrayOf(Telephony.Sms.ADDRESS, Telephony.Sms.BODY),
+            "${Telephony.Sms._ID} = ?",
+            arrayOf(id.toString()),
+            null,
+        )?.use { c ->
+            if (c.moveToFirst()) {
+                address = c.getString(0)
+                body = c.getString(1)
+            }
+        }
+        val addr = address ?: return
+        val text = body ?: return
+        sendMessage(addr, text)
     }
 
     private fun loadConversations(): List<Conversation> {
@@ -190,7 +239,20 @@ class SmsRepository(private val context: Context) {
                 val body = c.getString(iBody) ?: ""
                 val date = c.getLong(iDate)
                 val type = c.getInt(iType)
-                val isFromMe = type == Telephony.Sms.MESSAGE_TYPE_SENT
+                // Anything not INBOX is something we sent (SENT / OUTBOX /
+                // FAILED / QUEUED / DRAFT all live on the outgoing side).
+                // Previously only SENT counted as `isFromMe`, so a queued
+                // or failed message showed up as if the OTHER party sent it.
+                val isFromMe = type != Telephony.Sms.MESSAGE_TYPE_INBOX
+                val status = when (type) {
+                    Telephony.Sms.MESSAGE_TYPE_INBOX -> "received"
+                    Telephony.Sms.MESSAGE_TYPE_SENT -> "sent"
+                    Telephony.Sms.MESSAGE_TYPE_FAILED -> "failed"
+                    Telephony.Sms.MESSAGE_TYPE_OUTBOX,
+                    Telephony.Sms.MESSAGE_TYPE_QUEUED,
+                    Telephony.Sms.MESSAGE_TYPE_DRAFT -> "sending"
+                    else -> "sent"
+                }
 
                 messages.add(Message(
                     id = id,
@@ -207,7 +269,7 @@ class SmsRepository(private val context: Context) {
                     replyToId = null,
                     editVersion = 0,
                     isFromMe = isFromMe,
-                    status = if (isFromMe) "sent" else "received",
+                    status = status,
                 ))
 
                 if (messages.size >= 50) break

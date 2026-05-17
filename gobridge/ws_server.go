@@ -79,6 +79,8 @@ func (b *Bridge) handleRequest(ctx context.Context, msg WsMessage) WsMessage {
 	switch msg.Type {
 	case "send_message":
 		payload, err = b.handleSendMessage(ctx, msg.Payload)
+	case "retry_message":
+		payload, err = b.handleRetryMessage(ctx, msg.Payload)
 	case "send_media":
 		payload, err = b.handleSendMedia(ctx, msg.Payload)
 	case "send_reaction":
@@ -129,6 +131,17 @@ func (b *Bridge) handleSendMessage(ctx context.Context, raw json.RawMessage) (js
 		return nil, err
 	}
 	return mustMarshal(SendMessageResponse{MessageID: id, Timestamp: ts}), nil
+}
+
+func (b *Bridge) handleRetryMessage(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var p RetryMessagePayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	if err := b.RetryTextMessage(ctx, p.MessageID); err != nil {
+		return nil, err
+	}
+	return mustMarshal(struct{}{}), nil
 }
 
 func (b *Bridge) handleSendMedia(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {

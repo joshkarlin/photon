@@ -7,15 +7,16 @@ import app.photon.service.PhotonService
 import app.photon.ui.shared.ChatListContent
 
 @Composable
-fun SignalChatListScreen(onChat: (String) -> Unit, onBack: () -> Unit) {
+fun SignalChatListScreen(onChat: (String) -> Unit, onSwitch: () -> Unit, onSettings: () -> Unit) {
     val repo = PhotonService._signalRepository ?: return
-    val conversations by repo.conversations().collectAsState(initial = null)
+    val conversations by repo.conversations.collectAsState()
 
     ChatListContent(
         title = "SIGNAL",
+        onTitleClick = onSwitch,
+        onSettings = onSettings,
         conversations = conversations,
         onChat = onChat,
-        onBack = onBack,
         emptyMessage = "NO MESSAGES YET",
     )
 }

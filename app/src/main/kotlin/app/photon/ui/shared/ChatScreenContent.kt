@@ -60,6 +60,8 @@ fun ChatScreenContent(
     onMediaTap: ((Message) -> Unit)? = null,
     onMessagesLoaded: ((List<Message>) -> Unit)? = null,
     onReact: ((messageId: String, senderJid: String, emoji: String) -> Unit)? = null,
+    onRetry: ((messageId: String) -> Unit)? = null,
+    onTitleClick: (() -> Unit)? = null,
     supportsReply: Boolean = true,
 ) {
     val context = LocalContext.current
@@ -108,14 +110,19 @@ fun ChatScreenContent(
         ) {
             Text("<", fontSize = 18.sp, color = Color(0xFF666666),
                 modifier = Modifier.align(Alignment.CenterStart).clickable(onClick = onBack).padding(end = 16.dp))
+            val titleMod = if (onTitleClick != null) {
+                Modifier.align(Alignment.Center).clickable(onClick = onTitleClick)
+            } else {
+                Modifier.align(Alignment.Center)
+            }
             Text(
                 text = title.uppercase(),
                 fontSize = 13.sp, letterSpacing = 3.sp, color = Color(0xFF666666),
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.align(Alignment.Center),
+                modifier = titleMod,
             )
         }
-        HorizontalDivider(color = Color(0xFF1A1A1A), modifier = Modifier.padding(horizontal = 20.dp))
+        HorizontalDivider(color = Color(0xFF1A1A1A))
 
         // Messages
         LazyColumn(
@@ -130,7 +137,12 @@ fun ChatScreenContent(
             items(messages, key = { it.id }) { msg ->
                 val senderName = participantNames[msg.senderJid]
                 val quotedSenderName = msg.replyToPreview?.let { q ->
-                    if (q.isFromMe) null else participantNames[q.senderJid]
+                    when {
+                        q.isFromMe -> null
+                        // DMs don't populate participantNames — the conversation
+                        // title is the only other party, so use that.
+                        else -> participantNames[q.senderJid] ?: title.takeIf { !isGroup }
+                    }
                 }
                 val handleMediaTap = {
                     keyboardController?.hide()
@@ -146,6 +158,9 @@ fun ChatScreenContent(
                         }
                     }
                 }
+                val handleRetry: (() -> Unit)? = onRetry?.let { cb ->
+                    { cb(msg.id) }
+                }
                 SwipeToReply(
                     enabled = supportsReply,
                     onReply = { replyingTo = msg },
@@ -156,18 +171,21 @@ fun ChatScreenContent(
                             onLongPress = handleLongPress, senderName = senderName,
                             quotedSenderName = quotedSenderName,
                             onReplyPreviewTap = handleReplyPreviewTap,
+                            onRetry = handleRetry,
                         )
                         MessageLayout.CLEAN -> CleanMessageRow(
                             msg = msg, isGroup = isGroup, onMediaTap = handleMediaTap,
                             onLongPress = handleLongPress, senderName = senderName,
                             quotedSenderName = quotedSenderName,
                             onReplyPreviewTap = handleReplyPreviewTap,
+                            onRetry = handleRetry,
                         )
                         MessageLayout.TRANSCRIPT -> TranscriptMessageRow(
                             msg = msg, isGroup = isGroup, senderName = senderName,
                             onMediaTap = handleMediaTap, onLongPress = handleLongPress,
                             quotedSenderName = quotedSenderName,
                             onReplyPreviewTap = handleReplyPreviewTap,
+                            onRetry = handleRetry,
                         )
                     }
                 }

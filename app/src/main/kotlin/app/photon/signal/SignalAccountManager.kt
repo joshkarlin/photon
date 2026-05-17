@@ -19,6 +19,7 @@ import org.signal.libsignal.protocol.util.Medium
 import org.whispersystems.signalservice.api.account.AccountAttributes
 import org.whispersystems.signalservice.api.account.PreKeyCollection
 import org.whispersystems.signalservice.api.provisioning.ProvisioningSocket
+import org.whispersystems.signalservice.api.util.DeviceNameUtil
 import org.whispersystems.signalservice.internal.push.ProvisionMessage
 import org.whispersystems.signalservice.internal.push.PushServiceSocket
 import java.io.Closeable
@@ -145,6 +146,14 @@ class SignalAccountManager(
             val aciPreKeyCollection = generatePreKeyCollection(aciIdentityKeyPair)
             val pniPreKeyCollection = generatePreKeyCollection(pniIdentityKeyPair)
 
+            // Signal's primary device expects the device name field to be a base64
+            // DeviceName proto (ephemeral pubkey + synthetic IV + AES-encrypted name),
+            // not plaintext. Plaintext shows up on the primary's linked-devices list
+            // as truncated garbage like "Photog==" because the UI base64-decodes it.
+            val encryptedDeviceName = DeviceNameUtil.encryptDeviceName(
+                "Photon", aciIdentityKeyPair.privateKey,
+            )
+
             val deviceId = pushSocket.finishNewDeviceRegistration(
                 provisioningCode,
                 AccountAttributes(
@@ -160,10 +169,10 @@ class SignalAccountManager(
                         attachmentBackfill = true,
                         spqr = true,
                     ),
-                    true,       // discoverableByPhoneNumber
-                    "Photon",   // device name
+                    true,              // discoverableByPhoneNumber
+                    encryptedDeviceName,
                     pniRegistrationId,
-                    null,       // recoveryPassword
+                    null,              // recoveryPassword
                 ),
                 aciPreKeyCollection,
                 pniPreKeyCollection,
@@ -297,6 +306,28 @@ class SignalAccountManager(
     }
 
     fun logout() {
+        // Best-effort: ask the Signal server to delete this linked device so the
+        // primary stops sending it storage-manifest sync messages. Without this,
+        // our deviceId stays registered and primary keeps queueing sync for a
+        // device that will never drain it — which is exactly the "sync loop"
+        // we've been seeing in logs.
+        try {
+            val deviceId = credentials.deviceId
+            if (credentials.isRegistered() && deviceId > 1) {
+                val pushSocket = PushServiceSocket(config, credentials, SignalConfig.USER_AGENT, false)
+                val method = pushSocket.javaClass.getDeclaredMethod(
+                    "makeServiceRequest", String::class.java, String::class.java, String::class.java,
+                )
+                method.isAccessible = true
+                method.invoke(pushSocket, "/v1/devices/$deviceId", "DELETE", "")
+                Log.i(TAG, "Removed linked device $deviceId from Signal server")
+            }
+        } catch (e: Exception) {
+            // The device may already be unlinked (primary unlinked us), credentials
+            // may be stale, or the network may be down. Fall through to local clear
+            // either way — the user's next action is to re-link anyway.
+            Log.w(TAG, "Server-side device removal failed (continuing with local clear): ${e.message}")
+        }
         credentials.clear()
         _signalState.value = "logged_out"
     }

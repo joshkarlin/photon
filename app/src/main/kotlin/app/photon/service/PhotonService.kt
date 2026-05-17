@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Intent
 import android.os.IBinder
 import android.util.Log
+import androidx.compose.runtime.mutableStateOf
 import androidx.core.app.NotificationCompat
 import app.photon.MainActivity
 import app.photon.R
@@ -43,7 +44,7 @@ class PhotonService : Service() {
 
         goBridge = GoBridge(this)
         wsClient = WsClient(goBridge.port)
-        chatRepository = ChatRepository(PhotonDatabase(this), wsClient)
+        chatRepository = ChatRepository(PhotonDatabase(this), wsClient, scope)
 
         // Expose as singletons for UI access
         _goBridge = goBridge
@@ -52,7 +53,7 @@ class PhotonService : Service() {
         _database = PhotonDatabase(this)
 
         // Initialize SMS
-        _smsRepository = SmsRepository(this)
+        _smsRepository = SmsRepository(this, scope)
 
         // Initialize Signal components
         AndroidRecordFix.apply()
@@ -64,7 +65,7 @@ class PhotonService : Service() {
         _signalManager = SignalAccountManager(signalProtocolStore, signalCreds, signalProtocolDb)
         val signalMessageDb = SignalMessageDatabase(this)
         _signalSender = SignalMessageSender(signalCreds, signalProtocolStore, signalMessageDb)
-        _signalRepository = SignalRepository(signalMessageDb, signalCreds, _signalSender)
+        _signalRepository = SignalRepository(signalMessageDb, signalCreds, _signalSender, scope)
         _signalReceiver = SignalMessageReceiver(this, signalCreds, signalProtocolStore, signalMessageDb)
 
         // Start Signal message receiver if already paired
@@ -147,23 +148,42 @@ class PhotonService : Service() {
 
     private suspend fun listenForWhatsAppMessages() {
         _wsClient?.events?.collect { evt ->
-            if (evt.type == "new_message") {
-                val isFromMe = evt.payload["is_from_me"]?.toString()?.trim('"')
-                if (isFromMe == "true") return@collect
+            when (evt.type) {
+                "new_message" -> {
+                    val isFromMe = evt.payload["is_from_me"]?.toString()?.trim('"')
+                    if (isFromMe == "true") return@collect
 
-                val convJid = evt.payload["conversation_jid"]?.toString()?.trim('"') ?: return@collect
-                val conversation = _chatRepository?.getConversation(convJid)
-                if (conversation?.isMuted == true) return@collect
+                    val convJid = evt.payload["conversation_jid"]?.toString()?.trim('"') ?: return@collect
+                    // Skip WhatsApp status-broadcast JIDs ("status@broadcast") and the
+                    // server-side "0@" metadata pseudo-chat — they shouldn't ring.
+                    if (convJid.startsWith("status@") || convJid.startsWith("0@") ||
+                        convJid.contains("@broadcast")) return@collect
 
-                val senderName = evt.payload["sender_name"]?.toString()?.trim('"')
-                val body = evt.payload["text_body"]?.toString()?.trim('"')
-                val name = senderName?.takeIf { it.isNotBlank() }
-                    ?: conversation?.name
-                    ?: convJid.substringBefore("@")
+                    val conversation = _chatRepository?.getConversation(convJid)
+                    if (conversation?.isMuted == true) return@collect
 
-                NotificationHelper.showMessageNotification(
-                    this@PhotonService, name, body, "WhatsApp", convJid,
-                )
+                    val senderName = evt.payload["sender_name"]?.toString()?.trim('"')
+                    val body = evt.payload["text_body"]?.toString()?.trim('"')
+                    val name = senderName?.takeIf { it.isNotBlank() }
+                        ?: conversation?.name
+                        ?: convJid.substringBefore("@")
+
+                    NotificationHelper.showMessageNotification(
+                        this@PhotonService, name, body, "WhatsApp", convJid,
+                    )
+                }
+                "receipt" -> {
+                    // Reading on any linked device fires a read receipt; clear the
+                    // Photon notification for that conversation so the banner doesn't
+                    // linger after the message has been consumed.
+                    val receiptType = evt.payload["type"]?.toString()?.trim('"')
+                    if (receiptType == "read") {
+                        val convJid = evt.payload["conversation_jid"]?.toString()?.trim('"')
+                        if (!convJid.isNullOrBlank()) {
+                            NotificationHelper.cancelForConversation(this@PhotonService, convJid)
+                        }
+                    }
+                }
             }
         }
     }
@@ -199,10 +219,29 @@ class PhotonService : Service() {
     companion object {
         private const val NOTIFICATION_ID = 1
 
-        // Simple service locator — the app is small enough to not need DI
+        // Simple service locator — the app is small enough to not need DI.
+        // The three repository singletons that the chat-list UIs read are
+        // backed by Compose state so that when PhotonService.onCreate
+        // populates them (slightly after MainActivity has already composed),
+        // the screens reading them are automatically invalidated and rebind
+        // to the real flows. Without this, AllChatsScreen would lock onto a
+        // null fallback flow until something else triggered recomposition.
+        private val _chatRepoState = mutableStateOf<ChatRepository?>(null)
+        var _chatRepository: ChatRepository?
+            get() = _chatRepoState.value
+            set(value) { _chatRepoState.value = value }
+
+        private val _signalRepoState = mutableStateOf<SignalRepository?>(null)
+        var _signalRepository: SignalRepository?
+            get() = _signalRepoState.value
+            set(value) { _signalRepoState.value = value }
+
+        private val _smsRepoState = mutableStateOf<SmsRepository?>(null)
+        var _smsRepository: SmsRepository?
+            get() = _smsRepoState.value
+            set(value) { _smsRepoState.value = value }
+
         var _wsClient: WsClient? = null
-            private set
-        var _chatRepository: ChatRepository? = null
             private set
         var _database: PhotonDatabase? = null
             private set
@@ -210,14 +249,12 @@ class PhotonService : Service() {
             private set
         var _signalCredentials: SignalCredentials? = null
             private set
-        var _signalRepository: SignalRepository? = null
-            private set
         var _signalReceiver: SignalMessageReceiver? = null
             private set
         var _signalSender: SignalMessageSender? = null
             private set
-        var _smsRepository: SmsRepository? = null
-            private set
+        /** Lifecycle: set by the receiver when the auth WS comes up; cleared on stop. */
+        @Volatile var _signalGroupManager: app.photon.signal.SignalGroupV2Manager? = null
         var _goBridge: GoBridge? = null
             private set
 

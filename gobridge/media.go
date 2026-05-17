@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
@@ -85,45 +86,20 @@ func (b *Bridge) saveThumbnail(msgID string, data []byte) string {
 }
 
 // UploadAndSend uploads a file and sends it as a media message.
+//
+// Mirrors SendTextMessage's pre-insert pattern so a failed upload or send
+// leaves a "failed" row in the chat instead of vanishing silently. The
+// row goes in with status="sending" before the upload starts so users see
+// it the instant they tap send.
 func (b *Bridge) UploadAndSend(jid, filePath, mimeType, caption, replyToID string) (string, int64, error) {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return "", 0, fmt.Errorf("read file failed: %w", err)
-	}
-
 	targetJID, err := parseJID(jid)
 	if err != nil {
 		return "", 0, err
 	}
 
-	// Determine media type
-	mediaType := whatsmeow.MediaDocument
-	switch {
-	case strings.HasPrefix(mimeType, "image/"):
-		mediaType = whatsmeow.MediaImage
-	case strings.HasPrefix(mimeType, "video/"):
-		mediaType = whatsmeow.MediaVideo
-	case strings.HasPrefix(mimeType, "audio/"):
-		mediaType = whatsmeow.MediaAudio
-	}
+	id := b.client.GenerateMessageID()
+	ts := time.Now().Unix()
 
-	// Upload
-	ctx := context.Background()
-	resp, err := b.client.Upload(ctx, data, mediaType)
-	if err != nil {
-		return "", 0, fmt.Errorf("upload failed: %w", err)
-	}
-
-	// Build message based on media type
-	msg := buildMediaMessage(resp, mimeType, caption, replyToID, data)
-
-	// Send
-	sendResp, err := b.client.SendMessage(ctx, targetJID, msg)
-	if err != nil {
-		return "", 0, fmt.Errorf("send failed: %w", err)
-	}
-
-	// Determine content type for DB
 	contentType := "document"
 	switch {
 	case strings.HasPrefix(mimeType, "image/"):
@@ -134,22 +110,69 @@ func (b *Bridge) UploadAndSend(jid, filePath, mimeType, caption, replyToID strin
 		contentType = "audio"
 	}
 
-	// Store in local DB so it shows in chat — keep local file path as media_url
 	b.InsertMessage(&MessageRow{
-		ID:              sendResp.ID,
+		ID:              id,
 		ConversationJID: jid,
 		SenderJID:       b.client.Store.ID.String(),
-		Timestamp:       sendResp.Timestamp.Unix(),
+		Timestamp:       ts,
 		ContentType:     contentType,
 		TextBody:        sql.NullString{String: caption, Valid: caption != ""},
 		MediaMime:       sql.NullString{String: mimeType, Valid: true},
 		MediaURL:        sql.NullString{String: filePath, Valid: true},
+		ReplyToID:       sql.NullString{String: replyToID, Valid: replyToID != ""},
 		IsFromMe:        true,
-		Status:          "sent",
+		Status:          "sending",
 	})
-	b.UpsertConversation(jid, "", false, sendResp.ID, sendResp.Timestamp.Unix())
+	b.UpsertConversation(jid, "", false, id, ts)
+	b.BroadcastEvent("new_message", NewMessageEvent{
+		ConversationJID: jid, MessageID: id, TextBody: caption,
+		ContentType: contentType, IsFromMe: true,
+	})
 
-	return sendResp.ID, sendResp.Timestamp.Unix(), nil
+	markFailed := func() {
+		b.UpdateMessageStatus(id, "failed")
+		b.BroadcastEvent("message_updated", MessageUpdatedEvent{
+			ConversationJID: jid, MessageID: id,
+		})
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		markFailed()
+		return id, ts, fmt.Errorf("read file failed: %w", err)
+	}
+
+	mediaType := whatsmeow.MediaDocument
+	switch {
+	case strings.HasPrefix(mimeType, "image/"):
+		mediaType = whatsmeow.MediaImage
+	case strings.HasPrefix(mimeType, "video/"):
+		mediaType = whatsmeow.MediaVideo
+	case strings.HasPrefix(mimeType, "audio/"):
+		mediaType = whatsmeow.MediaAudio
+	}
+
+	ctx := context.Background()
+	resp, err := b.client.Upload(ctx, data, mediaType)
+	if err != nil {
+		markFailed()
+		return id, ts, fmt.Errorf("upload failed: %w", err)
+	}
+
+	msg := buildMediaMessage(resp, mimeType, caption, replyToID, data)
+	sendResp, err := b.client.SendMessage(ctx, targetJID, msg, whatsmeow.SendRequestExtra{ID: id})
+	if err != nil {
+		markFailed()
+		return id, ts, fmt.Errorf("send failed: %w", err)
+	}
+
+	b.UpdateMessageStatusAndTimestamp(id, "sent", sendResp.Timestamp.Unix())
+	b.UpsertConversation(jid, "", false, id, sendResp.Timestamp.Unix())
+	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
+		ConversationJID: jid, MessageID: id,
+	})
+
+	return id, sendResp.Timestamp.Unix(), nil
 }
 
 func buildMediaMessage(resp whatsmeow.UploadResponse, mimeType, caption, replyToID string, data []byte) *waE2E.Message {

@@ -16,13 +16,24 @@ import java.io.File
 class PhotonDatabase(context: Context) {
     private val dbPath = File(context.filesDir, "messages.db").absolutePath
 
+    // Set to true the first time we successfully open the DB. Once set, we know
+    // the file is supposed to exist; subsequent "missing" reads should be
+    // treated as transient (e.g. file-based-encryption blocking access while
+    // the phone is locked) rather than as "DB never created".
+    @Volatile private var hasOpenedOnce: Boolean = false
+
     private fun open(): SQLiteDatabase? {
         val file = File(dbPath)
-        if (!file.exists()) return null
+        if (!file.exists()) {
+            if (hasOpenedOnce) {
+                throw IllegalStateException("messages.db not accessible (FBE-locked?)")
+            }
+            return null
+        }
         return SQLiteDatabase.openDatabase(
             dbPath, null,
             SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.ENABLE_WRITE_AHEAD_LOGGING,
-        )
+        ).also { hasOpenedOnce = true }
     }
 
     fun getConversations(): List<Conversation> {
@@ -54,10 +65,13 @@ class PhotonDatabase(context: Context) {
     fun getMessages(conversationJid: String, limit: Int = 50, beforeTimestamp: Long? = null): List<Message> {
         val db = open() ?: return emptyList()
         return db.use { d ->
+            // Tiebreak on _rowid_ so messages sharing a wall-clock second
+            // (storage is in seconds) still render in insertion order
+            // instead of swapping unpredictably between polls.
             val query = if (beforeTimestamp != null) {
-                "SELECT * FROM messages WHERE conversation_jid = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT ?"
+                "SELECT * FROM messages WHERE conversation_jid = ? AND timestamp < ? ORDER BY timestamp DESC, _rowid_ DESC LIMIT ?"
             } else {
-                "SELECT * FROM messages WHERE conversation_jid = ? ORDER BY timestamp DESC LIMIT ?"
+                "SELECT * FROM messages WHERE conversation_jid = ? ORDER BY timestamp DESC, _rowid_ DESC LIMIT ?"
             }
             val args = if (beforeTimestamp != null) {
                 arrayOf(conversationJid, beforeTimestamp.toString(), limit.toString())

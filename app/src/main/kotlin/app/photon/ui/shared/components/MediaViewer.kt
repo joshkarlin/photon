@@ -181,6 +181,11 @@ private fun AudioPlayer(file: File, onDismiss: () -> Unit) {
                 elapsed = 0
                 player.seekTo(0)
             }
+            // Voice notes are short and almost always intended to be heard
+            // immediately — autoplay matches every other messaging app and
+            // saves a tap. User can still STOP via the button below.
+            player.start()
+            playing = true
         } catch (e: Exception) {
             android.util.Log.e("AudioPlayer", "Failed to prepare", e)
         }

@@ -254,12 +254,22 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 }
 
 func (b *Bridge) handleReceipt(evt *events.Receipt) {
+	// Resolve LID → PN so the JID matches the conversation row written by
+	// handleMessage (which stores conversations under the phone-based JID).
+	// Without this, ReadSelf receipts for LID chats fail to clear unread.
+	chatJID := evt.Chat.String()
+	if evt.Chat.Server == types.HiddenUserServer {
+		if pn, err := b.client.Store.LIDs.GetPNForLID(context.Background(), evt.Chat); err == nil && !pn.IsEmpty() {
+			chatJID = pn.String()
+		}
+	}
+
 	status := ""
 	switch evt.Type {
 	case types.ReceiptTypeRead, types.ReceiptTypeReadSelf:
 		status = "read"
-		// Reset unread count when messages are read (including on other devices)
-		b.ResetUnread(evt.Chat.String())
+		// Reset unread count when messages are read (including on other devices).
+		b.ResetUnread(chatJID)
 	case types.ReceiptTypeDelivered:
 		status = "delivered"
 	default:
@@ -272,7 +282,6 @@ func (b *Bridge) handleReceipt(evt *events.Receipt) {
 		b.UpdateMessageStatus(string(id), status)
 	}
 
-	chatJID := evt.Chat.String()
 	b.BroadcastEvent("receipt", ReceiptEvent{
 		ConversationJID: chatJID,
 		MessageIDs:      ids,

@@ -23,9 +23,9 @@ import app.photon.service.PhotonService
 import app.photon.ui.shared.ChatListContent
 
 @Composable
-fun ChatListScreen(onChat: (String) -> Unit, onBack: () -> Unit) {
+fun ChatListScreen(onChat: (String) -> Unit, onSwitch: () -> Unit, onSettings: () -> Unit) {
     val repo = PhotonService._chatRepository ?: return
-    val rawConversations by repo.conversations().collectAsState(initial = null)
+    val rawConversations by repo.conversations.collectAsState()
     val conversations = rawConversations?.filter { conv ->
         !conv.jid.startsWith("status@") &&
         !conv.jid.startsWith("0@") &&
@@ -34,9 +34,10 @@ fun ChatListScreen(onChat: (String) -> Unit, onBack: () -> Unit) {
 
     ChatListContent(
         title = "WHATSAPP",
+        onTitleClick = onSwitch,
+        onSettings = onSettings,
         conversations = conversations,
         onChat = onChat,
-        onBack = onBack,
         emptyContent = { WhatsAppSyncStatus() },
     )
 }

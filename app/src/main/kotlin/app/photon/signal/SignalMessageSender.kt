@@ -13,6 +13,7 @@ import org.whispersystems.signalservice.api.crypto.ContentHint
 import org.whispersystems.signalservice.api.keys.KeysApi
 import org.whispersystems.signalservice.api.message.MessageApi
 import org.whispersystems.signalservice.api.messages.SignalServiceDataMessage
+import org.whispersystems.signalservice.api.messages.multidevice.RequestMessage
 import org.whispersystems.signalservice.api.messages.multidevice.SentTranscriptMessage
 import org.whispersystems.signalservice.api.messages.multidevice.SignalServiceSyncMessage
 import org.whispersystems.signalservice.api.push.SignalServiceAddress
@@ -110,72 +111,362 @@ class SignalMessageSender(
         }
     }
 
+    /**
+     * Send a text message. The local DB row is written BEFORE the network
+     * attempt so the UI sees the outgoing message instantly, with status
+     * transitioning from "sending" → "sent" / "failed". Failures leave the
+     * row in place with status="failed" so the user can retry from the UI;
+     * exceptions are NOT re-thrown so the calling coroutine doesn't have to
+     * catch them just to keep the UI alive.
+     *
+     * Routes to either DM (ACI-shaped jid) or GroupV2 (base64 group id with
+     * a stored master_key). Groups without a stored master_key fail loudly —
+     * we can't synthesize one, so the user has to wait for an incoming
+     * group message to seed the master key before they can send.
+     */
     fun sendTextMessage(conversationJid: String, text: String, replyToId: String? = null) {
-        try {
-            val aci = ServiceId.ACI.parseOrNull(conversationJid)
-                ?: throw IllegalArgumentException("Invalid ACI: $conversationJid")
+        val timestamp = System.currentTimeMillis()
+        val replyPrefix = replyToId?.substringBeforeLast("_")
+        // Prefix "{authorAci}_{timestampMs}" must stay stable so quote lookups
+        // via findMessageByPrefix still match. The random suffix only exists
+        // to avoid local PK collisions on rapid-fire sends with the same ms.
+        val messageId = "${credentials.aciString}_${timestamp}_${UUID.randomUUID().toString().take(8)}"
 
-            val timestamp = System.currentTimeMillis()
-            val recipientAddress = SignalServiceAddress(aci)
+        val aci = ServiceId.ACI.parseOrNull(conversationJid)
+        val groupMeta = if (aci == null) messageDb.getGroupMeta(conversationJid) else null
 
-            // Normalize to the stable prefix "{authorAci}_{timestampMs}". Local IDs have
-            // a random suffix which we must not persist in reply_to_id — hydration looks
-            // up the quoted message by prefix match.
-            val replyPrefix = replyToId?.substringBeforeLast("_")
-            val quote = replyPrefix?.let { buildQuote(it) }
-            val builder = SignalServiceDataMessage.newBuilder()
-                .withBody(text)
-                .withTimestamp(timestamp)
-            if (quote != null) builder.withQuote(quote)
-            val message = builder.build()
-
-            val sender = getOrCreateSender()
-            sender.sendDataMessage(
-                recipientAddress,
-                null,   // sealed sender access
-                ContentHint.RESENDABLE,
-                message,
-                SignalServiceMessageSender.IndividualSendEvents.EMPTY,
-                false,
-                false,
+        if (aci == null && groupMeta == null) {
+            Log.w(TAG, "Refusing send: $conversationJid is neither an ACI nor a known group")
+            messageDb.insertMessage(
+                id = messageId, conversationJid = conversationJid,
+                senderJid = credentials.aciString ?: "",
+                timestamp = timestamp / 1000, contentType = "text",
+                textBody = text, replyToId = replyPrefix,
+                isFromMe = true, status = "failed",
             )
+            messageDb.updateConversationLastMessage(conversationJid, messageId, timestamp / 1000)
+            return
+        }
 
-            // Send sync transcript so other devices know we sent this
+        messageDb.insertMessage(
+            id = messageId, conversationJid = conversationJid,
+            senderJid = credentials.aciString ?: "",
+            timestamp = timestamp / 1000, contentType = "text",
+            textBody = text, replyToId = replyPrefix,
+            isFromMe = true, status = "sending",
+        )
+        messageDb.updateConversationLastMessage(conversationJid, messageId, timestamp / 1000)
+
+        try {
+            if (aci != null) {
+                sendDmInternal(aci, conversationJid, text, timestamp, replyPrefix)
+            } else {
+                sendGroupInternal(conversationJid, groupMeta!!, text, timestamp, replyPrefix)
+            }
+            messageDb.updateMessageStatus(messageId, "sent")
+            Log.i(TAG, "Sent $messageId to $conversationJid")
+        } catch (e: Exception) {
+            Log.e(TAG, "Send failed for $messageId; row marked failed", e)
+            messageDb.updateMessageStatus(messageId, "failed")
+            invalidate()
+        }
+    }
+
+    /**
+     * One-to-one DataMessage send. Attaches the recipient's E.164 to the
+     * address when known — Desktop / older clients index by (ACI ∪ E.164)
+     * and otherwise spawn an "Unknown contact" thread. SentTranscript is
+     * sent so other linked devices show the outgoing in the right thread.
+     */
+    private fun sendDmInternal(
+        aci: ServiceId.ACI,
+        conversationJid: String,
+        text: String,
+        timestamp: Long,
+        replyPrefix: String?,
+    ) {
+        val recipientPhone = messageDb.getContact(conversationJid)?.phone
+        val recipientAddress = if (recipientPhone != null) {
+            SignalServiceAddress(aci, recipientPhone)
+        } else SignalServiceAddress(aci)
+
+        val quote = replyPrefix?.let { buildQuote(it) }
+        val builder = SignalServiceDataMessage.newBuilder()
+            .withBody(text).withTimestamp(timestamp)
+        if (quote != null) builder.withQuote(quote)
+        val message = builder.build()
+
+        val sender = getOrCreateSender()
+        sender.sendDataMessage(
+            recipientAddress,
+            null,
+            ContentHint.RESENDABLE,
+            message,
+            SignalServiceMessageSender.IndividualSendEvents.EMPTY,
+            false, false,
+        )
+
+        // Sync transcript best-effort: the recipient already got the
+        // message above. If the sync fails, our linked devices won't see
+        // the outgoing in the right thread until storage-service sync
+        // next runs, but we shouldn't flip the local row to failed —
+        // that's misleading and would tempt the user into a duplicate
+        // resend.
+        try {
+            // unidentifiedStatusBySid must agree with the actual send mode
+            // (non-sealed → false); a `true` here makes Desktop create a
+            // separate "Unknown contact" thread per message.
+            // expirationStartTimestamp is an absolute time, not a duration.
             val transcript = SentTranscriptMessage(
-                Optional.of(recipientAddress),
+                Optional.of(recipientAddress), timestamp, Optional.of(message), 0L,
+                mapOf<ServiceId, Boolean>(aci to false),
+                false, Optional.empty(), emptySet(), Optional.empty(),
+            )
+            sender.sendSyncMessage(SignalServiceSyncMessage.forSentTranscript(transcript))
+        } catch (e: Exception) {
+            Log.w(TAG, "DM sync transcript failed (recipient still got the message): ${e.message}")
+        }
+    }
+
+    /**
+     * GroupV2 send via legacy per-recipient fan-out. We don't yet do the
+     * sender-key + DistributionId path — fan-out is simpler, the server
+     * does the heavy lifting for us, and it works without endorsement
+     * tokens. The DataMessage carries `groupV2{masterKey, revision}` so
+     * recipients route into the right thread.
+     *
+     * Member list comes from a fresh server fetch — small cost, fully
+     * correct, and we re-use the credential cache across calls.
+     */
+    private fun sendGroupInternal(
+        conversationJid: String,
+        groupMeta: SignalMessageDatabase.GroupMeta,
+        text: String,
+        timestamp: Long,
+        replyPrefix: String?,
+    ) {
+        val myAci = credentials.aci
+            ?: throw IllegalStateException("No local ACI available")
+
+        // Use the cached member list from the participants table. Signal
+        // bumps the group revision on every membership/title change, and
+        // the receiver refetches whenever an incoming message carries a
+        // higher revision than what we've stored — so the cache is current
+        // unless the group has changed without us seeing a message yet
+        // (rare, and self-correcting on the next inbound).
+        //
+        // First-send-to-group fallback: if the participants table is empty
+        // (e.g. this group was seeded by an outgoing-only send and no
+        // incoming message has populated members yet), do one fetch here
+        // to bootstrap and write the result back. This is the only path
+        // that hits the network — subsequent sends use the cache.
+        val cachedMembers = messageDb.getParticipants(conversationJid)
+            .mapNotNull { p ->
+                try { ServiceId.ACI.parseOrNull(p.jid) } catch (_: Exception) { null }
+            }
+        val members = if (cachedMembers.isNotEmpty()) {
+            cachedMembers.filter { it != myAci }
+        } else {
+            val groupManager = app.photon.service.PhotonService._signalGroupManager
+                ?: throw IllegalStateException("Group manager not ready — receiver not connected?")
+            val group = groupManager.fetchGroup(groupMeta.masterKey)
+                ?: throw IllegalStateException("Couldn't fetch group state for $conversationJid")
+            group.title?.takeIf { it.isNotBlank() }?.let { title ->
+                messageDb.upsertConversation(jid = conversationJid, name = title, isGroup = true)
+            }
+            messageDb.updateGroupMeta(conversationJid, groupMeta.masterKey, group.revision)
+            for (memberAci in groupManager.memberAcis(group)) {
+                val aciString = memberAci.toString()
+                val contact = messageDb.getContact(aciString)
+                val displayName = contact?.profileName?.takeIf { it.isNotBlank() }
+                    ?: contact?.phone
+                    ?: aciString.take(8)
+                messageDb.upsertParticipant(conversationJid, aciString, displayName, "member")
+            }
+            groupManager.memberAcis(group).filter { it != myAci }
+        }
+        if (members.isEmpty()) {
+            throw IllegalStateException("Group has no other members to send to")
+        }
+
+        val masterKey = org.signal.libsignal.zkgroup.groups.GroupMasterKey(groupMeta.masterKey)
+        // The stored revision is either what we last saw on incoming or
+        // what we just fetched in the bootstrap branch above. Re-read from
+        // DB so both paths use the same source.
+        val currentRevision = messageDb.getGroupMeta(conversationJid)?.revision ?: groupMeta.revision
+        val groupContext = org.whispersystems.signalservice.api.messages.SignalServiceGroupV2
+            .newBuilder(masterKey)
+            .withRevision(currentRevision)
+            .build()
+
+        val quote = replyPrefix?.let { buildQuote(it) }
+        val builder = SignalServiceDataMessage.newBuilder()
+            .withBody(text)
+            .withTimestamp(timestamp)
+            .asGroupMessage(groupContext)
+        if (quote != null) builder.withQuote(quote)
+        val message = builder.build()
+
+        val recipientAddresses = members.map { SignalServiceAddress(it) }
+        // Same-size list of nulls: signals non-sealed-sender for each recipient.
+        val sealedSenderAccesses: List<org.whispersystems.signalservice.api.crypto.SealedSenderAccess?> =
+            List(recipientAddresses.size) { null }
+
+        val sender = getOrCreateSender()
+        val results = sender.sendDataMessage(
+            recipientAddresses,
+            sealedSenderAccesses,
+            false,                                              // isRecipientUpdate
+            ContentHint.RESENDABLE,
+            message,
+            SignalServiceMessageSender.LegacyGroupEvents.EMPTY,
+            null, null, false,
+        )
+
+        // Report per-recipient outcomes so partial failures don't get
+        // silently rolled into a generic "failed" status. The wire send
+        // returns a list; an entry being non-success doesn't itself throw.
+        val successes = results.count { it.isSuccess }
+        val failures = results.size - successes
+        if (failures > 0) {
+            val reasons = results.filter { !it.isSuccess }.joinToString { r ->
+                val who = r.address.serviceId.toString().take(8)
+                val why = when {
+                    r.isNetworkFailure -> "network"
+                    r.isUnregisteredFailure -> "unregistered"
+                    r.identityFailure != null -> "identity"
+                    r.proofRequiredFailure != null -> "proof-required"
+                    r.rateLimitFailure != null -> "rate-limit"
+                    r.isInvalidPreKeyFailure -> "invalid-prekey"
+                    r.isCanceledFailure -> "canceled"
+                    else -> "unknown"
+                }
+                "$who:$why"
+            }
+            Log.w(TAG, "Group send had failures ($failures/${results.size}): $reasons")
+        }
+        if (successes == 0) {
+            throw RuntimeException("Group send: all $failures recipients failed")
+        }
+
+        // Sync transcript so our other linked devices route into the same
+        // group thread. Best-effort: if it fails we still consider the send
+        // successful since the recipients got the message — the user's
+        // primary/desktop just won't see it in the right thread until
+        // storage-service sync next runs.
+        try {
+            val statusBySid: Map<ServiceId, Boolean> = members.associateWith { false }
+            val transcript = SentTranscriptMessage(
+                Optional.empty(),
                 timestamp,
                 Optional.of(message),
-                message.expiresInSeconds.toLong() * 1000,
-                mapOf(aci to true),
+                0L,
+                statusBySid,
                 false,
                 Optional.empty(),
                 emptySet(),
                 Optional.empty(),
             )
             sender.sendSyncMessage(SignalServiceSyncMessage.forSentTranscript(transcript))
-            Log.d(TAG, "Sent sync transcript")
-
-            // Store outgoing message locally
-            val messageId = "${credentials.aciString}_${timestamp}_${UUID.randomUUID().toString().take(8)}"
-            messageDb.insertMessage(
-                id = messageId,
-                conversationJid = conversationJid,
-                senderJid = credentials.aciString ?: "",
-                timestamp = timestamp / 1000,
-                contentType = "text",
-                textBody = text,
-                replyToId = replyPrefix,
-                isFromMe = true,
-                status = "sent",
-            )
-            messageDb.updateConversationLastMessage(conversationJid, messageId, timestamp / 1000)
-
-            Log.i(TAG, "Sent text message to $conversationJid")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to send message", e)
-            // Invalidate sender on failure so it reconnects next time
+            Log.w(TAG, "Group sync transcript failed (recipients still got the message): ${e.message}")
+        }
+    }
+
+    /**
+     * Retry a previously failed text message. Reuses the local row's
+     * conversation_jid + text + reply_to_id and flips the status back to
+     * "sending" while a fresh send is attempted. The local row keeps its
+     * original ID so the chat list doesn't grow new bubbles per retry.
+     */
+    fun retryTextMessage(messageId: String): Boolean {
+        val row = messageDb.getMessage(messageId)
+        if (row == null || !row.isFromMe || row.contentType != "text") {
+            Log.w(TAG, "retryTextMessage: row $messageId missing or unsupported")
+            return false
+        }
+        val text = row.textBody.orEmpty()
+        if (text.isBlank()) {
+            Log.w(TAG, "retryTextMessage: row $messageId has empty body")
+            return false
+        }
+        val conversationJid = row.conversationJid
+        val aci = ServiceId.ACI.parseOrNull(conversationJid)
+        val groupMeta = if (aci == null) messageDb.getGroupMeta(conversationJid) else null
+
+        if (aci == null && groupMeta == null) {
+            Log.w(TAG, "Retry refused: $conversationJid is not an ACI nor a known group")
+            messageDb.updateMessageStatus(messageId, "failed")
+            return false
+        }
+
+        messageDb.updateMessageStatus(messageId, "sending")
+        // Keep the same wire timestamp by reusing the original — a retry
+        // that actually went through the first time would otherwise bypass
+        // recipient-side dedupe and produce a duplicate.
+        val timestamp = row.timestamp * 1000
+        return try {
+            if (aci != null) {
+                sendDmInternal(aci, conversationJid, text, timestamp, row.replyToId)
+            } else {
+                sendGroupInternal(conversationJid, groupMeta!!, text, timestamp, row.replyToId)
+            }
+            messageDb.updateMessageStatus(messageId, "sent")
+            Log.i(TAG, "Retry succeeded for $messageId")
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Retry failed for $messageId", e)
+            messageDb.updateMessageStatus(messageId, "failed")
             invalidate()
-            throw e
+            false
+        }
+    }
+
+    /**
+     * Send an empty NullMessage to a contact. NullMessage is a Signal protocol
+     * primitive used purely for session housekeeping — it carries no body, no
+     * attachment, no metadata, and the recipient's app processes it silently
+     * (no notification, no chat entry, nothing user-visible). The valuable
+     * side effect: the server enforces device-list consistency on the send,
+     * so if the contact's app doesn't yet have our deviceId in their session
+     * cache for this account, they'll be forced to fetch our pre-key bundle
+     * and create a session for us. Subsequent messages from them then
+     * encrypt for our deviceId too, so we start receiving their messages.
+     */
+    fun sendSessionPing(aci: String): Boolean {
+        return try {
+            val parsedAci = ServiceId.ACI.parseOrNull(aci)
+                ?: throw IllegalArgumentException("Invalid ACI: $aci")
+            val address = SignalServiceAddress(parsedAci)
+            val sender = getOrCreateSender()
+            sender.sendNullMessage(address, null)
+            Log.i(TAG, "Sent session ping to $aci")
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "sendSessionPing failed for $aci: ${e.javaClass.simpleName}: ${e.message}")
+            invalidate()
+            false
+        }
+    }
+
+    /**
+     * Ask our primary device to push us its contact book via sync.contacts.
+     * The primary responds with a SyncMessage(contacts=AttachmentPointer)
+     * which the receiver picks up and ingests. Linked devices use this to
+     * bootstrap names + phone numbers since they don't have direct access
+     * to the user's address book.
+     */
+    fun requestContactsSync() {
+        try {
+            val sender = getOrCreateSender()
+            val request = RequestMessage.forType(
+                org.whispersystems.signalservice.internal.push.SyncMessage.Request.Type.CONTACTS,
+            )
+            sender.sendSyncMessage(SignalServiceSyncMessage.forRequest(request))
+            Log.i(TAG, "Requested contacts sync from primary")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to request contacts sync: ${e.message}")
+            invalidate()
         }
     }
 

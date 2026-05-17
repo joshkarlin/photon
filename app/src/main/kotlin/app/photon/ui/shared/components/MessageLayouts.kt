@@ -36,6 +36,33 @@ private fun formatTime(ts: Long) = timeFormat.format(Date(ts * 1000))
 
 private val dimColor = Color(0xFF666666)
 private val faintColor = Color(0xFF444444)
+// Outgoing-message status indicator. Single line per layout so we don't
+// stack chrome on the happy path. "failed" gets a clickable label that
+// invokes the retry callback the screen passes down.
+@Composable
+private fun StatusLine(
+    msg: Message,
+    monospace: Boolean,
+    onRetry: (() -> Unit)?,
+) {
+    if (!msg.isFromMe) return
+    when (msg.status) {
+        "sending" -> Text(
+            text = "sending…",
+            fontSize = 10.sp,
+            color = faintColor,
+            fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
+        )
+        "failed" -> Text(
+            text = "! failed, tap to retry",
+            fontSize = 10.sp,
+            color = Color(0xFFCC4444),
+            fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
+            modifier = if (onRetry != null) Modifier.clickable(onClick = onRetry) else Modifier,
+        )
+        else -> {}
+    }
+}
 
 private fun formatReactionsInline(msg: Message): String {
     if (msg.reactions.isEmpty()) return ""
@@ -90,6 +117,7 @@ fun TerminalMessageRow(
     senderName: String? = null,
     quotedSenderName: String? = null,
     onReplyPreviewTap: (() -> Unit)? = null,
+    onRetry: (() -> Unit)? = null,
 ) {
     val time = formatTime(msg.timestamp)
     val prefix = if (msg.isFromMe) "> " else ""
@@ -144,6 +172,9 @@ fun TerminalMessageRow(
                 modifier = Modifier.padding(start = 56.dp),
             )
         }
+        Row(modifier = Modifier.padding(start = 56.dp)) {
+            StatusLine(msg, monospace = true, onRetry = onRetry)
+        }
     }
 }
 
@@ -159,6 +190,7 @@ fun CleanMessageRow(
     senderName: String? = null,
     quotedSenderName: String? = null,
     onReplyPreviewTap: (() -> Unit)? = null,
+    onRetry: (() -> Unit)? = null,
 ) {
     var showTime by remember { mutableStateOf(false) }
     val alignment = if (msg.isFromMe) TextAlign.End else TextAlign.Start
@@ -206,6 +238,7 @@ fun CleanMessageRow(
                 text = formatContent(msg),
                 fontSize = 15.sp,
                 color = if (isDeletedOrEmpty(msg)) faintColor else Color.White,
+                textAlign = alignment,
             )
 
             if (showTime && msg.isFromMe) {
@@ -218,18 +251,25 @@ fun CleanMessageRow(
             }
         }
 
-        // Status for sent messages
-        if (msg.isFromMe && showTime) {
-            Text(
-                text = when (msg.status) {
-                    "read" -> "\u2713\u2713"
-                    "delivered" -> "\u2713\u2713"
-                    "sent" -> "\u2713"
-                    else -> ""
-                },
-                fontSize = 11.sp,
-                color = if (msg.status == "read") Color(0xFF5599FF) else faintColor,
-            )
+        // Status for sent messages: sending / failed always visible (so the
+        // user notices and can retry); the read/delivered/sent checkmarks
+        // stay hidden until the user taps to reveal the timestamp.
+        if (msg.isFromMe) {
+            when (msg.status) {
+                "sending", "failed" -> StatusLine(msg, monospace = false, onRetry = onRetry)
+                else -> if (showTime) {
+                    Text(
+                        text = when (msg.status) {
+                            "read" -> "\u2713\u2713"
+                            "delivered" -> "\u2713\u2713"
+                            "sent" -> "\u2713"
+                            else -> ""
+                        },
+                        fontSize = 11.sp,
+                        color = if (msg.status == "read") Color(0xFF5599FF) else faintColor,
+                    )
+                }
+            }
         }
 
         if (msg.reactions.isNotEmpty()) {
@@ -256,6 +296,7 @@ fun TranscriptMessageRow(
     onLongPress: () -> Unit = {},
     quotedSenderName: String? = null,
     onReplyPreviewTap: (() -> Unit)? = null,
+    onRetry: (() -> Unit)? = null,
 ) {
     val name = if (msg.isFromMe) {
         "You"
@@ -314,6 +355,9 @@ fun TranscriptMessageRow(
                 color = dimColor,
                 modifier = Modifier.padding(start = 64.dp),
             )
+        }
+        Row(modifier = Modifier.padding(start = 64.dp)) {
+            StatusLine(msg, monospace = false, onRetry = onRetry)
         }
     }
 }

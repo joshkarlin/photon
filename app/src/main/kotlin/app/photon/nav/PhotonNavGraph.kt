@@ -1,8 +1,6 @@
 package app.photon.nav
 
 import android.net.Uri
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavHostController
@@ -11,7 +9,9 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import app.photon.service.PhotonService
-import app.photon.ui.home.HomeScreen
+import app.photon.ui.home.PlatformPick
+import app.photon.ui.home.PlatformsScreen
+import app.photon.ui.contact.ContactScreen
 import app.photon.ui.settings.SettingsScreen
 import app.photon.ui.all.AllChatsScreen
 import app.photon.ui.all.Platform
@@ -30,30 +30,40 @@ fun PhotonNavGraph(
     navController: NavHostController,
     modifier: Modifier = Modifier,
 ) {
+    // All Chats is the start destination — kept at the bottom of the back stack
+    // so lateral provider switches always collapse to a single chat-list screen.
+    val rootRoute = Routes.ALL_CHATS
+
+    fun lateralSwitch(target: String) {
+        navController.navigate(target) {
+            popUpTo(rootRoute) { inclusive = true }
+            launchSingleTop = true
+        }
+    }
+
     NavHost(
         navController = navController,
-        startDestination = Routes.HOME,
+        startDestination = rootRoute,
         modifier = modifier,
         enterTransition = { androidx.compose.animation.EnterTransition.None },
         exitTransition = { androidx.compose.animation.ExitTransition.None },
         popEnterTransition = { androidx.compose.animation.EnterTransition.None },
         popExitTransition = { androidx.compose.animation.ExitTransition.None },
     ) {
-        composable(Routes.HOME) {
-            HomeScreen(
-                onWhatsApp = {
-                    val ws = PhotonService._wsClient
-                    val state = ws?.whatsappState?.value
-                    if (state == "connected") {
-                        navController.navigate(Routes.WHATSAPP_CHATS)
-                    } else {
-                        navController.navigate(Routes.WHATSAPP_PAIRING)
+        composable(Routes.PLATFORMS) {
+            PlatformsScreen(
+                onPick = { pick ->
+                    val target = when (pick) {
+                        PlatformPick.ALL -> Routes.ALL_CHATS
+                        PlatformPick.SMS -> Routes.SMS_CHATS
+                        PlatformPick.WHATSAPP -> {
+                            val state = PhotonService._wsClient?.whatsappState?.value
+                            if (state == "connected") Routes.WHATSAPP_CHATS else Routes.WHATSAPP_PAIRING
+                        }
+                        PlatformPick.SIGNAL -> Routes.SIGNAL
                     }
+                    lateralSwitch(target)
                 },
-                onSignal = { navController.navigate(Routes.SIGNAL) },
-                onSms = { navController.navigate(Routes.SMS_CHATS) },
-                onAllChats = { navController.navigate(Routes.ALL_CHATS) },
-                onSettings = { navController.navigate(Routes.SETTINGS) },
             )
         }
         composable(Routes.WHATSAPP_PAIRING) {
@@ -71,7 +81,8 @@ fun PhotonNavGraph(
                 onChat = { jid ->
                     navController.navigate(Routes.chat(Uri.encode(jid)))
                 },
-                onBack = { navController.popBackStack() },
+                onSwitch = { navController.navigate(Routes.PLATFORMS) },
+                onSettings = { navController.navigate(Routes.SETTINGS) },
             )
         }
         composable(
@@ -81,10 +92,12 @@ fun PhotonNavGraph(
             val jid = Uri.decode(backStackEntry.arguments?.getString("jid") ?: "")
             ChatScreen(
                 jid = jid,
+                onContact = { phone, name ->
+                    navController.navigate(Routes.contact(Uri.encode(phone), Uri.encode(name)))
+                },
                 onBack = { navController.popBackStack() },
             )
         }
-        // Signal routing
         composable(Routes.SIGNAL) {
             SignalScreen(
                 onPaired = {
@@ -115,7 +128,8 @@ fun PhotonNavGraph(
                 onChat = { jid ->
                     navController.navigate(Routes.signalChat(Uri.encode(jid)))
                 },
-                onBack = { navController.popBackStack() },
+                onSwitch = { navController.navigate(Routes.PLATFORMS) },
+                onSettings = { navController.navigate(Routes.SETTINGS) },
             )
         }
         composable(
@@ -125,6 +139,9 @@ fun PhotonNavGraph(
             val jid = Uri.decode(backStackEntry.arguments?.getString("jid") ?: "")
             SignalChatScreen(
                 jid = jid,
+                onContact = { phone, name ->
+                    navController.navigate(Routes.contact(Uri.encode(phone), Uri.encode(name)))
+                },
                 onBack = { navController.popBackStack() },
             )
         }
@@ -137,7 +154,8 @@ fun PhotonNavGraph(
                         Platform.SMS -> navController.navigate(Routes.smsChat(Uri.encode(jid)))
                     }
                 },
-                onBack = { navController.popBackStack() },
+                onSwitch = { navController.navigate(Routes.PLATFORMS) },
+                onSettings = { navController.navigate(Routes.SETTINGS) },
             )
         }
         composable(Routes.SMS_CHATS) {
@@ -145,7 +163,8 @@ fun PhotonNavGraph(
                 onChat = { address ->
                     navController.navigate(Routes.smsChat(Uri.encode(address)))
                 },
-                onBack = { navController.popBackStack() },
+                onSwitch = { navController.navigate(Routes.PLATFORMS) },
+                onSettings = { navController.navigate(Routes.SETTINGS) },
             )
         }
         composable(
@@ -155,6 +174,24 @@ fun PhotonNavGraph(
             val address = Uri.decode(backStackEntry.arguments?.getString("address") ?: "")
             SmsChatScreen(
                 address = address,
+                onContact = { phone, name ->
+                    navController.navigate(Routes.contact(Uri.encode(phone), Uri.encode(name)))
+                },
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable(
+            route = Routes.CONTACT,
+            arguments = listOf(
+                navArgument("phone") { type = NavType.StringType },
+                navArgument("name") { type = NavType.StringType },
+            ),
+        ) { backStackEntry ->
+            val phone = Uri.decode(backStackEntry.arguments?.getString("phone") ?: "")
+            val name = Uri.decode(backStackEntry.arguments?.getString("name") ?: "")
+            ContactScreen(
+                phone = phone,
+                displayName = name,
                 onBack = { navController.popBackStack() },
             )
         }
@@ -163,12 +200,12 @@ fun PhotonNavGraph(
                 onBack = { navController.popBackStack() },
                 onResetWhatsApp = {
                     navController.navigate(Routes.WHATSAPP_PAIRING) {
-                        popUpTo(Routes.HOME) { inclusive = false }
+                        popUpTo(rootRoute) { inclusive = false }
                     }
                 },
                 onResetSignal = {
                     navController.navigate(Routes.SIGNAL_PAIRING) {
-                        popUpTo(Routes.HOME) { inclusive = false }
+                        popUpTo(rootRoute) { inclusive = false }
                     }
                 },
             )

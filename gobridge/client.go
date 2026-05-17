@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -259,34 +260,107 @@ func (b *Bridge) StartQRPairing(ctx context.Context) {
 }
 
 // SendTextMessage sends a text message to the given JID.
+//
+// The message is written to the local DB BEFORE the network send with
+// status="sending" using a client-generated stanza ID, so the UI can show
+// the outgoing message immediately and reflect the final state once the
+// send returns. On failure the status flips to "failed" instead of the row
+// being discarded — the UI then offers retry via RetryTextMessage(id),
+// which reuses the same stanza ID so WhatsApp's server deduplicates if the
+// original happened to reach the server before the error propagated.
 func (b *Bridge) SendTextMessage(ctx context.Context, jid string, text string, replyToID string) (string, int64, error) {
 	targetJID, err := types.ParseJID(jid)
 	if err != nil {
 		return "", 0, err
 	}
 
-	msg := b.buildTextMessage(text, replyToID)
-	resp, err := b.client.SendMessage(ctx, targetJID, msg)
-	if err != nil {
-		return "", 0, err
-	}
+	id := b.client.GenerateMessageID()
+	ts := time.Now().Unix()
 
-	// Write to message DB
 	b.InsertMessage(&MessageRow{
-		ID:              resp.ID,
+		ID:              id,
 		ConversationJID: jid,
 		SenderJID:       b.client.Store.ID.String(),
-		Timestamp:       resp.Timestamp.Unix(),
+		Timestamp:       ts,
 		ContentType:     "text",
 		TextBody:        sql.NullString{String: text, Valid: true},
+		ReplyToID:       sql.NullString{String: replyToID, Valid: replyToID != ""},
 		IsFromMe:        true,
-		Status:          "sent",
+		Status:          "sending",
+	})
+	b.UpsertConversation(jid, "", false, id, ts)
+	b.BroadcastEvent("new_message", NewMessageEvent{
+		ConversationJID: jid, MessageID: id, TextBody: text,
+		ContentType: "text", IsFromMe: true,
 	})
 
-	// Update conversation
-	b.UpsertConversation(jid, "", false, resp.ID, resp.Timestamp.Unix())
+	msg := b.buildTextMessage(text, replyToID)
+	resp, err := b.client.SendMessage(ctx, targetJID, msg, whatsmeow.SendRequestExtra{ID: id})
+	if err != nil {
+		b.UpdateMessageStatus(id, "failed")
+		b.BroadcastEvent("message_updated", MessageUpdatedEvent{
+			ConversationJID: jid, MessageID: id,
+		})
+		return id, ts, err
+	}
 
-	return resp.ID, resp.Timestamp.Unix(), nil
+	// Replace the placeholder timestamp with the server-confirmed one so the
+	// row sorts correctly relative to messages that arrived during the send.
+	b.UpdateMessageStatusAndTimestamp(id, "sent", resp.Timestamp.Unix())
+	b.UpsertConversation(jid, "", false, id, resp.Timestamp.Unix())
+	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
+		ConversationJID: jid, MessageID: id,
+	})
+
+	return id, resp.Timestamp.Unix(), nil
+}
+
+// RetryTextMessage re-attempts a previously failed outgoing text message,
+// reusing the original stanza ID and text. Returns an error if the row
+// can't be found, isn't from us, or isn't a text message.
+func (b *Bridge) RetryTextMessage(ctx context.Context, messageID string) error {
+	var jid, text, replyToID string
+	var status string
+	err := b.msgDB.QueryRowContext(ctx, `
+		SELECT conversation_jid, COALESCE(text_body, ''), COALESCE(reply_to_id, ''), status
+		  FROM messages WHERE id = ? AND is_from_me = 1
+	`, messageID).Scan(&jid, &text, &replyToID, &status)
+	if err != nil {
+		return fmt.Errorf("retry: row not found: %w", err)
+	}
+	if text == "" {
+		return fmt.Errorf("retry: only text messages supported")
+	}
+
+	b.UpdateMessageStatus(messageID, "sending")
+	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
+		ConversationJID: jid, MessageID: messageID,
+	})
+
+	targetJID, err := types.ParseJID(jid)
+	if err != nil {
+		b.UpdateMessageStatus(messageID, "failed")
+		b.BroadcastEvent("message_updated", MessageUpdatedEvent{
+			ConversationJID: jid, MessageID: messageID,
+		})
+		return err
+	}
+
+	msg := b.buildTextMessage(text, replyToID)
+	resp, err := b.client.SendMessage(ctx, targetJID, msg, whatsmeow.SendRequestExtra{ID: messageID})
+	if err != nil {
+		b.UpdateMessageStatus(messageID, "failed")
+		b.BroadcastEvent("message_updated", MessageUpdatedEvent{
+			ConversationJID: jid, MessageID: messageID,
+		})
+		return err
+	}
+	b.UpdateMessageStatusAndTimestamp(messageID, "sent", resp.Timestamp.Unix())
+	b.UpsertConversation(jid, "", false, messageID, resp.Timestamp.Unix())
+	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
+		ConversationJID: jid, MessageID: messageID,
+	})
+	return nil
 }
 
 // SendTyping sends a typing or paused indicator.

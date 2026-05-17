@@ -27,7 +27,7 @@ private fun formatJidAsPhone(jid: String): String {
 }
 
 @Composable
-fun ChatScreen(jid: String, onBack: () -> Unit) {
+fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, onBack: () -> Unit) {
     val repo = PhotonService._chatRepository ?: return
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -65,6 +65,20 @@ fun ChatScreen(jid: String, onBack: () -> Unit) {
         onReact = { messageId, senderJid, emoji ->
             scope.launch { try { repo.sendReaction(jid, messageId, senderJid, emoji) } catch (_: Exception) {} }
         },
+        onRetry = { messageId ->
+            scope.launch { try { repo.retryMessage(messageId) } catch (_: Exception) {} }
+        },
+        onTitleClick = if (!isGroup) {
+            {
+                // For WhatsApp DMs the phone-shaped JIDs (`12345@s.whatsapp.net`)
+                // give us a number directly. LID JIDs don't have a phone in
+                // hand here so we hide the affordance.
+                val phone = jid.substringBefore("@").takeIf {
+                    jid.endsWith("@s.whatsapp.net") && it.length >= 5 && it.all(Char::isDigit)
+                }?.let { "+$it" }
+                if (phone != null) onContact(phone, title)
+            }
+        } else null,
     )
 
     // Media viewer overlay

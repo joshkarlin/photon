@@ -51,6 +51,10 @@ type DownloadMediaPayload struct {
 	MessageID string `json:"message_id"`
 }
 
+type RetryMessagePayload struct {
+	MessageID string `json:"message_id"`
+}
+
 type SendTypingPayload struct {
 	JID       string `json:"jid"`
 	Composing bool   `json:"composing"`

@@ -11,7 +11,7 @@ import app.photon.data.model.Reaction
 import app.photon.data.model.Participant
 
 class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
-    context, "signal_messages.db", null, 2,
+    context, "signal_messages.db", null, 3,
 ) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""
@@ -24,7 +24,9 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                 unread_count    INTEGER NOT NULL DEFAULT 0,
                 is_muted        INTEGER NOT NULL DEFAULT 0,
                 avatar_url      TEXT,
-                updated_at      INTEGER NOT NULL DEFAULT 0
+                updated_at      INTEGER NOT NULL DEFAULT 0,
+                master_key      BLOB,
+                group_revision  INTEGER NOT NULL DEFAULT 0
             )
         """)
         db.execSQL("""
@@ -96,6 +98,22 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                 }
             }
         }
+        if (oldVersion < 3) {
+            // GroupV2 metadata on the conversation row: master_key is the
+            // 32-byte secret used to fetch/decrypt the group state from the
+            // server; group_revision is the last seen revision so we know
+            // when to re-fetch.
+            for (col in listOf(
+                "master_key BLOB",
+                "group_revision INTEGER NOT NULL DEFAULT 0",
+            )) {
+                try {
+                    db.execSQL("ALTER TABLE conversations ADD COLUMN $col")
+                } catch (_: Exception) {
+                    // Column may already exist on partially-upgraded databases
+                }
+            }
+        }
     }
 
     // ── Write methods ──
@@ -107,17 +125,32 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         lastMessageId: String? = null,
         lastTimestamp: Long = 0,
     ) {
-        writableDatabase.insertWithOnConflict(
-            "conversations", null,
-            ContentValues().apply {
-                put("jid", jid)
-                put("name", name)
-                put("is_group", if (isGroup) 1 else 0)
-                if (lastMessageId != null) put("last_message_id", lastMessageId)
-                if (lastTimestamp > 0) put("last_timestamp", lastTimestamp)
-                put("updated_at", System.currentTimeMillis())
-            },
-            SQLiteDatabase.CONFLICT_REPLACE,
+        // Hand-rolled UPSERT so that callers who only know name/jid (e.g. the
+        // contacts-sync ingest) don't clobber the existing last_message_id or
+        // last_timestamp on a conversation that already has message history.
+        // INSERT plants defaults on new rows; UPDATE only writes the fields
+        // the caller actually supplied.
+        writableDatabase.execSQL(
+            """
+            INSERT INTO conversations (jid, name, is_group, last_message_id, last_timestamp, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(jid) DO UPDATE SET
+              name           = COALESCE(excluded.name, conversations.name),
+              is_group       = excluded.is_group,
+              last_message_id = COALESCE(NULLIF(excluded.last_message_id, ''), conversations.last_message_id),
+              last_timestamp  = CASE WHEN excluded.last_timestamp > 0
+                                     THEN excluded.last_timestamp
+                                     ELSE conversations.last_timestamp END,
+              updated_at      = excluded.updated_at
+            """,
+            arrayOf<Any?>(
+                jid,
+                name,
+                if (isGroup) 1 else 0,
+                lastMessageId ?: "",
+                lastTimestamp,
+                System.currentTimeMillis(),
+            ),
         )
     }
 
@@ -140,6 +173,33 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             "UPDATE conversations SET unread_count = 0 WHERE jid = ?",
             arrayOf(jid),
         )
+    }
+
+    /**
+     * Persist the GroupV2 metadata on a conversation row. We need the
+     * master_key to (re)fetch group state from the server; the revision
+     * lets us skip refetches when nothing has changed since we last looked.
+     * Safe to call repeatedly with the same values — no-op via UPDATE.
+     */
+    fun updateGroupMeta(jid: String, masterKey: ByteArray, revision: Int) {
+        writableDatabase.execSQL(
+            "UPDATE conversations SET master_key = ?, group_revision = ? WHERE jid = ?",
+            arrayOf<Any?>(masterKey, revision, jid),
+        )
+    }
+
+    data class GroupMeta(val masterKey: ByteArray, val revision: Int)
+
+    fun getGroupMeta(jid: String): GroupMeta? {
+        readableDatabase.rawQuery(
+            "SELECT master_key, group_revision FROM conversations WHERE jid = ?",
+            arrayOf(jid),
+        ).use { c ->
+            if (!c.moveToFirst()) return null
+            val mk = c.getBlob(0) ?: return null
+            val rev = c.getInt(1)
+            return GroupMeta(mk, rev)
+        }
     }
 
     fun insertMessage(
@@ -204,16 +264,38 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     fun upsertParticipant(conversationJid: String, jid: String, displayName: String?, role: String = "member") {
-        writableDatabase.insertWithOnConflict(
-            "participants", null,
-            ContentValues().apply {
-                put("conversation_jid", conversationJid)
-                put("jid", jid)
-                put("display_name", displayName)
-                put("role", role)
-            },
-            SQLiteDatabase.CONFLICT_REPLACE,
+        // Preserve any previously known display_name when the caller passes
+        // null/blank — repeated upserts with sparse data shouldn't clobber.
+        writableDatabase.execSQL(
+            """
+            INSERT INTO participants (conversation_jid, jid, display_name, role)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(conversation_jid, jid) DO UPDATE SET
+                display_name = COALESCE(NULLIF(excluded.display_name, ''), participants.display_name),
+                role = excluded.role
+            """,
+            arrayOf<Any?>(conversationJid, jid, displayName, role),
         )
+    }
+
+    fun getParticipants(conversationJid: String): List<Participant> {
+        val out = mutableListOf<Participant>()
+        readableDatabase.rawQuery(
+            "SELECT jid, display_name, role FROM participants WHERE conversation_jid = ?",
+            arrayOf(conversationJid),
+        ).use { c ->
+            while (c.moveToNext()) {
+                out.add(
+                    Participant(
+                        conversationJid = conversationJid,
+                        jid = c.getString(0),
+                        displayName = c.getString(1),
+                        role = c.getString(2) ?: "member",
+                    )
+                )
+            }
+        }
+        return out
     }
 
     fun upsertContact(jid: String, name: String?) {
@@ -296,6 +378,35 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             ?: contact.phone
     }
 
+    /**
+     * All contacts whose profile we know how to fetch (have profile_key)
+     * but for which the encrypted name hasn't been decoded yet. Used by the
+     * receiver to retry failed profile fetches on each WS (re)connect.
+     */
+    fun getContactsWithProfileKeyButNoName(): List<Contact> {
+        return readableDatabase.rawQuery(
+            "SELECT jid, name, phone_number, profile_key, profile_name, profile_fetched_at " +
+                "FROM contacts WHERE profile_key IS NOT NULL " +
+                "AND (profile_name IS NULL OR profile_name = '')",
+            null,
+        ).use { c ->
+            val out = mutableListOf<Contact>()
+            while (c.moveToNext()) {
+                out.add(
+                    Contact(
+                        jid = c.getString(0),
+                        name = if (c.isNull(1)) null else c.getString(1),
+                        phone = if (c.isNull(2)) null else c.getString(2),
+                        profileKey = if (c.isNull(3)) null else c.getBlob(3),
+                        profileName = if (c.isNull(4)) null else c.getString(4),
+                        profileFetchedAt = c.getLong(5),
+                    ),
+                )
+            }
+            out
+        }
+    }
+
     // ── Read methods (same as PhotonDatabase) ──
 
     fun getConversations(): List<Conversation> {
@@ -315,9 +426,104 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
 
     fun getMessages(conversationJid: String, limit: Int = 50): List<Message> {
         return readableDatabase.rawQuery(
-            "SELECT * FROM messages WHERE conversation_jid = ? ORDER BY timestamp DESC LIMIT ?",
+            // Tiebreak on _rowid_ so two messages sent in the same wall-clock
+            // second still render in insertion order. Without this, sending
+            // two messages back-to-back occasionally swaps them in the chat
+            // (storage is in seconds; the wire timestamp is sub-second).
+            "SELECT * FROM messages WHERE conversation_jid = ? ORDER BY timestamp DESC, _rowid_ DESC LIMIT ?",
             arrayOf(conversationJid, limit.toString()),
         ).use { it.toMessages() }
+    }
+
+    /**
+     * Wipe `profile_name` on every contact so the Signal profile fetcher
+     * will refetch on next message activity. Used as a one-shot migration
+     * when the resolution policy changes — clears stale names sourced from
+     * the primary device's address book.
+     */
+    fun clearAllStoredProfileNames() {
+        writableDatabase.execSQL(
+            "UPDATE contacts SET profile_name = NULL, profile_fetched_at = 0",
+        )
+    }
+
+    /**
+     * For each existing conversation, look at the row's stored phone (from
+     * the contacts table) and reset `name` to whatever the supplied resolver
+     * returns. Used to re-derive conversation titles from local contacts
+     * when the resolution policy changes. Conversations with no phone are
+     * left alone.
+     */
+    fun reresolveConversationNames(resolveByPhone: (String) -> String?): Int {
+        var updated = 0
+        readableDatabase.rawQuery(
+            "SELECT c.jid, c.name, ct.phone_number, ct.profile_name FROM conversations c " +
+                "LEFT JOIN contacts ct ON ct.jid = c.jid",
+            null,
+        ).use { cur ->
+            while (cur.moveToNext()) {
+                val jid = cur.getString(0)
+                val currentName = if (cur.isNull(1)) null else cur.getString(1)
+                val phone = if (cur.isNull(2)) null else cur.getString(2)
+                val profileName = if (cur.isNull(3)) null else cur.getString(3)
+                // Resolution priority: local LP3 contact → Signal profile
+                // name (when the fetcher could decrypt one) → phone number.
+                val resolved = phone?.let { resolveByPhone(it) }
+                    ?: profileName?.takeIf { it.isNotBlank() }
+                    ?: phone
+                if (resolved != currentName) {
+                    writableDatabase.execSQL(
+                        "UPDATE conversations SET name = ? WHERE jid = ?",
+                        arrayOf<Any?>(resolved, jid),
+                    )
+                    updated++
+                }
+            }
+        }
+        return updated
+    }
+
+    /**
+     * Repair last_timestamp on every conversation whose row is desynced from
+     * the messages table — sets it to MAX(messages.timestamp) where the
+     * conversation has any messages stored. Idempotent; safe to run on every
+     * startup. Needed because an earlier bug in upsertConversation
+     * (CONFLICT_REPLACE) used to zero-out last_timestamp whenever contacts
+     * sync ran, hiding active chats from the recent-chats sort.
+     */
+    fun repairConversationTimestamps() {
+        writableDatabase.execSQL(
+            """
+            UPDATE conversations
+            SET last_timestamp = COALESCE(
+                (SELECT MAX(timestamp) FROM messages WHERE messages.conversation_jid = conversations.jid),
+                last_timestamp
+            )
+            WHERE EXISTS (SELECT 1 FROM messages WHERE messages.conversation_jid = conversations.jid)
+            """,
+        )
+    }
+
+    /**
+     * JIDs of DM conversations that have at least one message stored.
+     * Group JIDs (is_group = 1) are excluded — callers who use this list
+     * to ping contacts would otherwise try to parse a group identifier as
+     * an ACI and fail loudly.
+     */
+    fun getJidsWithMessages(): List<String> {
+        return readableDatabase.rawQuery(
+            """
+            SELECT DISTINCT m.conversation_jid
+              FROM messages m
+              LEFT JOIN conversations c ON c.jid = m.conversation_jid
+              WHERE COALESCE(c.is_group, 0) = 0
+            """,
+            null,
+        ).use { c ->
+            val out = mutableListOf<String>()
+            while (c.moveToNext()) out.add(c.getString(0))
+            out
+        }
     }
 
     fun getMessage(id: String): Message? {

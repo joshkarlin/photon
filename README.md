@@ -7,9 +7,9 @@ A minimal, multi-protocol messaging client for the Light Phone III. WhatsApp, Si
 Photon connects to WhatsApp, Signal, and SMS and presents your messages in a monochrome, LP3-styled interface. Three messaging platforms, one intentional design.
 
 - **WhatsApp**: Native protocol via [whatsmeow](https://github.com/tulir/whatsmeow) — text, reactions, replies, media send/receive, group chats
-- **Signal**: Native protocol via [libsignal-service-java](https://github.com/AsamK/signal-cli) — text messaging as a linked device
+- **Signal**: Native protocol via [libsignal-service-java](https://github.com/AsamK/signal-cli) — text messaging and GroupV2 chats as a linked device
 - **SMS**: Reads from Android's SMS content provider — view and send text messages
-- **All Chats**: Unified view merging all platforms, sorted by most recent
+- **All Chats**: Default view, merges all platforms by recency with a header picker for platform filter
 
 ### Ephemeral by design
 
@@ -50,11 +50,12 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ┌────────────────────────────────────────────┐
 │  Android App (Kotlin/Compose)              │
 │                                            │
-│  Home ──┬── SMS ── Chat List ── Chat       │
-│         ├── WhatsApp ── Chat List ── Chat  │
-│         ├── Signal ── Chat List ── Chat    │
-│         ├── All Chats (merged view)        │
-│         └── Settings                       │
+│  All Chats (home) ── Chat ── Contact       │
+│       │                                    │
+│       └─ header picker: All / SMS /        │
+│          WhatsApp / Signal (lateral)       │
+│                                            │
+│  Settings (icon top-right of All Chats)    │
 │                                            │
 │  Shared: ChatScreenContent, ChatListContent│
 │          ConversationRow, MessageLayouts   │
@@ -128,11 +129,16 @@ Per-platform status, refresh connection, and reset (clear data + re-pair).
 ## Current features
 
 - [x] WhatsApp: text, reactions, replies, media viewing + sending, group chats, contact names, history sync, mute sync from primary device
-- [x] Signal: text messaging, send/receive, device linking, sync messages from primary, reply-to-message, profile name resolution
+- [x] Signal: text messaging (DM + GroupV2), send/receive, device linking, sync transcripts from primary, reply-to-message, profile name resolution, contact book sync
+- [x] Signal GroupV2: incoming + outgoing fan-out send, group title + member resolution, locally-cached state refreshed on revision bumps
 - [x] SMS: read conversations, send messages, contact name resolution, per-conversation read tracking (local)
-- [x] All Chats: unified view with platform icons
+- [x] All Chats: default home view; header picker switches between SMS / WhatsApp / Signal / All
 - [x] Three message layouts (Terminal / Clean / Transcript)
 - [x] Reply-to-message: swipe right on any WhatsApp or Signal message (hidden on SMS). Quote tap scrolls to the original.
+- [x] Failed-send recovery: outgoing messages persist with `sending`/`sent`/`failed` status; tap a failed bubble to retry (preserves wire id/timestamp so recipients dedupe)
+- [x] Voice-note autoplay on open
+- [x] In-app contact editor: tap a chat title → save/update directly via `ContactsContract` (no AOSP handoff)
+- [x] Local contacts authoritative for Signal display names (LP3 address book → Signal profile name → bare phone)
 - [x] Ephemeral retention (configurable count + days)
 - [x] Message notifications (WhatsApp + Signal, configurable, respects WhatsApp mute)
 - [x] Connection status in notification + settings
@@ -144,13 +150,14 @@ Per-platform status, refresh connection, and reset (clear data + re-pair).
 
 ## Known issues
 
-- **Signal incoming DMs/groups unconfirmed**: Sync transcripts (sent messages from primary) work. Incoming sealed sender messages from other users failed certificate validation on libsignal 0.90.0 — upgraded to 0.92.1 which should fix it, but awaiting confirmation from a real incoming message.
 - **WhatsApp contact names**: Names come from push names and may differ from your address book. History sync names can be overwritten by later push name events.
 - **WhatsApp LID JIDs**: Some conversations use WhatsApp's new Linked Identity format. LID→phone resolution works but may occasionally create duplicate entries during the transition.
+- **Signal group admin**: Photon participates in GroupV2 (send + receive) but can't create groups, add/remove members, edit title, or leave. Group state updates initiated elsewhere are picked up automatically on the next message via the revision check.
+- **Signal group send via fan-out**: Photon sends per-recipient rather than via sender-key distribution. Works the same end-to-end but is slower for large groups and skips `GroupSendEndorsements`.
 - **Signal pre-key upload**: Uses reflection fallback to upload via PushServiceSocket (KeysApi WebSocket path returns 422). Works but fragile.
 - **Signal history sync**: Not implemented — only new messages after pairing appear. Requires backup/restore mechanism.
-- **Signal contact names**: Only phone numbers shown (from sync message metadata). Profile name fetching not implemented.
 - **Signal device name**: Shows as garbled text on primary device's linked devices list. Device name needs to be encrypted with the identity key before sending — currently sent as plaintext.
+- **Signal media send**: Stub — Signal text replies-with-media silently drop the media. Text-only replies work.
 - **Dictation**: LP3 has no built-in STT engine. Android 13's `RecognitionService` framework has a known bug where `PermissionChecker.checkCallingPermissionForDataDelivery()` rejects third-party callers with ERROR_INSUFFICIENT_PERMISSIONS (error 9), even with RECORD_AUDIO granted. No code-level workaround exists — requires a system-level STT service or alternative approach.
 - **Voice notes**: Recording implemented but sending untested on device.
 - **Java Records on Android**: Turasa v143 uses Java Records which Android's desugaring can't serialize via Jackson. Fixed with `AndroidRecordFix.kt` (reflection patch on JsonUtil's ObjectMapper).
@@ -159,7 +166,8 @@ Per-platform status, refresh connection, and reset (clear data + re-pair).
 ## Planned features
 
 - [ ] Signal history sync (backup download + restore)
-- [ ] Signal media send (currently a stub; means Signal reply-with-media silently drops the media, though text replies work)
+- [ ] Signal media send (currently a stub)
+- [ ] Signal group admin: create, leave, add/remove members, edit title
 - [ ] MMS support (picture messages)
 - [ ] Dictation (requires system-level STT or alternative approach)
 - [ ] Voice note send/receive
@@ -176,6 +184,8 @@ Per-platform status, refresh connection, and reset (clear data + re-pair).
 - SQLite uses WAL mode + `busy_timeout=5000` to prevent concurrent access errors.
 - Signal uses a self-signed CA (bundled as `res/raw/signal_ca.pem`).
 - Kyber pre-keys stored as `is_last_resort=1` to prevent deletion after first use.
+- Signal GroupV2: `master_key` + `revision` stored per-conversation; member list cached in the `participants` table. Server fetch only when receiver sees an incoming message with a higher revision (or on first-ever send into a never-received-from group). No periodic refresh.
+- Failed-send recovery: outgoing rows are inserted with `status=sending` before the wire call (Go bridge pre-generates the stanza id for WhatsApp; Signal/SMS reuse the local id). Status flips to `sent`/`failed` on result. Retry reuses the same id + wire timestamp so recipients dedupe.
 - Kotlin 2.1.0, AGP 8.5.2, core library desugaring enabled.
 
 ## License

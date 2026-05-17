@@ -19,18 +19,24 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import org.signal.libsignal.metadata.certificate.CertificateValidator
 import org.signal.libsignal.protocol.ecc.ECPublicKey
+import org.whispersystems.signalservice.api.SignalServiceMessageReceiver
 import org.whispersystems.signalservice.api.SignalSessionLock
+import org.whispersystems.signalservice.api.crypto.AttachmentCipherInputStream
 import org.whispersystems.signalservice.api.crypto.EnvelopeMetadata
 import org.whispersystems.signalservice.api.crypto.SignalServiceCipher
 import org.whispersystems.signalservice.api.messages.EnvelopeResponse
+import org.whispersystems.signalservice.api.messages.multidevice.DeviceContactsInputStream
 import org.whispersystems.signalservice.api.push.SignalServiceAddress
+import org.whispersystems.signalservice.api.util.AttachmentPointerUtil
 import org.whispersystems.signalservice.api.util.SleepTimer
 import org.whispersystems.signalservice.api.websocket.HealthMonitor
 import org.whispersystems.signalservice.api.websocket.SignalWebSocket
 import org.whispersystems.signalservice.api.websocket.WebSocketFactory
+import org.whispersystems.signalservice.internal.push.AttachmentPointer
 import org.whispersystems.signalservice.internal.push.DataMessage
 import org.whispersystems.signalservice.internal.push.SyncMessage
 import org.whispersystems.signalservice.internal.websocket.OkHttpWebSocketConnection
+import java.io.File
 import java.util.Optional
 import java.util.UUID
 import java.util.concurrent.locks.ReentrantLock
@@ -43,10 +49,14 @@ class SignalMessageReceiver(
 ) {
     companion object {
         private const val TAG = "SignalMessageReceiver"
+        // Generous cap on the contacts sync attachment (~10 MB is way more
+        // than any plausible contact book).
+        private const val MAX_CONTACTS_BLOB_BYTES: Long = 50L * 1024 * 1024
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val config = SignalConfig.createConfiguration()
+    private val contactResolver = AndroidContactResolver(context)
     private val sessionLock = object : SignalSessionLock {
         private val lock = ReentrantLock()
         override fun acquire(): SignalSessionLock.Lock {
@@ -62,11 +72,55 @@ class SignalMessageReceiver(
     private var unauthWebSocket: SignalWebSocket.UnauthenticatedWebSocket? = null
     private var running = false
     private var profileFetcher: SignalProfileFetcher? = null
+    private var pushSocket: PushServiceSocket? = null
+    @Volatile private var groupManager: SignalGroupV2Manager? = null
+    @Volatile private var contactsSyncRequested = false
+    @Volatile private var activeContactsPinged = false
 
     fun start() {
         if (running) return
         running = true
+        scope.launch {
+            try { messageDb.repairConversationTimestamps() }
+            catch (e: Exception) { Log.w(TAG, "Timestamp repair failed: ${e.message}") }
+            // One-shot migration: clear primary-device-sourced names and
+            // re-resolve every conversation title from this device's local
+            // contacts. Idempotent past first run via the prefs flag.
+            try {
+                val prefs = context.getSharedPreferences("signal_migrations", android.content.Context.MODE_PRIVATE)
+                if (!prefs.getBoolean("local_contacts_authoritative_v1", false)) {
+                    messageDb.clearAllStoredProfileNames()
+                    val n = messageDb.reresolveConversationNames { phone ->
+                        contactResolver.resolve(phone)
+                    }
+                    Log.i(TAG, "Migration: cleared stored profile names and re-resolved $n conversations from local contacts")
+                    prefs.edit().putBoolean("local_contacts_authoritative_v1", true).apply()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Local-contacts migration failed: ${e.message}")
+            }
+        }
         scope.launch { receiveLoop() }
+    }
+
+    /**
+     * Drop the Android-contacts cache and re-resolve every conversation
+     * name from scratch. Called after Photon's contact editor writes a new
+     * entry so the chat title updates immediately instead of waiting for
+     * the next 30-second WS reconnect to trigger the routine refresh.
+     */
+    fun refreshContactNames() {
+        scope.launch {
+            try {
+                contactResolver.invalidate()
+                val n = messageDb.reresolveConversationNames { phone ->
+                    contactResolver.resolve(phone)
+                }
+                if (n > 0) Log.i(TAG, "Live refresh: re-resolved $n conversation names")
+            } catch (e: Exception) {
+                Log.w(TAG, "Live name refresh failed: ${e.message}")
+            }
+        }
     }
 
     fun stop() {
@@ -76,6 +130,8 @@ class SignalMessageReceiver(
         webSocket = null
         unauthWebSocket = null
         profileFetcher = null
+        groupManager = null
+        app.photon.service.PhotonService._signalGroupManager = null
     }
 
     private suspend fun receiveLoop() {
@@ -88,14 +144,20 @@ class SignalMessageReceiver(
 
                 connectWebSocket()
                 _state.value = "connected"
-                Log.i(TAG, "WebSocket connected, reading messages...")
+                Log.i(TAG, "WebSocket connected, reading messages... stateSnapshot=${webSocket?.stateSnapshot}")
                 readMessages()
             } catch (e: Exception) {
                 Log.e(TAG, "Message receive error", e)
                 _state.value = "disconnected"
             }
             if (running) {
-                Log.i(TAG, "Reconnecting in 5s...")
+                val state = webSocket?.stateSnapshot
+                Log.i(TAG, "Reconnecting in 5s... (last state: $state)")
+                if (state == org.whispersystems.signalservice.api.websocket.WebSocketConnectionState.AUTHENTICATION_FAILED) {
+                    Log.e(TAG, "Signal server rejected our credentials (HTTP 401/403). " +
+                        "This usually means the device was unlinked on the primary — " +
+                        "user needs to re-pair Photon from Settings → Connections → Signal → RESET.")
+                }
                 delay(5000)
             }
         }
@@ -144,9 +206,105 @@ class SignalMessageReceiver(
             object : SleepTimer { override fun sleep(millis: Long) = Thread.sleep(millis) },
             30_000L,
         )
+        unauthWs.connect()
+        unauthWs.registerKeepAliveToken("PhotonReceiverUnauth")
         unauthWebSocket = unauthWs
 
+        // Used by the contacts sync to download the encrypted blob from CDN.
+        val ps = PushServiceSocket(config, credentials, SignalConfig.USER_AGENT, false)
+        pushSocket = ps
+
         profileFetcher = SignalProfileFetcher(config, ws, unauthWs, messageDb, scope)
+
+        // GroupV2 fetcher — reuses the same auth WS / push socket. Shared
+        // via PhotonService so the sender can also consult it when sending
+        // into a group without rebuilding the credential cache.
+        val gm = SignalGroupV2Manager(config, credentials, ws, ps)
+        groupManager = gm
+        app.photon.service.PhotonService._signalGroupManager = gm
+
+        // After (re)connecting, sweep for contacts that have a profile key
+        // but no resolved name — earlier fetches may have failed silently
+        // (e.g. because this very WS was never connected before today). Also
+        // backfill conversation names using the Android contacts provider for
+        // anyone whose Signal profile fetch returns null name.
+        scope.launch {
+            try {
+                val contacts = messageDb.getContactsWithProfileKeyButNoName()
+                if (contacts.isNotEmpty()) {
+                    Log.i(TAG, "Profile sweep: refetching ${contacts.size} contacts")
+                    contacts.forEach { c ->
+                        profileFetcher?.fetchAsync(c.jid, c.profileKey!!) { name ->
+                            if (!name.isNullOrBlank()) {
+                                messageDb.upsertConversation(c.jid, name, false)
+                            } else {
+                                // Fall back to Android contacts by phone number.
+                                c.phone?.let { phone ->
+                                    contactResolver.resolve(phone)?.let { androidName ->
+                                        Log.i(TAG, "Backfilled ${c.jid} from Android contacts: $androidName")
+                                        messageDb.upsertConversation(c.jid, androidName, false)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Profile sweep failed: ${e.message}")
+            }
+        }
+
+        // Linked devices don't have native access to the user's address book.
+        // Ask the primary for it once per process so any contact whose Signal
+        // profile is anonymous still shows up as the locally-saved name.
+        // Throttled to a single request per session — repeating on every WS
+        // reconnect would re-download the same blob every ~30s.
+        if (!contactsSyncRequested) {
+            contactsSyncRequested = true
+            scope.launch {
+                try {
+                    delay(1500)   // let the WS settle first
+                    app.photon.service.PhotonService._signalSender?.requestContactsSync()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Couldn't request contacts sync: ${e.message}")
+                }
+            }
+        }
+
+        // Refresh conversation names from this device's local contacts on
+        // every reconnect. Cheap: ~50 PhoneLookup queries (cached per
+        // session via the resolver) plus a DB write only when the resolved
+        // name differs from what's stored. This means adding a contact in
+        // the LP3 address book causes Photon to pick up the new name on
+        // the next WS reconnect (~30s) without needing a fresh message.
+        scope.launch {
+            try {
+                contactResolver.invalidate()
+                val n = messageDb.reresolveConversationNames { phone ->
+                    contactResolver.resolve(phone)
+                }
+                if (n > 0) Log.i(TAG, "Re-resolved $n conversation names from local contacts")
+            } catch (e: Exception) {
+                Log.w(TAG, "Conversation name re-resolution failed: ${e.message}")
+            }
+        }
+
+        // Send a NullMessage to each contact we already have message history
+        // with. Without this, those contacts' apps don't know our deviceId=3
+        // exists and won't include us in their encrypted recipient list, so
+        // their messages never reach Photon. Once per contact (persisted in
+        // SharedPreferences), with a 7-day refresh so sessions don't go stale.
+        if (!activeContactsPinged) {
+            activeContactsPinged = true
+            scope.launch {
+                try {
+                    delay(8000)   // let contacts sync ingest first
+                    pingActiveContacts()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Active contact pinging failed: ${e.message}")
+                }
+            }
+        }
 
         // Upload one-time pre-keys if they haven't been uploaded yet
         uploadPreKeysIfNeeded(ws)
@@ -157,56 +315,109 @@ class SignalMessageReceiver(
             val unauthWs = unauthWebSocket ?: return
             val keysApi = KeysApi(ws, unauthWs)
 
-            // Check how many pre-keys the server has
             val countResult = keysApi.getAvailablePreKeyCounts(ServiceIdType.ACI)
             val counts = countResult.successOrThrow()
             Log.i(TAG, "Server pre-key counts: ec=${counts.ecCount}, kyber=${counts.kyberCount}")
 
-            if (counts.ecCount < 10) {
-                Log.i(TAG, "Uploading one-time EC pre-keys via PushServiceSocket...")
-                val preKeys = mutableListOf<PreKeyRecord>()
-                val startId = (counts.ecCount + 1)
-                for (i in startId..(startId + 99)) {
-                    val keyPair = ECKeyPair.generate()
-                    val preKey = PreKeyRecord(i, keyPair)
-                    protocolStore.storePreKey(i, preKey)
-                    preKeys.add(preKey)
-                }
-
-                // Also generate one-time Kyber pre-keys
-                val kyberPreKeys = mutableListOf<org.signal.libsignal.protocol.state.KyberPreKeyRecord>()
-                val identityKeyPair = protocolStore.identityKeyPair
-                for (i in 1..100) {
-                    val kyberKp = org.signal.libsignal.protocol.kem.KEMKeyPair.generate(org.signal.libsignal.protocol.kem.KEMKeyType.KYBER_1024)
-                    val sig = identityKeyPair.privateKey.calculateSignature(kyberKp.publicKey.serialize())
-                    val record = org.signal.libsignal.protocol.state.KyberPreKeyRecord(i + 1000, System.currentTimeMillis(), kyberKp, sig)
-                    protocolStore.storeKyberPreKey(i + 1000, record)
-                    kyberPreKeys.add(record)
-                }
-
-                val signedPreKey = protocolStore.loadSignedPreKeys().firstOrNull()
-                val kyberPreKey = protocolStore.loadLastResortKyberPreKeys().firstOrNull()
-
-                if (signedPreKey != null && kyberPreKey != null) {
-                    // Upload via PushServiceSocket (HTTP) since KeysApi (WebSocket) returns 422
-                    val pushSocket = PushServiceSocket(config, credentials, SignalConfig.USER_AGENT, false)
-                    val method = pushSocket.javaClass.getDeclaredMethod("makeServiceRequest", String::class.java, String::class.java, String::class.java)
-                    method.isAccessible = true
-                    val preKeyState = org.whispersystems.signalservice.internal.push.PreKeyState(
-                        org.whispersystems.signalservice.api.push.SignedPreKeyEntity(signedPreKey.id.toLong(), signedPreKey.keyPair.publicKey, signedPreKey.signature),
-                        preKeys.map { org.whispersystems.signalservice.internal.push.PreKeyEntity(it.id.toLong(), it.keyPair.publicKey) },
-                        org.whispersystems.signalservice.internal.push.KyberPreKeyEntity(kyberPreKey.id.toLong(), kyberPreKey.keyPair.publicKey, kyberPreKey.signature),
-                        kyberPreKeys.map { org.whispersystems.signalservice.internal.push.KyberPreKeyEntity(it.id.toLong(), it.keyPair.publicKey, it.signature) },
-                    )
-                    val json = org.whispersystems.signalservice.internal.util.JsonUtil.toJson(preKeyState)
-                    method.invoke(pushSocket, "/v2/keys?identity=aci", "PUT", json)
-                    Log.i(TAG, "Uploaded ${preKeys.size} EC + ${kyberPreKeys.size} Kyber pre-keys")
-                } else {
-                    Log.w(TAG, "Missing signed or kyber pre-key for upload")
-                }
-            } else {
-                Log.i(TAG, "Server has enough pre-keys (${counts.ecCount})")
+            if (counts.ecCount >= 10 && counts.kyberCount >= 10) {
+                Log.i(TAG, "Server has enough pre-keys")
+                return
             }
+
+            val identityKeyPair = protocolStore.identityKeyPair
+
+            // (1) Always rotate the signed pre-key on refill. Production clients
+            //     do this regularly. Re-uploading the original registration-time
+            //     signed pre-key was being rejected with 422 "Invalid signature"
+            //     and starving the server of one-time keys, so senders couldn't
+            //     start sessions with us — the actual cause of "no incoming msgs".
+            val signedPreKeyId = java.util.Random().nextInt(0xFFFFFF)
+            val signedKeyPair = ECKeyPair.generate()
+            val signedSignature = identityKeyPair.privateKey.calculateSignature(
+                signedKeyPair.publicKey.serialize(),
+            )
+            val signedPreKey = org.signal.libsignal.protocol.state.SignedPreKeyRecord(
+                signedPreKeyId, System.currentTimeMillis(), signedKeyPair, signedSignature,
+            )
+            protocolStore.storeSignedPreKey(signedPreKeyId, signedPreKey)
+
+            // (2) Rotate the last-resort kyber pre-key too.
+            val lastResortId = java.util.Random().nextInt(0xFFFFFF)
+            val lastResortKp = org.signal.libsignal.protocol.kem.KEMKeyPair.generate(
+                org.signal.libsignal.protocol.kem.KEMKeyType.KYBER_1024,
+            )
+            val lastResortSig = identityKeyPair.privateKey.calculateSignature(
+                lastResortKp.publicKey.serialize(),
+            )
+            val lastResortKyber = org.signal.libsignal.protocol.state.KyberPreKeyRecord(
+                lastResortId, System.currentTimeMillis(), lastResortKp, lastResortSig,
+            )
+            protocolStore.storeLastResortKyberPreKey(lastResortId, lastResortKyber)
+
+            // (3) Fresh batches of one-time EC + Kyber pre-keys.
+            val ecPreKeys = mutableListOf<PreKeyRecord>()
+            val ecStartId = (counts.ecCount + 1).coerceAtLeast(1)
+            for (i in ecStartId until (ecStartId + 100)) {
+                val keyPair = ECKeyPair.generate()
+                val rec = PreKeyRecord(i, keyPair)
+                protocolStore.storePreKey(i, rec)
+                ecPreKeys.add(rec)
+            }
+            val kyberPreKeys = mutableListOf<org.signal.libsignal.protocol.state.KyberPreKeyRecord>()
+            val kyberStartId = (counts.kyberCount + 2000).coerceAtLeast(2000)
+            for (i in kyberStartId until (kyberStartId + 100)) {
+                val kp = org.signal.libsignal.protocol.kem.KEMKeyPair.generate(
+                    org.signal.libsignal.protocol.kem.KEMKeyType.KYBER_1024,
+                )
+                val sig = identityKeyPair.privateKey.calculateSignature(kp.publicKey.serialize())
+                val rec = org.signal.libsignal.protocol.state.KyberPreKeyRecord(
+                    i, System.currentTimeMillis(), kp, sig,
+                )
+                protocolStore.storeKyberPreKey(i, rec)
+                kyberPreKeys.add(rec)
+            }
+
+            // (4) Try the canonical websocket KeysApi first. The reflection-via-
+            //     PushServiceSocket fallback is only used if that path 4xx's.
+            val upload = PreKeyUpload(
+                ServiceIdType.ACI, signedPreKey, ecPreKeys, lastResortKyber, kyberPreKeys,
+            )
+            val result = keysApi.setPreKeys(upload)
+            try {
+                result.successOrThrow()
+                Log.i(TAG, "Uploaded fresh keys via KeysApi: signed=$signedPreKeyId " +
+                    "lastResortKyber=$lastResortId ec=${ecPreKeys.size} kyber=${kyberPreKeys.size}")
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "KeysApi.setPreKeys failed (${e.message}); trying PushServiceSocket fallback")
+            }
+
+            // Fallback: HTTP PUT via reflection.
+            val pushSocket = PushServiceSocket(config, credentials, SignalConfig.USER_AGENT, false)
+            val method = pushSocket.javaClass.getDeclaredMethod(
+                "makeServiceRequest", String::class.java, String::class.java, String::class.java,
+            )
+            method.isAccessible = true
+            val preKeyState = org.whispersystems.signalservice.internal.push.PreKeyState(
+                org.whispersystems.signalservice.api.push.SignedPreKeyEntity(
+                    signedPreKey.id.toLong(), signedPreKey.keyPair.publicKey, signedPreKey.signature,
+                ),
+                ecPreKeys.map {
+                    org.whispersystems.signalservice.internal.push.PreKeyEntity(it.id.toLong(), it.keyPair.publicKey)
+                },
+                org.whispersystems.signalservice.internal.push.KyberPreKeyEntity(
+                    lastResortKyber.id.toLong(), lastResortKyber.keyPair.publicKey, lastResortKyber.signature,
+                ),
+                kyberPreKeys.map {
+                    org.whispersystems.signalservice.internal.push.KyberPreKeyEntity(
+                        it.id.toLong(), it.keyPair.publicKey, it.signature,
+                    )
+                },
+            )
+            val json = org.whispersystems.signalservice.internal.util.JsonUtil.toJson(preKeyState)
+            method.invoke(pushSocket, "/v2/keys?identity=aci", "PUT", json)
+            Log.i(TAG, "Uploaded fresh keys via PushServiceSocket fallback: signed=$signedPreKeyId " +
+                "lastResortKyber=$lastResortId ec=${ecPreKeys.size} kyber=${kyberPreKeys.size}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to upload pre-keys", e)
         }
@@ -217,12 +428,18 @@ class SignalMessageReceiver(
         val aci = credentials.aci ?: return
         val localAddress = SignalServiceAddress(aci)
         val deviceId = credentials.deviceId
+        Log.i(TAG, "Reading as aci=$aci deviceId=$deviceId — other users must have a session " +
+            "with this deviceId for their messages to reach us.")
 
-        // Create certificate validator for sealed sender
+        // Certificate validator for sealed sender. Signal has TWO production
+        // trust roots in current builds — server certs are signed by whichever
+        // is the active root at the time of issuance. Including both lets us
+        // accept legitimate certs regardless of which root signed them.
         val certificateValidator = try {
-            val trustRootBytes = Base64.decode(SignalConfig.UNIDENTIFIED_SENDER_TRUST_ROOT, Base64.DEFAULT)
-            val trustRoot = ECPublicKey(trustRootBytes)
-            CertificateValidator(trustRoot)
+            val trustRoots = SignalConfig.UNIDENTIFIED_SENDER_TRUST_ROOTS.map { encoded ->
+                ECPublicKey(Base64.decode(encoded, Base64.DEFAULT))
+            }
+            CertificateValidator(trustRoots)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to create certificate validator, sealed sender may fail", e)
             null
@@ -238,6 +455,13 @@ class SignalMessageReceiver(
                 val hasMore = ws.readMessageBatch(30_000, 10) { envelopes ->
                     Log.i(TAG, "Received batch of ${envelopes.size} envelopes")
                     for (envelope in envelopes) {
+                        val env = envelope.envelope
+                        Log.i(
+                            TAG,
+                            "Envelope type=${env.type} src=${env.sourceServiceId ?: "sealed"} " +
+                                "dest=${env.destinationServiceId} urgent=${env.urgent} " +
+                                "contentLen=${env.content?.size ?: 0}",
+                        )
                         processEnvelope(envelope, cipher, ws)
                     }
                 }
@@ -318,17 +542,56 @@ class SignalMessageReceiver(
         // Kick off an async profile fetch whenever we haven't resolved a display name yet.
         maybeFetchProfile(senderAci)
 
-        // Determine conversation JID
-        val groupId = metadata.groupId
-        val conversationJid = if (groupId != null && groupId.isNotEmpty()) {
-            Base64.encodeToString(groupId, Base64.NO_WRAP or Base64.URL_SAFE)
+        // Determine conversation JID. Two sources of "this is a group":
+        // (a) libsignal extracted `metadata.groupId` during decryption (the
+        //     16-byte stable identifier), or
+        // (b) the DataMessage carries `groupV2.masterKey`, from which we
+        //     can derive the same identifier ourselves.
+        // We prefer the masterKey path because it gives us the material
+        // needed to fetch + decrypt the group's title and members.
+        val groupV2 = data.groupV2
+        val groupMasterKey = groupV2?.masterKey?.toByteArray()?.takeIf { it.size == 32 }
+        val groupRevision = groupV2?.revision ?: 0
+
+        val metaGroupId = metadata.groupId
+        val derivedGroupId = groupMasterKey?.let { mk ->
+            try { groupManager?.groupIdFromMasterKey(mk) } catch (_: Exception) { null }
+        }
+
+        val groupIdBytes = derivedGroupId ?: metaGroupId
+        val isGroup = groupIdBytes != null && groupIdBytes.isNotEmpty()
+        val conversationJid = if (isGroup) {
+            Base64.encodeToString(groupIdBytes, Base64.NO_WRAP or Base64.URL_SAFE)
         } else {
             senderAci
         }
-        val isGroup = groupId != null && groupId.isNotEmpty()
 
         // Unique message ID: use sender + timestamp + random suffix for collision resistance
         val messageId = "${senderAci}_${timestamp}_${UUID.randomUUID().toString().take(8)}"
+
+        // Seed group metadata BEFORE the body-vs-sticker early-return below.
+        // Many in-group messages have no body or sticker (sender-key
+        // distribution prelude, group state changes, typing indicators with
+        // no payload, etc.) — but they often DO carry `groupV2.masterKey`,
+        // which is the only material we need to fetch the group's name and
+        // member list. Bailing out without storing it leaves the group
+        // permanently unnamed and unable to receive outgoing sends.
+        if (isGroup && groupMasterKey != null) {
+            val existingName = messageDb.getConversation(conversationJid)?.name
+            val placeholder = existingName?.takeIf { it.isNotBlank() && it != conversationJid }
+                ?: "Signal group"
+            messageDb.upsertConversation(jid = conversationJid, name = placeholder, isGroup = true)
+            val storedRevision = messageDb.getGroupMeta(conversationJid)?.revision ?: -1
+            messageDb.updateGroupMeta(conversationJid, groupMasterKey, groupRevision)
+            val needsFetch = existingName.isNullOrBlank() ||
+                existingName == "Signal group" ||
+                existingName == conversationJid ||
+                storedRevision < groupRevision
+            if (needsFetch) {
+                Log.i(TAG, "Group ${conversationJid.take(12)}…: seeding masterKey + fetching state (rev=$groupRevision)")
+                scope.launch { resolveGroupMetadata(conversationJid, groupMasterKey) }
+            }
+        }
 
         // Handle reactions
         if (data.reaction != null) {
@@ -361,11 +624,26 @@ class SignalMessageReceiver(
             else -> "text"
         }
 
-        // Ensure conversation exists
-        val contactName = messageDb.getContactName(if (isGroup) conversationJid else senderAci)
+        // Resolve a friendly name for the sender. Order: Android local
+        // contacts (this device's address book) → Signal profile name (when
+        // it actually returns one) → bare E.164. The user does not want
+        // names from the primary device's address book to leak in here.
+        val senderName = senderE164?.let { contactResolver.resolve(it) }
+            ?: messageDb.getContact(senderAci)?.profileName?.takeIf { it.isNotBlank() }
             ?: senderE164
-        messageDb.upsertConversation(jid = conversationJid, name = contactName, isGroup = isGroup)
-        if (!isGroup) maybeFetchProfile(senderAci)
+
+        if (isGroup) {
+            // Master key + conversation row already seeded above (before
+            // the body check). Here we only do the per-message work:
+            // record the sender as a known participant so per-message
+            // sender labels render in group transcripts.
+            if (!senderName.isNullOrBlank()) {
+                messageDb.upsertParticipant(conversationJid, senderAci, senderName, "member")
+            }
+        } else {
+            messageDb.upsertConversation(jid = conversationJid, name = senderName, isGroup = false)
+            maybeFetchProfile(senderAci)
+        }
 
         // Quote reference (if this incoming message is a reply). Stored as the stable
         // "{authorAci}_{sentTimestampMs}" prefix — matches our local ID scheme minus the
@@ -391,16 +669,52 @@ class SignalMessageReceiver(
         messageDb.updateConversationLastMessage(conversationJid, messageId, timestamp / 1000)
         messageDb.incrementUnread(conversationJid)
 
-        // Show notification
+        // Show notification — for groups, title is the group name (with the
+        // sender's name woven into the body); for DMs it's the sender.
+        val notifTitle = if (isGroup) {
+            "Signal group"
+        } else {
+            senderName ?: senderAci.take(8)
+        }
+        val notifBody = if (isGroup && !senderName.isNullOrBlank() && body != null) {
+            "$senderName: $body"
+        } else body
         app.photon.service.NotificationHelper.showMessageNotification(
-            context, contactName ?: senderAci.take(8), body, "Signal", conversationJid,
+            context, notifTitle, notifBody, "Signal", conversationJid,
         )
 
         Log.d(TAG, "Stored message from $senderAci: ${body?.take(30) ?: contentType}")
     }
 
     private fun processSyncMessage(sync: SyncMessage, metadata: EnvelopeMetadata) {
-        Log.d(TAG, "Sync message: sent=${sync.sent != null}, contacts=${sync.contacts != null}, read=${!sync.read.isNullOrEmpty()}")
+        // Enumerate every non-null sub-field so we know which kind of sync this is.
+        val kinds = buildList {
+            if (sync.sent != null) add("sent")
+            if (sync.contacts != null) add("contacts")
+            if (sync.groups != null) add("groups")
+            if (sync.request != null) add("request")
+            if (sync.blocked != null) add("blocked")
+            if (sync.verified != null) add("verified")
+            if (sync.configuration != null) add("configuration")
+            if (sync.viewOnceOpen != null) add("viewOnceOpen")
+            sync.fetchLatest?.let { add("fetchLatest(${it.type})") }
+            if (sync.keys != null) add("keys")
+            if (sync.messageRequestResponse != null) add("messageRequestResponse")
+            if (sync.outgoingPayment != null) add("outgoingPayment")
+            if (sync.pniChangeNumber != null) add("pniChangeNumber")
+            if (sync.callEvent != null) add("callEvent")
+            if (sync.callLinkUpdate != null) add("callLinkUpdate")
+            if (sync.callLogEvent != null) add("callLogEvent")
+            if (sync.deleteForMe != null) add("deleteForMe")
+            if (sync.deviceNameChange != null) add("deviceNameChange")
+            if (sync.attachmentBackfillRequest != null) add("attachmentBackfillRequest")
+            if (sync.attachmentBackfillResponse != null) add("attachmentBackfillResponse")
+            if (!sync.read.isNullOrEmpty()) add("read[${sync.read.size}]")
+            if (!sync.viewed.isNullOrEmpty()) add("viewed[${sync.viewed.size}]")
+            if (!sync.stickerPackOperation.isNullOrEmpty()) add("stickerPackOperation[${sync.stickerPackOperation.size}]")
+            sync.padding?.let { if (it.size > 0) add("padding[${it.size}B]") }
+        }
+        Log.i(TAG, "Sync message kinds: ${if (kinds.isEmpty()) "<none>" else kinds.joinToString(",")}")
         // Sent messages from our primary device
         val sent = sync.sent
         if (sent != null) {
@@ -408,7 +722,60 @@ class SignalMessageReceiver(
         }
         if (sent != null && sent.message != null) {
             val data = sent.message!!
-            // Try multiple destination fields
+            val timestamp = data.timestamp ?: System.currentTimeMillis()
+            val myAci = credentials.aciString ?: return
+            val messageId = "${myAci}_${timestamp}_${UUID.randomUUID().toString().take(8)}"
+
+            // Group case: route into the group conversation regardless of
+            // destinationServiceId (which is unset for group sends from the
+            // primary, and the existing handler used to drop them silently —
+            // that was the root cause of groups appearing missing for users
+            // who only sent into them rather than received from them).
+            val groupV2 = data.groupV2
+            val groupMasterKey = groupV2?.masterKey?.toByteArray()?.takeIf { it.size == 32 }
+            if (groupMasterKey != null) {
+                val gm = groupManager
+                val derived = try { gm?.groupIdFromMasterKey(groupMasterKey) } catch (_: Exception) { null }
+                if (derived != null) {
+                    val convJid = Base64.encodeToString(derived, Base64.NO_WRAP or Base64.URL_SAFE)
+                    val existing = messageDb.getConversation(convJid)?.name
+                    val placeholder = existing?.takeIf { it.isNotBlank() && it != convJid }
+                        ?: "Signal group"
+                    messageDb.upsertConversation(jid = convJid, name = placeholder, isGroup = true)
+                    val rev = groupV2.revision ?: 0
+                    val storedRev = messageDb.getGroupMeta(convJid)?.revision ?: -1
+                    messageDb.updateGroupMeta(convJid, groupMasterKey, rev)
+                    if (existing.isNullOrBlank() || existing == "Signal group" || storedRev < rev) {
+                        scope.launch { resolveGroupMetadata(convJid, groupMasterKey) }
+                    }
+
+                    val body = data.body
+                    if (body != null) {
+                        val syncReplyPrefix = data.quote?.let { q ->
+                            val qAuthor = q.authorAci ?: return@let null
+                            val qId = q.id ?: return@let null
+                            "${qAuthor}_$qId"
+                        }
+                        messageDb.insertMessage(
+                            id = messageId,
+                            conversationJid = convJid,
+                            senderJid = myAci,
+                            timestamp = timestamp / 1000,
+                            contentType = "text",
+                            textBody = body,
+                            replyToId = syncReplyPrefix,
+                            isFromMe = true,
+                            status = "sent",
+                        )
+                        messageDb.updateConversationLastMessage(convJid, messageId, timestamp / 1000)
+                        Log.d(TAG, "Stored sync sent message into group ${convJid.take(12)}…")
+                    }
+                    return
+                }
+                Log.w(TAG, "Sync sent has groupV2 but groupManager unavailable; falling through")
+            }
+
+            // DM case: needs a destination on the sync transcript.
             val destinationAci = sent.destinationServiceId
                 ?: sent.destinationServiceIdBinary?.let {
                     try { org.signal.core.models.ServiceId.parseOrNull(it.toByteArray())?.toString() }
@@ -419,9 +786,6 @@ class SignalMessageReceiver(
                     Log.w(TAG, "Sync sent message has no destination, skipping")
                     return
                 }
-            val timestamp = data.timestamp ?: System.currentTimeMillis()
-            val myAci = credentials.aciString ?: return
-            val messageId = "${myAci}_${timestamp}_${UUID.randomUUID().toString().take(8)}"
 
             val body = data.body
             if (body != null) {
@@ -432,10 +796,18 @@ class SignalMessageReceiver(
                     messageDb.updateContactProfileKey(destinationAci, syncProfileKey)
                 }
 
-                // Resolve conversation name
-                val convName = messageDb.getContactName(destinationAci)
-                    ?: if (destinationAci == myAci) "Note to Self"
-                    else sent.destinationE164
+                // Resolve conversation name. Order: Android local contacts
+                // → Signal profile name → phone number. Do NOT use primary's
+                // address-book name (we ingest only phone numbers from
+                // SyncMessage.contacts, not names).
+                val phone = sent.destinationE164
+                val storedProfileName = messageDb.getContact(destinationAci)
+                    ?.profileName?.takeIf { it.isNotBlank() }
+                val convName = when {
+                    destinationAci == myAci -> "Note to Self"
+                    phone != null -> contactResolver.resolve(phone) ?: storedProfileName ?: phone
+                    else -> storedProfileName
+                }
 
                 messageDb.upsertConversation(
                     jid = destinationAci,
@@ -464,22 +836,204 @@ class SignalMessageReceiver(
             Log.d(TAG, "Stored sync sent message to $destinationAci")
         }
 
-        // Read receipts from primary — mark conversations as read
+        // Read receipts from primary — mark conversations as read AND clear our
+        // local notification so the banner disappears as soon as the user reads
+        // the message elsewhere, not only when they open the chat in Photon.
         val reads = sync.read
         if (!reads.isNullOrEmpty()) {
             for (read in reads) {
                 val senderAci = read.senderAci
                 if (senderAci != null) {
                     messageDb.resetUnread(senderAci)
+                    app.photon.service.NotificationHelper.cancelForConversation(context, senderAci)
                 }
             }
         }
 
-        // Contacts sync — store names
+        // Contacts sync — download the attachment blob and ingest each
+        // DeviceContact (name + phone + ACI from the primary's address book).
         val contacts = sync.contacts
         if (contacts != null) {
-            Log.d(TAG, "Received contacts sync (blob — not yet processed)")
+            val blob = contacts.blob
+            if (blob != null) {
+                scope.launch { processContactsBlob(blob) }
+            } else {
+                Log.d(TAG, "Contacts sync had no blob")
+            }
         }
+    }
+
+    /**
+     * Downloads, decrypts, and parses a sync.contacts attachment.
+     * Each DeviceContact in the stream gets its name + phone stored as a
+     * contact record, and any conversation with that ACI gets its display
+     * name updated to the primary device's local contact name.
+     */
+    private fun processContactsBlob(blob: AttachmentPointer) {
+        val push = pushSocket
+        if (push == null) {
+            Log.w(TAG, "processContactsBlob: pushSocket not initialised")
+            return
+        }
+        val publicPointer = try {
+            AttachmentPointerUtil.createSignalAttachmentPointer(blob)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to build attachment pointer: ${e.message}")
+            return
+        }
+        val digest = publicPointer.digest.orElse(null)
+        if (digest == null) {
+            Log.w(TAG, "Contacts blob has no digest, can't verify; skipping")
+            return
+        }
+        val tempDir = File(context.cacheDir, "signal_sync").apply { mkdirs() }
+        val cipherFile = File(tempDir, "contacts_${System.currentTimeMillis()}.bin")
+        try {
+            val messageReceiver = SignalServiceMessageReceiver(push)
+            val plain = messageReceiver.retrieveAttachment(
+                publicPointer,
+                cipherFile,
+                MAX_CONTACTS_BLOB_BYTES,
+                AttachmentCipherInputStream.IntegrityCheck.forEncryptedDigest(digest),
+            )
+            val stream = DeviceContactsInputStream(plain)
+            var count = 0
+            while (true) {
+                // Catch Throwable (not just Exception) — a malformed/truncated
+                // stream can produce nonsense length prefixes that trigger
+                // OutOfMemoryError when the parser tries to allocate a buffer.
+                // OOM is Error not Exception, so a plain Exception catch lets
+                // it escape and crashes the process.
+                val contact = try {
+                    stream.read()
+                } catch (t: Throwable) {
+                    Log.w(TAG, "DeviceContactsInputStream.read threw after $count contacts: ${t.javaClass.simpleName}: ${t.message}")
+                    break
+                } ?: break
+                try {
+                    ingestDeviceContact(contact)
+                    count++
+                } catch (t: Throwable) {
+                    Log.w(TAG, "ingestDeviceContact threw: ${t.message}")
+                }
+                // DeviceContactsInputStream returns each contact with a
+                // LimitedInputStream wrapping its avatar bytes. If we don't
+                // drain it, the underlying stream is still pointing inside
+                // the avatar payload when read() is called for the next
+                // contact — and the parser will interpret avatar bytes as a
+                // varint length, leading to OOM on the bogus allocation.
+                contact.avatar.orElse(null)?.inputStream?.let { avatarStream ->
+                    try {
+                        val buf = ByteArray(8192)
+                        while (avatarStream.read(buf) >= 0) { /* discard */ }
+                    } catch (_: Throwable) { /* ignore */ }
+                }
+            }
+            Log.i(TAG, "Contacts sync: ingested $count contacts")
+        } catch (t: Throwable) {
+            Log.w(TAG, "Contacts sync download/parse failed: ${t.javaClass.simpleName}: ${t.message}", t)
+        } finally {
+            cipherFile.delete()
+        }
+    }
+
+    /**
+     * Sends a Signal NullMessage to each ACI we've ever exchanged messages
+     * with (sync transcripts count). The recipient processes the NullMessage
+     * silently — no notification, no chat entry — but it forces their app to
+     * notice our deviceId and add us to their encrypted-recipient list. Their
+     * subsequent messages then reach Photon.
+     *
+     * Tracked per-ACI in SharedPreferences so we ping each contact at most
+     * once per refresh window (currently 7 days).
+     */
+    private suspend fun pingActiveContacts() {
+        val sender = app.photon.service.PhotonService._signalSender ?: run {
+            Log.d(TAG, "Skipping active-contact ping: sender not ready")
+            return
+        }
+        val myAci = credentials.aciString?.lowercase()
+        val prefs = context.getSharedPreferences("signal_ping_state", android.content.Context.MODE_PRIVATE)
+        val refreshCutoff = System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000
+
+        val targets = messageDb.getJidsWithMessages()
+            .filter { it.lowercase() != myAci }
+            .filter { prefs.getLong(it, 0L) < refreshCutoff }
+
+        if (targets.isEmpty()) return
+        Log.i(TAG, "Pinging ${targets.size} active Signal contacts to establish deviceId=${credentials.deviceId} sessions")
+        for (jid in targets) {
+            val ok = sender.sendSessionPing(jid)
+            if (ok) prefs.edit().putLong(jid, System.currentTimeMillis()).apply()
+            // Stagger so we don't burst the server. 800ms between pings is
+            // generous; with ~10 active contacts, total wall time ~8s.
+            delay(800)
+        }
+        Log.i(TAG, "Active-contact pinging complete")
+    }
+
+    private fun ingestDeviceContact(
+        contact: org.whispersystems.signalservice.api.messages.multidevice.DeviceContact,
+    ) {
+        val aci = contact.aci.orElse(null)?.toString() ?: return
+        val phone = contact.e164.orElse(null)
+
+        // We intentionally do NOT ingest the name from the primary's address
+        // book. The user wants this device's local contacts to be the source
+        // of truth — names get resolved via AndroidContactResolver at the
+        // point of writing the conversation row. We only persist the
+        // ACI<->phone mapping here so that resolution can happen on
+        // incoming messages even before the contact has messaged us.
+        if (phone != null) {
+            messageDb.updateContactPhone(aci, phone)
+            // Pre-resolve a name from local contacts and upsert the
+            // conversation row. If there's no local match the conversation
+            // stays nameless (UI will show the phone number).
+            val androidName = contactResolver.resolve(phone)
+            if (androidName != null) {
+                messageDb.upsertConversation(jid = aci, name = androidName, isGroup = false)
+                Log.d(TAG, "Synced contact $aci: phone=$phone, local name=$androidName")
+            } else {
+                Log.d(TAG, "Synced contact $aci: phone=$phone (no local name)")
+            }
+        }
+    }
+
+    /**
+     * Async-fetch the GroupV2 state from the server (title + members),
+     * decrypt it via libsignal's GroupsV2Operations, and write back: the
+     * conversation row's `name` becomes the decrypted title, and every
+     * member ACI lands in the participants table so per-message sender
+     * names show up in the chat. Failures are non-fatal — the placeholder
+     * "Signal group" stays until the next message triggers another try.
+     */
+    private fun resolveGroupMetadata(conversationJid: String, masterKey: ByteArray) {
+        val gm = groupManager ?: run {
+            Log.w(TAG, "Group fetch skipped: manager not ready for ${conversationJid.take(12)}…")
+            return
+        }
+        val group = gm.fetchGroup(masterKey) ?: run {
+            Log.w(TAG, "Group fetch returned null for ${conversationJid.take(12)}… — see GroupV2Manager warnings")
+            return
+        }
+        val title = group.title?.takeIf { it.isNotBlank() } ?: "Signal group"
+        messageDb.upsertConversation(jid = conversationJid, name = title, isGroup = true)
+
+        val acis = gm.memberAcis(group)
+        for (memberAci in acis) {
+            val aciString = memberAci.toString()
+            // Best-effort display name for each member:
+            //   1. Their stored profile name (if we ever fetched it)
+            //   2. The contact name resolved from their phone via Android contacts
+            //   3. Bare ACI prefix as last resort — better than the bytes
+            val contact = messageDb.getContact(aciString)
+            val name = contact?.profileName?.takeIf { it.isNotBlank() }
+                ?: contact?.phone?.let { contactResolver.resolve(it) }
+                ?: contact?.phone
+                ?: aciString.take(8)
+            messageDb.upsertParticipant(conversationJid, aciString, name, "member")
+        }
+        Log.i(TAG, "Resolved group ${conversationJid.take(12)}…: $title (${acis.size} members)")
     }
 
     private fun maybeFetchProfile(aci: String) {

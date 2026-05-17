@@ -10,8 +10,11 @@ import app.photon.PhotonApp
 import app.photon.data.PhotonPreferences
 
 object NotificationHelper {
-    private var nextId = 100
-    private val conversationNotifIds = mutableMapOf<String, MutableList<Int>>()
+    // One notification per conversation, keyed by tag=conversationJid. Using a tag
+    // (instead of a per-message incrementing id tracked in an in-memory map) means
+    // cancellation still works after the process is restarted, and new messages in
+    // the same chat replace the existing notification instead of stacking endlessly.
+    private const val MESSAGE_NOTIF_ID = 1
 
     fun showMessageNotification(
         context: Context,
@@ -27,7 +30,9 @@ object NotificationHelper {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         val pendingIntent = PendingIntent.getActivity(
-            context, nextId, intent,
+            context,
+            conversationJid?.hashCode() ?: 0,
+            intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
@@ -44,19 +49,15 @@ object NotificationHelper {
             .build()
 
         try {
-            val id = nextId++
-            NotificationManagerCompat.from(context).notify(id, notification)
-            if (conversationJid != null) {
-                conversationNotifIds.getOrPut(conversationJid) { mutableListOf() }.add(id)
-            }
+            NotificationManagerCompat.from(context).notify(
+                conversationJid, MESSAGE_NOTIF_ID, notification,
+            )
         } catch (_: SecurityException) {
             // Notification permission not granted
         }
     }
 
     fun cancelForConversation(context: Context, conversationJid: String) {
-        conversationNotifIds.remove(conversationJid)?.forEach {
-            NotificationManagerCompat.from(context).cancel(it)
-        }
+        NotificationManagerCompat.from(context).cancel(conversationJid, MESSAGE_NOTIF_ID)
     }
 }

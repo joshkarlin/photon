@@ -1,6 +1,7 @@
 package app.photon.ui.signal
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -15,19 +16,31 @@ import app.photon.ui.shared.components.MediaViewer
 import kotlinx.coroutines.launch
 
 @Composable
-fun SignalChatScreen(jid: String, onBack: () -> Unit) {
+fun SignalChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, onBack: () -> Unit) {
     val repo = PhotonService._signalRepository ?: return
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val conversation = remember(jid) { repo.getConversation(jid) }
+    // Observe the conversations StateFlow so the title updates live when
+    // the conversation row is re-resolved (e.g. after the user saves a
+    // contact via the in-app editor). Falls back to a one-shot read if the
+    // hot StateFlow hasn't emitted yet.
+    val convs by repo.conversations.collectAsState()
+    val conversation = convs?.firstOrNull { it.jid == jid } ?: remember(jid) { repo.getConversation(jid) }
     val isGroup = conversation?.isGroup ?: false
     val title = conversation?.name?.takeIf { it.isNotBlank() } ?: jid.take(8) + "..."
     var viewingMedia by remember { mutableStateOf<Message?>(null) }
+    // Participant names are written by the receiver as group messages come
+    // in. Re-read on every conversation update so a new sender's name shows
+    // without a navigation away/back.
+    val participantNames = remember(jid, convs) {
+        if (isGroup) repo.getParticipantNames(jid) else emptyMap()
+    }
 
     ChatScreenContent(
         title = title,
         messagesFlow = repo.messages(jid),
         isGroup = isGroup,
+        participantNames = participantNames,
         onSendText = { msg, replyToId -> scope.launch { repo.sendMessage(jid, msg, replyToId) } },
         onSendAudio = { path, replyToId -> scope.launch { repo.sendMedia(jid, path, "audio/ogg", null, replyToId) } },
         onBack = onBack,
@@ -39,6 +52,12 @@ fun SignalChatScreen(jid: String, onBack: () -> Unit) {
         onReact = { messageId, senderJid, emoji ->
             scope.launch { try { repo.sendReaction(jid, messageId, senderJid, emoji) } catch (_: Exception) {} }
         },
+        onRetry = { messageId ->
+            scope.launch { try { repo.retryMessage(messageId) } catch (_: Exception) {} }
+        },
+        onTitleClick = if (!isGroup) {
+            { val phone = repo.getContactPhone(jid); if (phone != null) onContact(phone, title) }
+        } else null,
     )
 
     // Media viewer overlay
