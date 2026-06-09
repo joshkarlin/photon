@@ -2,8 +2,8 @@ package app.photon.signal
 
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
-import app.photon.data.repository.pollingConversationsFlow
-import app.photon.data.repository.pollingMessagesFlow
+import app.photon.data.repository.conversationsFlow
+import app.photon.data.repository.messagesFlow
 import app.photon.signal.db.SignalMessageDatabase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,10 +17,11 @@ class SignalRepository(
     scope: CoroutineScope,
 ) {
     val conversations: StateFlow<List<Conversation>?> =
-        pollingConversationsFlow(scope, "SignalRepository") { db.getConversations() }
+        conversationsFlow(scope, "SignalRepository", db.changes) { db.getConversations() }
 
     fun messages(conversationJid: String, limit: Int = 50): Flow<List<Message>> =
-        pollingMessagesFlow(
+        messagesFlow(
+            changes = db.changes,
             load = { db.getMessages(conversationJid, limit) },
             loadReactions = { db.getReactions(it) },
             lookupReply = { db.findMessageByPrefix(it) },

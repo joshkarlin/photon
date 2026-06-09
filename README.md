@@ -186,6 +186,7 @@ Per-platform status, refresh connection, and reset (clear data + re-pair).
 - Kyber pre-keys stored as `is_last_resort=1` to prevent deletion after first use.
 - Signal GroupV2: `master_key` + `revision` stored per-conversation; member list cached in the `participants` table. Server fetch only when receiver sees an incoming message with a higher revision (or on first-ever send into a never-received-from group). No periodic refresh.
 - Failed-send recovery: outgoing rows are inserted with `status=sending` before the wire call (Go bridge pre-generates the stanza id for WhatsApp; Signal/SMS reuse the local id). Status flips to `sent`/`failed` on result. Retry reuses the same id + wire timestamp so recipients dedupe.
+- UI refresh is event-driven: WhatsApp re-queries on Go-bridge WebSocket events (plus reconnect), Signal on a change flow emitted by its message DB, SMS via ContentObserver. A 45s fallback re-query catches missed events; queries stop when no screen is subscribed.
 - Kotlin 2.1.0, AGP 8.5.2, core library desugaring enabled.
 
 ## License

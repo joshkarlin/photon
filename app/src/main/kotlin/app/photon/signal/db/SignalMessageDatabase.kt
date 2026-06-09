@@ -13,6 +13,8 @@ import app.photon.data.model.Conversation
 import app.photon.data.model.Message
 import app.photon.data.model.Reaction
 import app.photon.data.model.Participant
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 
 class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
     context, "signal_messages.db", null, 3,
@@ -120,6 +122,19 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    // ── Change notifications ──
+
+    // Emits after every write so SignalRepository can re-query instead of
+    // polling. The receiver and sender both go through this class for all
+    // writes, so this is the single chokepoint. Conflated by the consumer —
+    // tryEmit dropping a signal during a burst is fine.
+    private val _changes = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val changes: SharedFlow<Unit> = _changes
+
+    private fun notifyChanged() {
+        _changes.tryEmit(Unit)
+    }
+
     // ── Write methods ──
 
     fun upsertConversation(
@@ -156,6 +171,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                 System.currentTimeMillis(),
             ),
         )
+        notifyChanged()
     }
 
     fun updateConversationLastMessage(jid: String, messageId: String, timestamp: Long) {
@@ -163,6 +179,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             "UPDATE conversations SET last_message_id = ?, last_timestamp = ?, updated_at = ? WHERE jid = ?",
             arrayOf(messageId, timestamp, System.currentTimeMillis(), jid),
         )
+        notifyChanged()
     }
 
     fun incrementUnread(jid: String) {
@@ -170,6 +187,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             "UPDATE conversations SET unread_count = unread_count + 1 WHERE jid = ?",
             arrayOf(jid),
         )
+        notifyChanged()
     }
 
     fun resetUnread(jid: String) {
@@ -177,6 +195,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             "UPDATE conversations SET unread_count = 0 WHERE jid = ?",
             arrayOf(jid),
         )
+        notifyChanged()
     }
 
     /**
@@ -190,6 +209,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             "UPDATE conversations SET master_key = ?, group_revision = ? WHERE jid = ?",
             arrayOf<Any?>(masterKey, revision, jid),
         )
+        notifyChanged()
     }
 
     data class GroupMeta(val masterKey: ByteArray, val revision: Int)
@@ -238,6 +258,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             },
             SQLiteDatabase.CONFLICT_IGNORE,
         )
+        notifyChanged()
     }
 
     fun updateMessageStatus(id: String, status: String) {
@@ -245,6 +266,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             "UPDATE messages SET status = ? WHERE id = ?",
             arrayOf(status, id),
         )
+        notifyChanged()
     }
 
     fun updateMediaUrl(id: String, url: String) {
@@ -252,6 +274,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             "UPDATE messages SET media_url = ? WHERE id = ?",
             arrayOf(url, id),
         )
+        notifyChanged()
     }
 
     fun upsertReaction(messageId: String, senderJid: String, emoji: String, timestamp: Long) {
@@ -265,6 +288,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             },
             SQLiteDatabase.CONFLICT_REPLACE,
         )
+        notifyChanged()
     }
 
     fun upsertParticipant(conversationJid: String, jid: String, displayName: String?, role: String = "member") {
@@ -280,6 +304,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             """,
             arrayOf<Any?>(conversationJid, jid, displayName, role),
         )
+        notifyChanged()
     }
 
     fun getParticipants(conversationJid: String): List<Participant> {
@@ -310,6 +335,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             """,
             arrayOf<Any?>(jid, phone, System.currentTimeMillis()),
         )
+        notifyChanged()
     }
 
     fun updateContactProfileKey(jid: String, profileKey: ByteArray) {
@@ -332,6 +358,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             """,
             arrayOf<Any?>(jid, profileName, System.currentTimeMillis(), System.currentTimeMillis()),
         )
+        notifyChanged()
     }
 
     data class Contact(
@@ -438,6 +465,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         writableDatabase.execSQL(
             "UPDATE contacts SET profile_name = NULL, profile_fetched_at = 0",
         )
+        notifyChanged()
     }
 
     /**
@@ -473,6 +501,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                 }
             }
         }
+        if (updated > 0) notifyChanged()
         return updated
     }
 
@@ -495,6 +524,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             WHERE EXISTS (SELECT 1 FROM messages WHERE messages.conversation_jid = conversations.jid)
             """,
         )
+        notifyChanged()
     }
 
     /**
@@ -552,6 +582,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             "UPDATE messages SET status = ? WHERE id >= ? AND id < ? AND is_from_me = 1 AND status != 'read'",
             arrayOf(status, "${prefix}_", "${prefix}_\uFFFF"),
         )
+        notifyChanged()
     }
 
     fun getReactions(messageIds: List<String>): Map<String, List<Reaction>> {
