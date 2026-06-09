@@ -11,6 +11,30 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// resolveLIDJID resolves an @lid JID to its phone-based JID when the mapping
+// is known. Returns the input unchanged for non-LID JIDs or unknown mappings.
+// All conversation keys must go through this so LID and phone events land in
+// the same row.
+func (b *Bridge) resolveLIDJID(jid types.JID) types.JID {
+	if jid.Server != types.HiddenUserServer {
+		return jid
+	}
+	if pn, err := b.client.Store.LIDs.GetPNForLID(context.Background(), jid); err == nil && !pn.IsEmpty() {
+		return pn
+	}
+	return jid
+}
+
+// resolveLIDString is resolveLIDJID for raw JID strings (WS API params,
+// history sync payloads).
+func (b *Bridge) resolveLIDString(jidStr string) string {
+	parsed, err := types.ParseJID(jidStr)
+	if err != nil {
+		return jidStr
+	}
+	return b.resolveLIDJID(parsed).String()
+}
+
 // HandleEvent is the master event handler for whatsmeow events.
 func (b *Bridge) HandleEvent(evt interface{}) {
 	switch v := evt.(type) {
@@ -32,6 +56,9 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 				delay := time.Duration(10*(i+1)) * time.Second
 				b.log.Infof("Contact backfill attempt %d in %s...", i+1, delay)
 				time.Sleep(delay)
+				// LID mappings also arrive via app state sync, so retry the
+				// duplicate merge on the same schedule as the name backfill.
+				b.MergeLIDConversations()
 				b.BackfillContactNames()
 			}
 		}()
@@ -62,13 +89,8 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 // MuteEndTimestamp==0 means "mute until unmuted"; a future value means
 // "mute until that time"; a past value means the mute has expired.
 func (b *Bridge) handleMute(evt *events.Mute) {
-	jid := evt.JID.String()
 	// Resolve LID to phone JID so keys match our conversations table.
-	if evt.JID.Server == types.HiddenUserServer {
-		if pn, err := b.client.Store.LIDs.GetPNForLID(context.Background(), evt.JID); err == nil && !pn.IsEmpty() {
-			jid = pn.String()
-		}
-	}
+	jid := b.resolveLIDJID(evt.JID).String()
 
 	muted := false
 	if evt.Action != nil && evt.Action.GetMuted() {
@@ -89,12 +111,8 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 	}
 
 	// Resolve LID JIDs to phone-based JIDs for consistent conversation keys
-	chatJID := evt.Info.Chat.String()
-	if evt.Info.Chat.Server == types.HiddenUserServer {
-		if pn, err := b.client.Store.LIDs.GetPNForLID(context.Background(), evt.Info.Chat); err == nil && !pn.IsEmpty() {
-			chatJID = pn.String()
-		}
-	}
+	resolvedChat := b.resolveLIDJID(evt.Info.Chat)
+	chatJID := resolvedChat.String()
 	senderJID := evt.Info.Sender.String()
 	isFromMe := evt.Info.IsFromMe
 	msgID := evt.Info.ID
@@ -189,6 +207,7 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 
 	// Update conversation
 	name := ""
+	nameIsAuthoritative := false
 	isGroup := evt.Info.Chat.Server == types.GroupServer
 	if isGroup {
 		// For groups, get the group name from group info
@@ -212,30 +231,42 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 			b.UpsertParticipant(chatJID, senderJID, senderDisplayName, "member")
 		}
 	} else {
-		// For DMs, use push name or contact store
-		// Only use push name from the OTHER person, not ourselves
-		if !isFromMe && evt.Info.PushName != "" {
+		// For DMs, prefer the user's address book name (FullName, synced
+		// from the primary device) over push names (self-chosen, mutable).
+		// The contact store may be keyed by either the phone JID or the
+		// LID, so check both.
+		var contact types.ContactInfo
+		if c, err := b.client.Store.Contacts.GetContact(context.Background(), resolvedChat); err == nil && c.Found {
+			contact = c
+		} else if resolvedChat != evt.Info.Chat {
+			if c, err := b.client.Store.Contacts.GetContact(context.Background(), evt.Info.Chat); err == nil && c.Found {
+				contact = c
+			}
+		}
+		switch {
+		case contact.FullName != "":
+			name = contact.FullName
+			nameIsAuthoritative = true
+		case !isFromMe && evt.Info.PushName != "":
+			// Only use push name from the OTHER person, not ourselves
 			name = evt.Info.PushName
+		case contact.PushName != "":
+			name = contact.PushName
+		case contact.BusinessName != "":
+			name = contact.BusinessName
 		}
-		if name == "" {
-			// Try contact store with the chat JID
-			if contact, err := b.client.Store.Contacts.GetContact(context.Background(), evt.Info.Chat); err == nil {
-				if contact.PushName != "" {
-					name = contact.PushName
-				} else if contact.FullName != "" {
-					name = contact.FullName
-				}
-			}
-		}
-		// For LID JIDs, try to resolve to phone number and use that as fallback
-		if name == "" && evt.Info.Chat.Server == types.HiddenUserServer {
-			if pn, err := b.client.Store.LIDs.GetPNForLID(context.Background(), evt.Info.Chat); err == nil && !pn.IsEmpty() {
-				name = "+" + pn.User
-				b.log.Infof("Resolved LID %s to %s", chatJID, name)
-			}
+		// For LID JIDs, fall back to the resolved phone number
+		if name == "" && resolvedChat != evt.Info.Chat {
+			name = "+" + resolvedChat.User
+			b.log.Infof("Resolved LID %s to %s", evt.Info.Chat, name)
 		}
 	}
 	b.UpsertConversation(chatJID, name, isGroup, msgID, ts)
+	// Address book names overwrite previously stored push names; everything
+	// else only fills empty names (handled by UpsertConversation's COALESCE).
+	if nameIsAuthoritative {
+		b.UpdateConversationName(chatJID, name)
+	}
 
 	// Increment unread if not from me
 	if !isFromMe {
@@ -257,12 +288,7 @@ func (b *Bridge) handleReceipt(evt *events.Receipt) {
 	// Resolve LID → PN so the JID matches the conversation row written by
 	// handleMessage (which stores conversations under the phone-based JID).
 	// Without this, ReadSelf receipts for LID chats fail to clear unread.
-	chatJID := evt.Chat.String()
-	if evt.Chat.Server == types.HiddenUserServer {
-		if pn, err := b.client.Store.LIDs.GetPNForLID(context.Background(), evt.Chat); err == nil && !pn.IsEmpty() {
-			chatJID = pn.String()
-		}
-	}
+	chatJID := b.resolveLIDJID(evt.Chat).String()
 
 	status := ""
 	switch evt.Type {
@@ -324,10 +350,13 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 	b.log.Debugf("Loaded %d contacts from store", len(contacts))
 
 	for i, conv := range convs {
-		jid := conv.GetID()
-		if jid == "" {
+		rawJID := conv.GetID()
+		if rawJID == "" {
 			continue
 		}
+		// Resolve @lid history conversations to phone JIDs so they merge
+		// with rows created by live messages instead of duplicating them.
+		jid := b.resolveLIDString(rawJID)
 
 		name := conv.GetName()
 		isGroup := conv.GetIsDefaultSubgroup() || (len(conv.GetParticipant()) > 0)
@@ -410,19 +439,26 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 			b.log.Debugf("  Conv %s: inserted %d, skipped %d nil, %d old", jid, convMsgCount, skippedNil, skippedOld)
 		}
 
-		// For DMs, resolve contact name from whatsmeow's contact store
+		// For DMs, resolve contact name from whatsmeow's contact store.
+		// Address book FullName beats push names; the store may be keyed
+		// by either the phone JID or the original LID, so check both.
 		if !isGroup && name == "" {
-			parsedJID, parseErr := types.ParseJID(jid)
-			if parseErr == nil {
-				if contact, ok := contacts[parsedJID]; ok {
-					if contact.PushName != "" {
-						name = contact.PushName
-					} else if contact.FullName != "" {
-						name = contact.FullName
-					} else if contact.BusinessName != "" {
-						name = contact.BusinessName
-					}
+			var contact types.ContactInfo
+			if parsedJID, parseErr := types.ParseJID(jid); parseErr == nil {
+				contact = contacts[parsedJID]
+			}
+			if contact.FullName == "" && contact.PushName == "" && contact.BusinessName == "" && jid != rawJID {
+				if parsedJID, parseErr := types.ParseJID(rawJID); parseErr == nil {
+					contact = contacts[parsedJID]
 				}
+			}
+			switch {
+			case contact.FullName != "":
+				name = contact.FullName
+			case contact.BusinessName != "":
+				name = contact.BusinessName
+			case contact.PushName != "":
+				name = contact.PushName
 			}
 			// Fallback: check message push names (only from received messages, not sent)
 			if name == "" {
@@ -471,24 +507,37 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 }
 
 func (b *Bridge) handlePushName(evt *events.PushName) {
-	jid := evt.JID.String()
+	// evt.JID.String() already carries the server suffix and may be a LID —
+	// resolve it so the key matches the conversation row.
+	jid := b.resolveLIDJID(evt.JID).String()
 	name := evt.NewPushName
-	// Only fill in name if conversation currently has no name (don't overwrite contact names)
-	b.UpdateConversationNameIfEmpty(jid+"@s.whatsapp.net", name)
+	if name == "" {
+		return
+	}
+	// Push names are the lowest-priority source: only fill in a name if the
+	// conversation currently has none (don't overwrite contact names).
+	b.UpdateConversationNameIfEmpty(jid, name)
 	b.log.Debugf("Push name update: %s -> %s", jid, name)
 }
 
-// BackfillContactNames resolves names for all unnamed DM conversations
-// using whatsmeow's contact store. Called on startup after connection.
+// BackfillContactNames reconciles DM conversation names with whatsmeow's
+// contact store. Called on startup after connection (contact app state sync
+// takes a while, hence the retries from the Connected handler).
+//
+// Two passes in one loop:
+//   - Conversations whose contact has an address book FullName are upgraded
+//     to it even if they already carry a (push) name — the address book is
+//     authoritative and this repairs rows named before contacts synced.
+//   - Unnamed conversations are filled from the best remaining source
+//     (BusinessName, then PushName).
 func (b *Bridge) BackfillContactNames() {
-	// Try whatsmeow contact store first
 	contacts, err := b.client.Store.Contacts.GetAllContacts(context.Background())
 	if err != nil {
 		contacts = make(map[types.JID]types.ContactInfo)
 	}
 	b.log.Infof("Backfill: %d contacts in store", len(contacts))
 
-	rows, err := b.msgDB.Query(`SELECT jid FROM conversations WHERE (name IS NULL OR name = '') AND jid LIKE '%@s.whatsapp.net'`)
+	rows, err := b.msgDB.Query(`SELECT jid, COALESCE(name, '') FROM conversations WHERE jid LIKE '%@s.whatsapp.net'`)
 	if err != nil {
 		return
 	}
@@ -496,37 +545,35 @@ func (b *Bridge) BackfillContactNames() {
 
 	updated := 0
 	for rows.Next() {
-		var jid string
-		rows.Scan(&jid)
+		var jid, currentName string
+		rows.Scan(&jid, &currentName)
+
+		parsedJID, parseErr := types.ParseJID(jid)
+		if parseErr != nil {
+			continue
+		}
+		contact, ok := contacts[parsedJID]
+		if !ok {
+			// Fallback: single lookup (covers stores where GetAllContacts
+			// lags behind individual sync entries).
+			if c, err := b.client.Store.Contacts.GetContact(context.Background(), parsedJID); err == nil && c.Found {
+				contact = c
+			}
+		}
 
 		name := ""
-
-		// Try contact store
-		parsedJID, parseErr := types.ParseJID(jid)
-		if parseErr == nil {
-			if contact, ok := contacts[parsedJID]; ok {
-				if contact.PushName != "" {
-					name = contact.PushName
-				} else if contact.FullName != "" {
-					name = contact.FullName
-				} else if contact.BusinessName != "" {
-					name = contact.BusinessName
-				}
-			}
+		switch {
+		case contact.FullName != "":
+			name = contact.FullName
+		case currentName != "":
+			continue // already named and no address book entry — leave it
+		case contact.BusinessName != "":
+			name = contact.BusinessName
+		case contact.PushName != "":
+			name = contact.PushName
 		}
 
-		// Fallback: try single contact lookup
-		if name == "" && parseErr == nil {
-			if contact, err := b.client.Store.Contacts.GetContact(context.Background(), parsedJID); err == nil {
-				if contact.PushName != "" {
-					name = contact.PushName
-				} else if contact.FullName != "" {
-					name = contact.FullName
-				}
-			}
-		}
-
-		if name != "" {
+		if name != "" && name != currentName {
 			b.UpdateConversationName(jid, name)
 			updated++
 		}
@@ -534,6 +581,60 @@ func (b *Bridge) BackfillContactNames() {
 
 	b.log.Infof("Backfill: updated %d contact names", updated)
 	if updated > 0 {
+		b.BroadcastEvent("conversation_updated", struct{}{})
+	}
+}
+
+// MergeLIDConversations folds conversation rows keyed by @lid JIDs into
+// their phone-based rows. Duplicates appeared when an event path stored a
+// LID key (history sync, the old push-name handler) while live messages
+// used the resolved phone JID. Runs on connect, once the LID store has the
+// mappings; unresolvable LIDs are left untouched and retried next connect.
+func (b *Bridge) MergeLIDConversations() {
+	rows, err := b.msgDB.Query(`SELECT jid, COALESCE(name, ''), is_group, COALESCE(last_message_id, ''), last_timestamp, unread_count FROM conversations WHERE jid LIKE '%@lid'`)
+	if err != nil {
+		return
+	}
+	type lidRow struct {
+		jid, name, lastMsgID string
+		isGroup              bool
+		lastTS               int64
+		unread               int
+	}
+	var lids []lidRow
+	for rows.Next() {
+		var r lidRow
+		var isGroupInt int
+		if err := rows.Scan(&r.jid, &r.name, &isGroupInt, &r.lastMsgID, &r.lastTS, &r.unread); err != nil {
+			continue
+		}
+		r.isGroup = isGroupInt == 1
+		lids = append(lids, r)
+	}
+	rows.Close()
+
+	merged := 0
+	for _, r := range lids {
+		pn := b.resolveLIDString(r.jid)
+		if pn == r.jid {
+			continue // mapping not known yet
+		}
+		// Re-key messages and participants, then merge the conversation row.
+		// UpsertConversation fills the target's name/last-message only where
+		// they're missing or older, which is exactly the merge we want.
+		b.msgDB.Exec(`UPDATE messages SET conversation_jid = ? WHERE conversation_jid = ?`, pn, r.jid)
+		b.msgDB.Exec(`UPDATE OR IGNORE participants SET conversation_jid = ? WHERE conversation_jid = ?`, pn, r.jid)
+		b.msgDB.Exec(`DELETE FROM participants WHERE conversation_jid = ?`, r.jid)
+		b.UpsertConversation(pn, r.name, r.isGroup, r.lastMsgID, r.lastTS)
+		if r.unread > 0 {
+			b.msgDB.Exec(`UPDATE conversations SET unread_count = unread_count + ? WHERE jid = ?`, r.unread, pn)
+		}
+		b.msgDB.Exec(`DELETE FROM conversations WHERE jid = ?`, r.jid)
+		b.log.Infof("Merged LID conversation %s into %s", r.jid, pn)
+		merged++
+	}
+	if merged > 0 {
+		b.log.Infof("Merged %d LID conversations into phone-based rows", merged)
 		b.BroadcastEvent("conversation_updated", struct{}{})
 	}
 }

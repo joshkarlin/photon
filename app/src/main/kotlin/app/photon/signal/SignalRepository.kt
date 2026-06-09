@@ -96,7 +96,7 @@ class SignalRepository(
 
     suspend fun retryMessage(messageId: String) {
         withContext(Dispatchers.IO) {
-            sender?.retryTextMessage(messageId)
+            sender?.retryMessage(messageId)
         }
     }
 
@@ -113,7 +113,9 @@ class SignalRepository(
     }
 
     suspend fun sendMedia(jid: String, filePath: String, mimeType: String, caption: String?, replyToId: String?) {
-        // TODO
+        withContext(Dispatchers.IO) {
+            sender?.sendMediaMessage(jid, filePath, mimeType, caption, replyToId)
+        }
     }
 
     suspend fun downloadMedia(messageId: String): String? {

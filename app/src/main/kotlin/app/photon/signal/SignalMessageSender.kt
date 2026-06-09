@@ -12,6 +12,8 @@ import org.whispersystems.signalservice.api.attachment.AttachmentApi
 import org.whispersystems.signalservice.api.crypto.ContentHint
 import org.whispersystems.signalservice.api.keys.KeysApi
 import org.whispersystems.signalservice.api.message.MessageApi
+import org.whispersystems.signalservice.api.messages.SignalServiceAttachment
+import org.whispersystems.signalservice.api.messages.SignalServiceAttachmentPointer
 import org.whispersystems.signalservice.api.messages.SignalServiceDataMessage
 import org.whispersystems.signalservice.api.messages.multidevice.RequestMessage
 import org.whispersystems.signalservice.api.messages.multidevice.SentTranscriptMessage
@@ -23,6 +25,8 @@ import org.whispersystems.signalservice.api.websocket.SignalWebSocket
 import org.whispersystems.signalservice.api.websocket.WebSocketFactory
 import org.whispersystems.signalservice.internal.push.PushServiceSocket
 import org.whispersystems.signalservice.internal.websocket.OkHttpWebSocketConnection
+import java.io.File
+import java.io.FileInputStream
 import java.util.Optional
 import java.util.UUID
 import java.util.concurrent.Executors
@@ -173,6 +177,92 @@ class SignalMessageSender(
     }
 
     /**
+     * Send a media message (voice note, image, etc). Same local-row-first
+     * pattern as sendTextMessage: the row is written with status="sending"
+     * (carrying media_url/media_mime so the bubble renders), the file is
+     * uploaded to Signal's CDN, and the resulting pointer rides a normal
+     * DataMessage. Audio sends are flagged as voice notes — that's the only
+     * audio Photon records.
+     */
+    fun sendMediaMessage(
+        conversationJid: String,
+        filePath: String,
+        mimeType: String,
+        caption: String?,
+        replyToId: String? = null,
+    ) {
+        val timestamp = System.currentTimeMillis()
+        val replyPrefix = replyToId?.substringBeforeLast("_")
+        val messageId = "${credentials.aciString}_${timestamp}_${UUID.randomUUID().toString().take(8)}"
+        val contentType = when {
+            mimeType.startsWith("image/") -> "image"
+            mimeType.startsWith("video/") -> "video"
+            mimeType.startsWith("audio/") -> "audio"
+            else -> "document"
+        }
+        val file = File(filePath)
+
+        val aci = ServiceId.ACI.parseOrNull(conversationJid)
+        val groupMeta = if (aci == null) messageDb.getGroupMeta(conversationJid) else null
+
+        fun insertRow(status: String) {
+            messageDb.insertMessage(
+                id = messageId, conversationJid = conversationJid,
+                senderJid = credentials.aciString ?: "",
+                timestamp = timestamp / 1000, contentType = contentType,
+                textBody = caption?.takeIf { it.isNotBlank() },
+                mediaUrl = filePath, mediaMime = mimeType,
+                mediaSize = file.length().takeIf { it > 0 },
+                replyToId = replyPrefix,
+                isFromMe = true, status = status,
+            )
+            messageDb.updateConversationLastMessage(conversationJid, messageId, timestamp / 1000)
+        }
+
+        if ((aci == null && groupMeta == null) || !file.exists()) {
+            Log.w(TAG, "Refusing media send to $conversationJid " +
+                "(knownTarget=${aci != null || groupMeta != null}, fileExists=${file.exists()})")
+            insertRow("failed")
+            return
+        }
+
+        insertRow("sending")
+
+        try {
+            val pointer = uploadAttachment(file, mimeType, voiceNote = contentType == "audio")
+            if (aci != null) {
+                sendDmInternal(aci, conversationJid, caption, timestamp, replyPrefix, listOf(pointer))
+            } else {
+                sendGroupInternal(conversationJid, groupMeta!!, caption, timestamp, replyPrefix, listOf(pointer))
+            }
+            messageDb.updateMessageStatus(messageId, "sent")
+            Log.i(TAG, "Sent media $messageId ($mimeType, ${file.length()}B) to $conversationJid")
+        } catch (e: Exception) {
+            Log.e(TAG, "Media send failed for $messageId; row marked failed", e)
+            messageDb.updateMessageStatus(messageId, "failed")
+            invalidate()
+        }
+    }
+
+    /**
+     * Upload a local file to Signal's CDN and return the attachment pointer
+     * to embed in a DataMessage. The pointer (not the stream) is reused in
+     * the sync transcript, so linked devices download the same upload.
+     */
+    private fun uploadAttachment(file: File, mimeType: String, voiceNote: Boolean): SignalServiceAttachmentPointer {
+        val sender = getOrCreateSender()
+        val stream = SignalServiceAttachment.newStreamBuilder()
+            .withStream(FileInputStream(file))
+            .withContentType(mimeType)
+            .withLength(file.length())
+            .withFileName(file.name)
+            .withVoiceNote(voiceNote)
+            .withUploadTimestamp(System.currentTimeMillis())
+            .build()
+        return stream.use { sender.uploadAttachment(it) }
+    }
+
+    /**
      * One-to-one DataMessage send. Attaches the recipient's E.164 to the
      * address when known — Desktop / older clients index by (ACI ∪ E.164)
      * and otherwise spawn an "Unknown contact" thread. SentTranscript is
@@ -181,9 +271,10 @@ class SignalMessageSender(
     private fun sendDmInternal(
         aci: ServiceId.ACI,
         conversationJid: String,
-        text: String,
+        text: String?,
         timestamp: Long,
         replyPrefix: String?,
+        attachments: List<SignalServiceAttachment> = emptyList(),
     ) {
         val recipientPhone = messageDb.getContact(conversationJid)?.phone
         val recipientAddress = if (recipientPhone != null) {
@@ -192,7 +283,9 @@ class SignalMessageSender(
 
         val quote = replyPrefix?.let { buildQuote(it) }
         val builder = SignalServiceDataMessage.newBuilder()
-            .withBody(text).withTimestamp(timestamp)
+            .withTimestamp(timestamp)
+        if (!text.isNullOrBlank()) builder.withBody(text)
+        if (attachments.isNotEmpty()) builder.withAttachments(attachments)
         if (quote != null) builder.withQuote(quote)
         val message = builder.build()
 
@@ -241,9 +334,10 @@ class SignalMessageSender(
     private fun sendGroupInternal(
         conversationJid: String,
         groupMeta: SignalMessageDatabase.GroupMeta,
-        text: String,
+        text: String?,
         timestamp: Long,
         replyPrefix: String?,
+        attachments: List<SignalServiceAttachment> = emptyList(),
     ) {
         val myAci = credentials.aci
             ?: throw IllegalStateException("No local ACI available")
@@ -301,9 +395,10 @@ class SignalMessageSender(
 
         val quote = replyPrefix?.let { buildQuote(it) }
         val builder = SignalServiceDataMessage.newBuilder()
-            .withBody(text)
             .withTimestamp(timestamp)
             .asGroupMessage(groupContext)
+        if (!text.isNullOrBlank()) builder.withBody(text)
+        if (attachments.isNotEmpty()) builder.withAttachments(attachments)
         if (quote != null) builder.withQuote(quote)
         val message = builder.build()
 
@@ -374,20 +469,27 @@ class SignalMessageSender(
     }
 
     /**
-     * Retry a previously failed text message. Reuses the local row's
-     * conversation_jid + text + reply_to_id and flips the status back to
-     * "sending" while a fresh send is attempted. The local row keeps its
-     * original ID so the chat list doesn't grow new bubbles per retry.
+     * Retry a previously failed message (text or media). Reuses the local
+     * row's conversation_jid + content + reply_to_id and flips the status
+     * back to "sending" while a fresh send is attempted. The local row keeps
+     * its original ID so the chat list doesn't grow new bubbles per retry.
+     * Media rows re-upload from the original local file.
      */
-    fun retryTextMessage(messageId: String): Boolean {
+    fun retryMessage(messageId: String): Boolean {
         val row = messageDb.getMessage(messageId)
-        if (row == null || !row.isFromMe || row.contentType != "text") {
-            Log.w(TAG, "retryTextMessage: row $messageId missing or unsupported")
+        if (row == null || !row.isFromMe) {
+            Log.w(TAG, "retryMessage: row $messageId missing or not ours")
             return false
         }
-        val text = row.textBody.orEmpty()
-        if (text.isBlank()) {
-            Log.w(TAG, "retryTextMessage: row $messageId has empty body")
+        val text = row.textBody
+        val mediaFile = row.mediaUrl?.let { File(it) }
+        val isText = row.contentType == "text"
+        if (isText && text.isNullOrBlank()) {
+            Log.w(TAG, "retryMessage: row $messageId has empty body")
+            return false
+        }
+        if (!isText && (mediaFile == null || !mediaFile.exists())) {
+            Log.w(TAG, "retryMessage: media file for $messageId is gone (${row.mediaUrl})")
             return false
         }
         val conversationJid = row.conversationJid
@@ -406,10 +508,13 @@ class SignalMessageSender(
         // recipient-side dedupe and produce a duplicate.
         val timestamp = row.timestamp * 1000
         return try {
+            val attachments = if (isText) emptyList() else listOf(
+                uploadAttachment(mediaFile!!, row.mediaMime ?: defaultMimeFor(row.contentType), voiceNote = row.contentType == "audio"),
+            )
             if (aci != null) {
-                sendDmInternal(aci, conversationJid, text, timestamp, row.replyToId)
+                sendDmInternal(aci, conversationJid, text, timestamp, row.replyToId, attachments)
             } else {
-                sendGroupInternal(conversationJid, groupMeta!!, text, timestamp, row.replyToId)
+                sendGroupInternal(conversationJid, groupMeta!!, text, timestamp, row.replyToId, attachments)
             }
             messageDb.updateMessageStatus(messageId, "sent")
             Log.i(TAG, "Retry succeeded for $messageId")

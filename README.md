@@ -150,23 +150,23 @@ Per-platform status, refresh connection, and reset (clear data + re-pair).
 
 ## Known issues
 
-- **WhatsApp contact names**: Names come from push names and may differ from your address book. History sync names can be overwritten by later push name events.
-- **WhatsApp LID JIDs**: Some conversations use WhatsApp's new Linked Identity format. LID→phone resolution works but may occasionally create duplicate entries during the transition.
+- **WhatsApp contact names**: Fix implemented, pending verification — address book names (`FullName` from contact sync) now take priority over push names everywhere, the connect-time backfill upgrades push-name rows to address book names, and the push name handler (which wrote malformed JID keys) only fills empty names. Re-check after next sync.
+- **WhatsApp LID JIDs**: Fix implemented, pending verification — LID→phone resolution now applied in all write paths (push names, history sync, sends), and a connect-time migration merges existing duplicate `@lid` rows into their phone-JID rows.
 - **Signal group admin**: Photon participates in GroupV2 (send + receive) but can't create groups, add/remove members, edit title, or leave. Group state updates initiated elsewhere are picked up automatically on the next message via the revision check.
 - **Signal group send via fan-out**: Photon sends per-recipient rather than via sender-key distribution. Works the same end-to-end but is slower for large groups and skips `GroupSendEndorsements`.
 - **Signal pre-key upload**: Uses reflection fallback to upload via PushServiceSocket (KeysApi WebSocket path returns 422). Works but fragile.
 - **Signal history sync**: Not implemented — only new messages after pairing appear. Requires backup/restore mechanism.
-- **Signal device name**: Shows as garbled text on primary device's linked devices list. Device name needs to be encrypted with the identity key before sending — currently sent as plaintext.
-- **Signal media send**: Stub — Signal text replies-with-media silently drop the media. Text-only replies work.
+- **Signal device name**: Fix implemented, pending verification — the name is now encrypted with the identity key (`DeviceNameUtil.encryptDeviceName`) before registration. Devices paired before the fix still show garbled text until re-paired (Reset in settings).
+- **Signal media send**: Outgoing implemented, pending device testing — files upload to the CDN and send as attachments (DM + group, voice-note flag for audio, retry re-uploads). Incoming Signal media download is still not implemented.
 - **Dictation**: LP3 has no built-in STT engine. Android 13's `RecognitionService` framework has a known bug where `PermissionChecker.checkCallingPermissionForDataDelivery()` rejects third-party callers with ERROR_INSUFFICIENT_PERMISSIONS (error 9), even with RECORD_AUDIO granted. No code-level workaround exists — requires a system-level STT service or alternative approach.
-- **Voice notes**: Recording implemented but sending untested on device.
+- **Voice notes**: Recording implemented; sending is now wired for both WhatsApp and Signal but untested on device.
 - **Java Records on Android**: Turasa v143 uses Java Records which Android's desugaring can't serialize via Jackson. Fixed with `AndroidRecordFix.kt` (reflection patch on JsonUtil's ObjectMapper).
 
 
 ## Planned features
 
 - [ ] Signal history sync (backup download + restore)
-- [ ] Signal media send (currently a stub)
+- [ ] Signal media download (incoming attachments; outgoing send implemented)
 - [ ] Signal group admin: create, leave, add/remove members, edit title
 - [ ] MMS support (picture messages)
 - [ ] Dictation (requires system-level STT or alternative approach)

@@ -273,6 +273,10 @@ func (b *Bridge) SendTextMessage(ctx context.Context, jid string, text string, r
 	if err != nil {
 		return "", 0, err
 	}
+	// Resolve @lid targets so the conversation row keys by phone JID and
+	// doesn't duplicate a row handleMessage stored under the resolved JID.
+	targetJID = b.resolveLIDJID(targetJID)
+	jid = targetJID.String()
 
 	id := b.client.GenerateMessageID()
 	ts := time.Now().Unix()
