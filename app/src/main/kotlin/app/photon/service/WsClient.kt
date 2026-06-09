@@ -3,6 +3,7 @@ package app.photon.service
 import android.util.Log
 import app.photon.data.model.WsEvent
 import app.photon.data.model.WsRequest
+import app.photon.data.model.string
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -59,9 +60,7 @@ class WsClient(private val port: Int = 8765) {
                     val event = json.decodeFromString<WsEvent>(text)
                     // Track WhatsApp connection state
                     if (event.type == "connection_state") {
-                        val state = event.payload["state"]?.toString()
-                            ?.trim('"') ?: "disconnected"
-                        _whatsappState.value = state
+                        _whatsappState.value = event.string("state") ?: "disconnected"
                     }
                     val id = event.id
                     if (id != null && pendingRequests.containsKey(id)) {
@@ -139,13 +138,6 @@ class WsClient(private val port: Int = 8765) {
         })
     }
 
-    suspend fun sendTyping(jid: String, composing: Boolean): WsEvent {
-        return request("send_typing", buildJsonObject {
-            put("jid", jid)
-            put("composing", composing)
-        })
-    }
-
     suspend fun sendMedia(jid: String, filePath: String, mimeType: String, caption: String?, replyToId: String?): WsEvent {
         return request("send_media", buildJsonObject {
             put("jid", jid)
@@ -153,14 +145,6 @@ class WsClient(private val port: Int = 8765) {
             put("mime_type", mimeType)
             if (caption != null) put("caption", caption)
             if (replyToId != null) put("reply_to_id", replyToId)
-        })
-    }
-
-    suspend fun editMessage(jid: String, messageId: String, newText: String): WsEvent {
-        return request("edit_message", buildJsonObject {
-            put("jid", jid)
-            put("message_id", messageId)
-            put("new_text", newText)
         })
     }
 
@@ -178,9 +162,5 @@ class WsClient(private val port: Int = 8765) {
 
     suspend fun requestQr(): WsEvent {
         return request("get_qr")
-    }
-
-    suspend fun logout(): WsEvent {
-        return request("logout")
     }
 }

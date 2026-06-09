@@ -13,7 +13,6 @@ object Routes {
     const val CONTACT = "contact/{phone}/{name}"
 
     fun contact(phone: String, name: String) = "contact/$phone/$name"
-    const val SMS = "sms"
     const val SMS_CHATS = "sms/chats"
     const val SMS_CHAT = "sms/chat/{address}"
     const val SETTINGS = "settings"

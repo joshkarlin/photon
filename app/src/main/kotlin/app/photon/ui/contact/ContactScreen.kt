@@ -23,7 +23,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -33,6 +32,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.photon.ui.shared.components.PhotonHeader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -90,12 +90,7 @@ fun ContactScreen(
 
     Column(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         // Header
-        Box(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(top = 16.dp, bottom = 12.dp)) {
-            Text("<", fontSize = 18.sp, color = Color(0xFF666666),
-                modifier = Modifier.align(Alignment.CenterStart).clickable(onClick = onBack).padding(end = 16.dp))
-            Text("CONTACT", fontSize = 13.sp, letterSpacing = 3.sp, color = Color(0xFF666666),
-                modifier = Modifier.align(Alignment.Center))
-        }
+        PhotonHeader("CONTACT", onBack)
         HorizontalDivider(color = Color(0xFF1A1A1A))
 
         // Phone number (read-only display).

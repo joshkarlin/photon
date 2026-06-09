@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.photon.data.model.int
 import app.photon.service.PhotonService
 import app.photon.ui.shared.ChatListContent
 
@@ -27,9 +28,7 @@ fun ChatListScreen(onChat: (String) -> Unit, onSwitch: () -> Unit, onSettings: (
     val repo = PhotonService._chatRepository ?: return
     val rawConversations by repo.conversations.collectAsState()
     val conversations = rawConversations?.filter { conv ->
-        !conv.jid.startsWith("status@") &&
-        !conv.jid.startsWith("0@") &&
-        conv.lastTimestamp > 0
+        !conv.isPseudoChat && conv.lastTimestamp > 0
     }
 
     ChatListContent(
@@ -53,9 +52,9 @@ private fun WhatsAppSyncStatus() {
         ws?.events?.collect { evt ->
             when (evt.type) {
                 "history_sync_progress" -> {
-                    val done = evt.payload["conversations_done"]?.toString()?.trim('"')?.toIntOrNull() ?: 0
-                    val total = evt.payload["conversations_total"]?.toString()?.trim('"')?.toIntOrNull() ?: 0
-                    val msgs = evt.payload["messages_total"]?.toString()?.trim('"')?.toIntOrNull() ?: 0
+                    val done = evt.int("conversations_done") ?: 0
+                    val total = evt.int("conversations_total") ?: 0
+                    val msgs = evt.int("messages_total") ?: 0
                     syncProgress = "$done / $total CHATS · $msgs MESSAGES"
                 }
                 "history_sync_complete" -> syncDone = true

@@ -10,5 +10,15 @@ data class Conversation(
     val isMuted: Boolean,
     val avatarUrl: String?,
     val updatedAt: Long,
-    val lastMessagePreview: String? = null,
-)
+) {
+    /**
+     * WhatsApp pseudo-chats — status broadcasts ("status@broadcast"), the
+     * server's "0@..." metadata chat, and broadcast lists. One predicate so
+     * chat lists and notifications can't drift on what gets hidden/muted.
+     */
+    val isPseudoChat: Boolean
+        get() = isPseudoWhatsAppJid(jid)
+}
+
+fun isPseudoWhatsAppJid(jid: String): Boolean =
+    jid.startsWith("status@") || jid.startsWith("0@") || jid.contains("@broadcast")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 // MessageRow represents a row in the messages table.
@@ -142,30 +143,78 @@ func (b *Bridge) UpdateMute(jid string, muted bool) {
 	}
 }
 
-// InsertMessage inserts a message record.
-func (b *Bridge) InsertMessage(msg *MessageRow) error {
+const insertMessageSQL = `
+	INSERT OR IGNORE INTO messages
+	(id, conversation_jid, sender_jid, timestamp, content_type, text_body,
+	 media_url, media_mime, media_size, thumbnail_path, sticker_pack_id,
+	 reply_to_id, edit_version, is_from_me, status, raw_proto)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+func (m *MessageRow) insertArgs() []interface{} {
 	isFromMe := 0
-	if msg.IsFromMe {
+	if m.IsFromMe {
 		isFromMe = 1
 	}
+	return []interface{}{
+		m.ID, m.ConversationJID, m.SenderJID, m.Timestamp,
+		m.ContentType, m.TextBody, m.MediaURL, m.MediaMime,
+		m.MediaSize, m.ThumbnailPath, m.StickerPackID,
+		m.ReplyToID, m.EditVersion, isFromMe, m.Status, m.RawProto,
+	}
+}
 
-	_, err := b.msgDB.Exec(`
-		INSERT OR IGNORE INTO messages
-		(id, conversation_jid, sender_jid, timestamp, content_type, text_body,
-		 media_url, media_mime, media_size, thumbnail_path, sticker_pack_id,
-		 reply_to_id, edit_version, is_from_me, status, raw_proto)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, msg.ID, msg.ConversationJID, msg.SenderJID, msg.Timestamp,
-		msg.ContentType, msg.TextBody, msg.MediaURL, msg.MediaMime,
-		msg.MediaSize, msg.ThumbnailPath, msg.StickerPackID,
-		msg.ReplyToID, msg.EditVersion, isFromMe, msg.Status, msg.RawProto)
-
+// InsertMessage inserts a message record.
+func (b *Bridge) InsertMessage(msg *MessageRow) error {
+	_, err := b.msgDB.Exec(insertMessageSQL, msg.insertArgs()...)
 	return err
+}
+
+// InsertMessages inserts a batch of messages in a single transaction. Used by
+// history sync, where one implicit transaction per row would mean thousands
+// of WAL commits during initial pairing. The live path uses InsertMessage.
+func (b *Bridge) InsertMessages(msgs []*MessageRow) error {
+	if len(msgs) == 0 {
+		return nil
+	}
+	tx, err := b.msgDB.Begin()
+	if err != nil {
+		// Fall back to per-row inserts rather than dropping history.
+		for _, m := range msgs {
+			b.InsertMessage(m)
+		}
+		return err
+	}
+	stmt, err := tx.Prepare(insertMessageSQL)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	for _, m := range msgs {
+		stmt.Exec(m.insertArgs()...)
+	}
+	stmt.Close()
+	return tx.Commit()
 }
 
 // UpdateMessageStatus updates the delivery status of a message.
 func (b *Bridge) UpdateMessageStatus(id, status string) error {
 	_, err := b.msgDB.Exec(`UPDATE messages SET status = ? WHERE id = ?`, status, id)
+	return err
+}
+
+// UpdateMessageStatusBatch updates the delivery status of several messages in
+// one statement (receipts often cover many IDs at once).
+func (b *Bridge) UpdateMessageStatusBatch(ids []string, status string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	args := make([]interface{}, 0, len(ids)+1)
+	args = append(args, status)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	query := `UPDATE messages SET status = ? WHERE id IN (?` + strings.Repeat(",?", len(ids)-1) + `)`
+	_, err := b.msgDB.Exec(query, args...)
 	return err
 }
 

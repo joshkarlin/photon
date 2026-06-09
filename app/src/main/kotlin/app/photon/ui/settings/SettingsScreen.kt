@@ -5,7 +5,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -38,6 +36,7 @@ import androidx.compose.ui.unit.sp
 import app.photon.data.MessageLayout
 import app.photon.data.PhotonPreferences
 import app.photon.service.PhotonService
+import app.photon.ui.shared.components.PhotonHeader
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.buildJsonObject
@@ -46,7 +45,6 @@ import kotlinx.serialization.json.put
 private val divColor = Color(0xFF1A1A1A)
 private val divMinor = Color(0xFF111111)
 private val dim = Color(0xFF666666)
-private val destructive = Color(0xFFCC4444)
 
 private enum class Page { HOME, CONNECTIONS, WHATSAPP, SIGNAL, CHAT, STORAGE }
 
@@ -70,13 +68,13 @@ fun SettingsScreen(onBack: () -> Unit, onResetWhatsApp: () -> Unit = {}, onReset
 private fun HomePage(onBack: () -> Unit, onNav: (Page) -> Unit) {
     BackHandler { onBack() }
     Column(Modifier.fillMaxSize().background(Color.Black)) {
-        Header("SETTINGS", onBack)
+        PhotonHeader("SETTINGS", onBack)
         HorizontalDivider(color = divColor)
-        NavRow("CONNECTIONS") { onNav(Page.CONNECTIONS) }
+        SettingsRow("CONNECTIONS") { onNav(Page.CONNECTIONS) }
         HorizontalDivider(color = divMinor)
-        NavRow("CHAT") { onNav(Page.CHAT) }
+        SettingsRow("CHAT") { onNav(Page.CHAT) }
         HorizontalDivider(color = divMinor)
-        NavRow("STORAGE") { onNav(Page.STORAGE) }
+        SettingsRow("STORAGE") { onNav(Page.STORAGE) }
         HorizontalDivider(color = divMinor)
         Spacer(Modifier.weight(1f))
         HorizontalDivider(color = divColor)
@@ -99,11 +97,11 @@ private fun ConnectionsPage(onBack: () -> Unit, onNav: (Page) -> Unit) {
 
     BackHandler { onBack() }
     Column(Modifier.fillMaxSize().background(Color.Black)) {
-        Header("CONNECTIONS", onBack)
+        PhotonHeader("CONNECTIONS", onBack)
         HorizontalDivider(color = divColor)
-        StatusNavRow("WHATSAPP", formatState(waState)) { onNav(Page.WHATSAPP) }
+        SettingsRow("WHATSAPP", formatState(waState)) { onNav(Page.WHATSAPP) }
         HorizontalDivider(color = divMinor)
-        StatusNavRow("SIGNAL", if (sigRegistered) formatState(sigState) else "NOT LINKED") { onNav(Page.SIGNAL) }
+        SettingsRow("SIGNAL", if (sigRegistered) formatState(sigState) else "NOT LINKED") { onNav(Page.SIGNAL) }
         HorizontalDivider(color = divMinor)
     }
 }
@@ -120,46 +118,32 @@ private fun WhatsAppPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
 
     BackHandler { onBack() }
     Column(Modifier.fillMaxSize().background(Color.Black).verticalScroll(scrollState)) {
-        Header("WHATSAPP", onBack)
+        PhotonHeader("WHATSAPP", onBack)
         HorizontalDivider(color = divColor)
 
-        InfoRow("STATUS", formatState(waState), stateColor(waState))
+        SettingsRow("STATUS", formatState(waState), stateColor(waState))
         HorizontalDivider(color = divMinor)
 
         Spacer(Modifier.height(16.dp))
         HorizontalDivider(color = divColor)
 
         if (waState == "connected" || waState == "disconnected") {
-            ActionRow("REFRESH CONNECTION") {
+            SettingsRow("REFRESH CONNECTION", onClick = {
                 scope.launch {
                     try {
                         ws?.disconnect()
                         ws?.connect()
                     } catch (_: Exception) {}
                 }
-            }
+            })
             HorizontalDivider(color = divMinor)
-        }
 
-        if (waState == "connected" || waState == "disconnected") {
-            ActionRow("RESET") {
+            SettingsRow("RESET", onClick = {
                 scope.launch {
-                    // Stop bridge, delete data, restart bridge
-                    PhotonService._wsClient?.disconnect()
-                    PhotonService._goBridge?.stop()
-                    kotlinx.coroutines.delay(300)
-                    val filesDir = context.filesDir
-                    filesDir.listFiles()?.filter {
-                        it.name.startsWith("messages.db") || it.name.startsWith("whatsmeow.db")
-                    }?.forEach { it.delete() }
-                    java.io.File(filesDir, "media").deleteRecursively()
-                    java.io.File(filesDir, "thumbs").deleteRecursively()
-                    PhotonService._goBridge?.start()
-                    kotlinx.coroutines.delay(1000)
-                    try { PhotonService._wsClient?.connect() } catch (_: Exception) {}
+                    PhotonService.resetWhatsApp(context.filesDir)
                     onReset()
                 }
-            }
+            })
         }
         HorizontalDivider(color = divMinor)
     }
@@ -179,19 +163,19 @@ private fun SignalPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
 
     BackHandler { onBack() }
     Column(Modifier.fillMaxSize().background(Color.Black).verticalScroll(scrollState)) {
-        Header("SIGNAL", onBack)
+        PhotonHeader("SIGNAL", onBack)
         HorizontalDivider(color = divColor)
 
-        InfoRow("STATUS", if (sigRegistered) formatState(sigState) else "NOT LINKED", stateColor(if (sigRegistered) sigState else ""))
+        SettingsRow("STATUS", if (sigRegistered) formatState(sigState) else "NOT LINKED", stateColor(if (sigRegistered) sigState else ""))
         HorizontalDivider(color = divMinor)
 
         if (phone != null) {
-            InfoRow("PHONE", phone)
+            SettingsRow("PHONE", phone)
             HorizontalDivider(color = divMinor)
         }
 
         if (deviceId != null && sigRegistered) {
-            InfoRow("DEVICE", deviceId.toString())
+            SettingsRow("DEVICE", deviceId.toString())
             HorizontalDivider(color = divMinor)
         }
 
@@ -199,7 +183,7 @@ private fun SignalPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
             Spacer(Modifier.height(16.dp))
             HorizontalDivider(color = divColor)
 
-            ActionRow("REFRESH CONNECTION") {
+            SettingsRow("REFRESH CONNECTION") {
                 scope.launch {
                     PhotonService._signalReceiver?.stop()
                     PhotonService._signalReceiver?.start()
@@ -207,16 +191,9 @@ private fun SignalPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
             }
             HorizontalDivider(color = divMinor)
 
-            ActionRow("RESET") {
+            SettingsRow("RESET") {
                 scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    PhotonService._signalReceiver?.stop()
-                    PhotonService._signalSender?.shutdown()
-                    // logout() now calls DELETE /v1/devices/{id} on the server so the
-                    // primary cleanly forgets us and stops sending storage-manifest
-                    // sync. Must run off the main thread.
-                    PhotonService._signalManager?.logout()
-                    val dbDir = context.getDatabasePath("signal_protocol.db").parentFile
-                    dbDir?.listFiles()?.filter { it.name.startsWith("signal_") }?.forEach { it.delete() }
+                    PhotonService.resetSignal(context)
                     onReset()
                 }
             }
@@ -246,22 +223,22 @@ private fun ChatPage(onBack: () -> Unit) {
 
     BackHandler { onBack() }
     Column(Modifier.fillMaxSize().background(Color.Black).verticalScroll(scrollState)) {
-        Header("CHAT", onBack)
+        PhotonHeader("CHAT", onBack)
         HorizontalDivider(color = divColor)
 
-        CycleRow("NOTIFICATIONS", if (notificationsEnabled) "ON" else "OFF") {
+        SettingsRow("NOTIFICATIONS", if (notificationsEnabled) "ON" else "OFF") {
             scope.launch { prefs.setNotificationsEnabled(!notificationsEnabled) }
         }
         HorizontalDivider(color = divMinor)
-        CycleRow("DM LAYOUT", dmLayout.label) { scope.launch { prefs.setDmLayout(dmLayout.next()) } }
+        SettingsRow("DM LAYOUT", dmLayout.label) { scope.launch { prefs.setDmLayout(dmLayout.next()) } }
         HorizontalDivider(color = divMinor)
-        CycleRow("GROUP LAYOUT", groupLayout.label) { scope.launch { prefs.setGroupLayout(groupLayout.next()) } }
+        SettingsRow("GROUP LAYOUT", groupLayout.label) { scope.launch { prefs.setGroupLayout(groupLayout.next()) } }
         HorizontalDivider(color = divMinor)
-        CycleRow("THUMBNAILS", if (showThumbnails) "ON" else "OFF") { scope.launch { prefs.setShowThumbnails(!showThumbnails) } }
+        SettingsRow("THUMBNAILS", if (showThumbnails) "ON" else "OFF") { scope.launch { prefs.setShowThumbnails(!showThumbnails) } }
         HorizontalDivider(color = divMinor)
-        CycleRow("CHAT SCROLL", chatScrollSpeed.label) { scope.launch { prefs.setChatScrollSpeed(chatScrollSpeed.next()) } }
+        SettingsRow("CHAT SCROLL", chatScrollSpeed.label) { scope.launch { prefs.setChatScrollSpeed(chatScrollSpeed.next()) } }
         HorizontalDivider(color = divMinor)
-        CycleRow("MENU SCROLL", menuScrollSpeed.label) { scope.launch { prefs.setMenuScrollSpeed(menuScrollSpeed.next()) } }
+        SettingsRow("MENU SCROLL", menuScrollSpeed.label) { scope.launch { prefs.setMenuScrollSpeed(menuScrollSpeed.next()) } }
         HorizontalDivider(color = divMinor)
     }
 }
@@ -280,7 +257,7 @@ private fun StoragePage(onBack: () -> Unit) {
 
     BackHandler { onBack() }
     Column(Modifier.fillMaxSize().background(Color.Black)) {
-        Header("STORAGE", onBack)
+        PhotonHeader("STORAGE", onBack)
         HorizontalDivider(color = divColor)
 
         ValueCycleRow("MESSAGES PER CHAT", maxMessages.toString(), listOf(25, 50, 100, 200), maxMessages) { v ->
@@ -296,80 +273,43 @@ private fun StoragePage(onBack: () -> Unit) {
 
 // ─── Shared Components ──────────────────────────────────────────
 
+/**
+ * Single settings row: white 18sp label, optional right-aligned 14sp value,
+ * optionally clickable. Covers nav rows, action rows, info rows, and
+ * cycle-through-options rows — they were all the same layout.
+ */
 @Composable
-private fun Header(title: String, onBack: () -> Unit) {
-    Box(
-        Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(top = 16.dp, bottom = 12.dp),
-    ) {
-        Text("<", fontSize = 18.sp, color = dim,
-            modifier = Modifier.align(Alignment.CenterStart).clickable(onClick = onBack).padding(end = 16.dp))
-        Text(title, fontSize = 13.sp, letterSpacing = 3.sp, color = dim,
-            modifier = Modifier.align(Alignment.Center))
-    }
-}
-
-@Composable
-private fun NavRow(label: String, onClick: () -> Unit) {
-    Text(
-        text = label,
-        fontSize = 18.sp, letterSpacing = 2.sp, color = Color.White,
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 22.dp),
-    )
-}
-
-@Composable
-private fun StatusNavRow(label: String, state: String, onClick: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 22.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(label, fontSize = 18.sp, letterSpacing = 2.sp, color = Color.White)
-        Text(state, fontSize = 14.sp, letterSpacing = 1.sp, color = dim)
-    }
-}
-
-@Composable
-private fun InfoRow(label: String, value: String, valueColor: Color = dim) {
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 22.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(label, fontSize = 18.sp, letterSpacing = 2.sp, color = Color.White)
-        Text(value, fontSize = 14.sp, letterSpacing = 1.sp, color = valueColor)
-    }
-}
-
-@Composable
-private fun CycleRow(label: String, value: String, onClick: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 22.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(label, fontSize = 18.sp, letterSpacing = 2.sp, color = Color.White)
-        Text(value, fontSize = 14.sp, letterSpacing = 1.sp, color = dim)
+private fun SettingsRow(
+    label: String,
+    value: String? = null,
+    valueColor: Color = dim,
+    onClick: (() -> Unit)? = null,
+) {
+    val rowModifier = Modifier.fillMaxWidth()
+        .let { if (onClick != null) it.clickable(onClick = onClick) else it }
+        .padding(horizontal = 20.dp, vertical = 22.dp)
+    if (value == null) {
+        Text(
+            text = label,
+            fontSize = 18.sp, letterSpacing = 2.sp, color = Color.White,
+            modifier = rowModifier,
+        )
+    } else {
+        Row(
+            rowModifier,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(label, fontSize = 18.sp, letterSpacing = 2.sp, color = Color.White)
+            Text(value, fontSize = 14.sp, letterSpacing = 1.sp, color = valueColor)
+        }
     }
 }
 
 @Composable
 private fun <T> ValueCycleRow(label: String, display: String, options: List<T>, current: T, onSelect: (T) -> Unit) {
     val next = (options.indexOf(current) + 1) % options.size
-    CycleRow(label, display) { onSelect(options[next]) }
-}
-
-@Composable
-private fun ActionRow(label: String, color: Color = Color.White, onClick: () -> Unit) {
-    Text(
-        text = label,
-        fontSize = 18.sp, letterSpacing = 2.sp, color = color,
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 22.dp),
-    )
+    SettingsRow(label, display) { onSelect(options[next]) }
 }
 
 private fun stateColor(state: String) = when (state) {

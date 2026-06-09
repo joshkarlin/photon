@@ -38,7 +38,9 @@ import app.photon.data.ScrollSpeed
 import app.photon.data.model.Message
 import app.photon.ui.shared.components.CleanMessageRow
 import app.photon.ui.shared.components.MessageInputBar
+import app.photon.ui.shared.components.PhotonHeader
 import app.photon.ui.shared.components.SwipeToReply
+import app.photon.ui.shared.components.quoteLabel
 import app.photon.ui.shared.components.TerminalMessageRow
 import app.photon.ui.shared.components.TranscriptMessageRow
 import kotlinx.coroutines.flow.Flow
@@ -71,7 +73,7 @@ fun ChatScreenContent(
     val scrollScope = rememberCoroutineScope()
     var reactingTo by remember { mutableStateOf<Message?>(null) }
     var replyingTo by remember { mutableStateOf<Message?>(null) }
-    val prefs = PhotonPreferences(context)
+    val prefs = remember { PhotonPreferences(context) }
     val chatScrollSpeed by prefs.chatScrollSpeed.collectAsState(initial = ScrollSpeed.MEDIUM)
     val scrollPx = with(androidx.compose.ui.platform.LocalDensity.current) { chatScrollSpeed.dp.dp.toPx() }
     val layout by (if (isGroup) prefs.groupLayout else prefs.dmLayout)
@@ -102,26 +104,11 @@ fun ChatScreenContent(
             .imePadding(),
     ) {
         // Header
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp)
-                .padding(top = 16.dp, bottom = 12.dp),
-        ) {
-            Text("<", fontSize = 18.sp, color = Color(0xFF666666),
-                modifier = Modifier.align(Alignment.CenterStart).clickable(onClick = onBack).padding(end = 16.dp))
-            val titleMod = if (onTitleClick != null) {
-                Modifier.align(Alignment.Center).clickable(onClick = onTitleClick)
-            } else {
-                Modifier.align(Alignment.Center)
-            }
-            Text(
-                text = title.uppercase(),
-                fontSize = 13.sp, letterSpacing = 3.sp, color = Color(0xFF666666),
-                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = titleMod,
-            )
-        }
+        PhotonHeader(
+            title = title.uppercase(),
+            onBack = onBack,
+            onTitleClick = onTitleClick,
+        )
         HorizontalDivider(color = Color(0xFF1A1A1A))
 
         // Messages
@@ -194,13 +181,6 @@ fun ChatScreenContent(
 
         // Reply chip (above input) — shown when the user has picked a message to reply to.
         replyingTo?.let { target ->
-            val quotedName = when {
-                target.isFromMe -> "You"
-                else -> participantNames[target.senderJid]
-                    ?: target.senderJid.substringBefore("@").take(10)
-            }
-            val preview = target.textBody?.takeIf { it.isNotBlank() }?.replace('\n', ' ')
-                ?: "[ ${target.contentType} ]"
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -209,7 +189,11 @@ fun ChatScreenContent(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "↳ $quotedName: ${preview.take(60)}",
+                    text = quoteLabel(
+                        quoted = target,
+                        quotedSenderName = participantNames[target.senderJid],
+                        jidFallbackChars = 10,
+                    ),
                     fontSize = 11.sp,
                     color = Color(0xFF666666),
                     maxLines = 1,

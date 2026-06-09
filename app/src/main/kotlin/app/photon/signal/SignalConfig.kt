@@ -3,19 +3,27 @@ package app.photon.signal
 import android.content.Context
 import android.util.Base64
 import app.photon.R
+import org.whispersystems.signalservice.api.SignalSessionLock
 import org.whispersystems.signalservice.api.push.TrustStore
+import org.whispersystems.signalservice.api.util.CredentialsProvider
+import org.whispersystems.signalservice.api.util.SleepTimer
+import org.whispersystems.signalservice.api.websocket.HealthMonitor
+import org.whispersystems.signalservice.api.websocket.WebSocketFactory
 import org.whispersystems.signalservice.internal.configuration.SignalCdnUrl
 import org.whispersystems.signalservice.internal.configuration.SignalCdsiUrl
 import org.whispersystems.signalservice.internal.configuration.SignalServiceConfiguration
 import org.whispersystems.signalservice.internal.configuration.SignalServiceUrl
 import org.whispersystems.signalservice.internal.configuration.SignalStorageUrl
 import org.whispersystems.signalservice.internal.configuration.SignalSvr2Url
+import org.whispersystems.signalservice.internal.push.PushServiceSocket
+import org.whispersystems.signalservice.internal.websocket.OkHttpWebSocketConnection
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.security.KeyStore
 import java.security.cert.CertificateFactory
 import java.util.Optional
+import java.util.concurrent.locks.ReentrantLock
 
 /**
  * Signal production server configuration.
@@ -86,6 +94,55 @@ object SignalConfig {
         return out.toByteArray()
     }
 
+    /** Thread.sleep-backed timer shared by every Photon websocket. */
+    val sleepTimer: SleepTimer = object : SleepTimer {
+        override fun sleep(millis: Long) = Thread.sleep(millis)
+    }
+
+    /**
+     * A fresh ReentrantLock-backed SignalSessionLock. Sender and receiver
+     * each keep their own instance (as they always have) — this only
+     * removes the duplicated anonymous-object boilerplate.
+     */
+    fun newSessionLock(): SignalSessionLock = object : SignalSessionLock {
+        private val lock = ReentrantLock()
+        override fun acquire(): SignalSessionLock.Lock {
+            lock.lock()
+            return SignalSessionLock.Lock { lock.unlock() }
+        }
+    }
+
+    /**
+     * WebSocketFactory for an OkHttp connection to Signal. Authenticated
+     * when [credentials] is non-null, unauthenticated otherwise.
+     * [onMessageError] hooks the HealthMonitor callback for callers that
+     * want to log message errors; keep-alives are always ignored.
+     */
+    fun webSocketFactory(
+        config: SignalServiceConfiguration,
+        name: String,
+        credentials: CredentialsProvider?,
+        onMessageError: ((Int) -> Unit)? = null,
+    ): WebSocketFactory {
+        val creds: Optional<CredentialsProvider> =
+            if (credentials != null) Optional.of(credentials) else Optional.empty()
+        return WebSocketFactory {
+            OkHttpWebSocketConnection(
+                name,
+                config,
+                creds,
+                USER_AGENT,
+                object : HealthMonitor {
+                    override fun onKeepAliveResponse(sentTimestamp: Long, isIdentifiedWebSocket: Boolean) {}
+                    override fun onMessageError(status: Int, isIdentifiedWebSocket: Boolean) {
+                        onMessageError?.invoke(status)
+                    }
+                },
+                credentials != null,
+            )
+        }
+    }
+
     fun createConfiguration(): SignalServiceConfiguration {
         val serviceUrls = arrayOf(SignalServiceUrl(SERVICE_URL, trustStore))
         val cdnMap = mapOf(
@@ -113,4 +170,18 @@ object SignalConfig {
             false,                // censored
         )
     }
+}
+
+/**
+ * Raw authenticated REST call. PushServiceSocket.makeServiceRequest is
+ * package-private in the library, so reflection is the only way to hit
+ * endpoints it doesn't expose (pre-key upload fallback, linked-device
+ * DELETE on logout) without forking it.
+ */
+fun PushServiceSocket.serviceRequest(path: String, method: String, body: String) {
+    val m = javaClass.getDeclaredMethod(
+        "makeServiceRequest", String::class.java, String::class.java, String::class.java,
+    )
+    m.isAccessible = true
+    m.invoke(this, path, method, body)
 }

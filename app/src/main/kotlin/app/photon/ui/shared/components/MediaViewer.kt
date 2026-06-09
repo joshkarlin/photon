@@ -78,16 +78,9 @@ fun MediaViewer(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.fillMaxSize(),
         ) {
-            // Close bar
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp)
-                    .padding(top = 16.dp, bottom = 12.dp),
-            ) {
-                Text("<", fontSize = 18.sp, color = Color(0xFF666666),
-                    modifier = Modifier.align(Alignment.CenterStart).clickable(onClick = onDismiss).padding(end = 16.dp))
-            }
+            // Close bar — same `<` affordance and dimensions as every header,
+            // just without a title.
+            PhotonHeader(title = null, onBack = onDismiss)
 
             // Content
             Box(

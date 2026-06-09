@@ -50,17 +50,22 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 		b.log.Infof("Connected to WhatsApp")
 		b.BroadcastEvent("connection_state", ConnectionStateEvent{State: "connected"})
 		b.client.SendPresence(context.Background(), types.PresenceAvailable)
-		// Backfill contact names — retry periodically since app state sync takes time
+		// Fallback reconcile: AppStateSyncComplete normally triggers the
+		// merge+backfill, but if the event never fires (already-synced
+		// session) this single delayed run still converges names.
 		go func() {
-			for i := 0; i < 6; i++ {
-				delay := time.Duration(10*(i+1)) * time.Second
-				b.log.Infof("Contact backfill attempt %d in %s...", i+1, delay)
-				time.Sleep(delay)
-				// LID mappings also arrive via app state sync, so retry the
-				// duplicate merge on the same schedule as the name backfill.
-				b.MergeLIDConversations()
-				b.BackfillContactNames()
-			}
+			time.Sleep(60 * time.Second)
+			b.MergeLIDConversations()
+			b.BackfillContactNames()
+		}()
+	case *events.AppStateSyncComplete:
+		// Contact names and LID mappings arrive via app state sync — run the
+		// reconcile as soon as a patch lands instead of polling on a timer.
+		// Both operations are idempotent, so running per-patch is safe.
+		b.log.Infof("App state sync complete: %s", v.Name)
+		go func() {
+			b.MergeLIDConversations()
+			b.BackfillContactNames()
 		}()
 	case *events.Disconnected:
 		b.log.Infof("Disconnected from WhatsApp")
@@ -158,39 +163,9 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 		return
 	}
 
-	// Determine content type and extract data
-	contentType, textBody := classifyMessage(msg)
-
-	// Serialize protobuf for later media download
-	rawProto, _ := proto.Marshal(msg)
-
-	// Extract reply context
-	var replyToID sql.NullString
-	if ctx := getContextInfo(msg); ctx != nil && ctx.GetStanzaID() != "" {
-		replyToID = sql.NullString{String: ctx.GetStanzaID(), Valid: true}
-	}
-
-	// Extract media mime type
-	var mediaMime sql.NullString
-	if mime := getMediaMime(msg); mime != "" {
-		mediaMime = sql.NullString{String: mime, Valid: true}
-	}
-
-	// Insert message
-	row := &MessageRow{
-		ID:              msgID,
-		ConversationJID: chatJID,
-		SenderJID:       senderJID,
-		Timestamp:       ts,
-		ContentType:     contentType,
-		TextBody:        sql.NullString{String: textBody, Valid: textBody != ""},
-		MediaMime:       mediaMime,
-		ReplyToID:       replyToID,
-		IsFromMe:        isFromMe,
-		Status:          "sent",
-		RawProto:        rawProto,
-	}
+	row := buildMessageRow(msg, msgID, chatJID, senderJID, ts, isFromMe, "sent")
 	b.InsertMessage(row)
+	contentType, textBody := row.ContentType, row.TextBody.String
 
 	// Extract and save inline thumbnail for media messages
 	if thumb := getInlineThumbnail(msg); thumb != nil && len(thumb) > 0 {
@@ -210,15 +185,9 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 	nameIsAuthoritative := false
 	isGroup := evt.Info.Chat.Server == types.GroupServer
 	if isGroup {
-		// For groups, get the group name from group info
-		groupInfo, err := b.client.GetGroupInfo(context.Background(), evt.Info.Chat)
-		if err != nil {
-			b.log.Warnf("GetGroupInfo failed for %s: %v", chatJID, err)
-		} else if groupInfo.Name != "" {
-			name = groupInfo.Name
-		} else {
-			b.log.Warnf("GetGroupInfo returned empty name for %s", chatJID)
-		}
+		// For groups, get the group name from group info (cached — one
+		// network fetch per group per hour, not per message)
+		name = b.groupName(evt.Info.Chat)
 
 		// Store sender as participant with their display name
 		senderDisplayName := evt.Info.PushName
@@ -231,30 +200,13 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 			b.UpsertParticipant(chatJID, senderJID, senderDisplayName, "member")
 		}
 	} else {
-		// For DMs, prefer the user's address book name (FullName, synced
-		// from the primary device) over push names (self-chosen, mutable).
-		// The contact store may be keyed by either the phone JID or the
-		// LID, so check both.
-		var contact types.ContactInfo
-		if c, err := b.client.Store.Contacts.GetContact(context.Background(), resolvedChat); err == nil && c.Found {
-			contact = c
-		} else if resolvedChat != evt.Info.Chat {
-			if c, err := b.client.Store.Contacts.GetContact(context.Background(), evt.Info.Chat); err == nil && c.Found {
-				contact = c
-			}
+		// Only use the event push name from the OTHER person, not ourselves.
+		eventPushName := ""
+		if !isFromMe {
+			eventPushName = evt.Info.PushName
 		}
-		switch {
-		case contact.FullName != "":
-			name = contact.FullName
-			nameIsAuthoritative = true
-		case !isFromMe && evt.Info.PushName != "":
-			// Only use push name from the OTHER person, not ourselves
-			name = evt.Info.PushName
-		case contact.PushName != "":
-			name = contact.PushName
-		case contact.BusinessName != "":
-			name = contact.BusinessName
-		}
+		contact := b.lookupContact(resolvedChat, evt.Info.Chat)
+		name, nameIsAuthoritative = bestContactName(contact, eventPushName)
 		// For LID JIDs, fall back to the resolved phone number
 		if name == "" && resolvedChat != evt.Info.Chat {
 			name = "+" + resolvedChat.User
@@ -305,8 +257,8 @@ func (b *Bridge) handleReceipt(evt *events.Receipt) {
 	ids := make([]string, len(evt.MessageIDs))
 	for i, id := range evt.MessageIDs {
 		ids[i] = string(id)
-		b.UpdateMessageStatus(string(id), status)
 	}
+	b.UpdateMessageStatusBatch(ids, status)
 
 	b.BroadcastEvent("receipt", ReceiptEvent{
 		ConversationJID: chatJID,
@@ -341,14 +293,6 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 
 	b.log.Infof("History sync: %d conversations (retention: %d days, %d msgs)", totalConvs, cfg.MaxDays, cfg.MaxMessages)
 
-	// Pre-load contact names from whatsmeow's store
-	contacts, err := b.client.Store.Contacts.GetAllContacts(context.Background())
-	if err != nil {
-		b.log.Warnf("Failed to load contacts: %v", err)
-		contacts = make(map[types.JID]types.ContactInfo)
-	}
-	b.log.Debugf("Loaded %d contacts from store", len(contacts))
-
 	for i, conv := range convs {
 		rawJID := conv.GetID()
 		if rawJID == "" {
@@ -366,6 +310,7 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 		convMsgCount := 0
 		skippedNil := 0
 		skippedOld := 0
+		var pending []*MessageRow
 		for _, histMsg := range msgs {
 			// Respect retention limits
 			if cfg.MaxMessages > 0 && convMsgCount >= cfg.MaxMessages {
@@ -404,62 +349,29 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 				senderJID = info.GetParticipant()
 			}
 
-			contentType, textBody := classifyMessage(msg)
-			rawProto, _ := proto.Marshal(msg)
-
-			var replyToID sql.NullString
-			if ctx := getContextInfo(msg); ctx != nil && ctx.GetStanzaID() != "" {
-				replyToID = sql.NullString{String: ctx.GetStanzaID(), Valid: true}
-			}
-
-			var mediaMime sql.NullString
-			if mime := getMediaMime(msg); mime != "" {
-				mediaMime = sql.NullString{String: mime, Valid: true}
-			}
-
-			row := &MessageRow{
-				ID:              msgID,
-				ConversationJID: jid,
-				SenderJID:       senderJID,
-				Timestamp:       ts,
-				ContentType:     contentType,
-				TextBody:        sql.NullString{String: textBody, Valid: textBody != ""},
-				MediaMime:       mediaMime,
-				ReplyToID:       replyToID,
-				IsFromMe:        isFromMe,
-				Status:          "read",
-				RawProto:        rawProto,
-			}
-			b.InsertMessage(row)
+			pending = append(pending, buildMessageRow(msg, msgID, jid, senderJID, ts, isFromMe, "read"))
 			totalMsgs++
 			convMsgCount++
 		}
+		// One transaction per conversation — per-row implicit transactions
+		// mean thousands of WAL commits during initial pairing.
+		b.InsertMessages(pending)
 
 		if skippedNil > 0 || skippedOld > 0 {
 			b.log.Debugf("  Conv %s: inserted %d, skipped %d nil, %d old", jid, convMsgCount, skippedNil, skippedOld)
 		}
 
 		// For DMs, resolve contact name from whatsmeow's contact store.
-		// Address book FullName beats push names; the store may be keyed
-		// by either the phone JID or the original LID, so check both.
 		if !isGroup && name == "" {
 			var contact types.ContactInfo
 			if parsedJID, parseErr := types.ParseJID(jid); parseErr == nil {
-				contact = contacts[parsedJID]
-			}
-			if contact.FullName == "" && contact.PushName == "" && contact.BusinessName == "" && jid != rawJID {
-				if parsedJID, parseErr := types.ParseJID(rawJID); parseErr == nil {
-					contact = contacts[parsedJID]
+				parsedRaw, rawErr := types.ParseJID(rawJID)
+				if rawErr != nil {
+					parsedRaw = parsedJID
 				}
+				contact = b.lookupContact(parsedJID, parsedRaw)
 			}
-			switch {
-			case contact.FullName != "":
-				name = contact.FullName
-			case contact.BusinessName != "":
-				name = contact.BusinessName
-			case contact.PushName != "":
-				name = contact.PushName
-			}
+			name, _ = bestContactName(contact, "")
 			// Fallback: check message push names (only from received messages, not sent)
 			if name == "" {
 				for _, histMsg := range msgs {
@@ -521,15 +433,15 @@ func (b *Bridge) handlePushName(evt *events.PushName) {
 }
 
 // BackfillContactNames reconciles DM conversation names with whatsmeow's
-// contact store. Called on startup after connection (contact app state sync
-// takes a while, hence the retries from the Connected handler).
+// contact store. Runs when app state sync patches land (contacts arrive via
+// app state) and once as a delayed fallback after connect.
 //
 // Two passes in one loop:
 //   - Conversations whose contact has an address book FullName are upgraded
 //     to it even if they already carry a (push) name — the address book is
 //     authoritative and this repairs rows named before contacts synced.
 //   - Unnamed conversations are filled from the best remaining source
-//     (BusinessName, then PushName).
+//     (PushName, then BusinessName).
 func (b *Bridge) BackfillContactNames() {
 	contacts, err := b.client.Store.Contacts.GetAllContacts(context.Background())
 	if err != nil {
@@ -561,16 +473,9 @@ func (b *Bridge) BackfillContactNames() {
 			}
 		}
 
-		name := ""
-		switch {
-		case contact.FullName != "":
-			name = contact.FullName
-		case currentName != "":
+		name, authoritative := bestContactName(contact, "")
+		if !authoritative && currentName != "" {
 			continue // already named and no address book entry — leave it
-		case contact.BusinessName != "":
-			name = contact.BusinessName
-		case contact.PushName != "":
-			name = contact.PushName
 		}
 
 		if name != "" && name != currentName {
@@ -588,8 +493,9 @@ func (b *Bridge) BackfillContactNames() {
 // MergeLIDConversations folds conversation rows keyed by @lid JIDs into
 // their phone-based rows. Duplicates appeared when an event path stored a
 // LID key (history sync, the old push-name handler) while live messages
-// used the resolved phone JID. Runs on connect, once the LID store has the
-// mappings; unresolvable LIDs are left untouched and retried next connect.
+// used the resolved phone JID. Runs when app state sync lands the mappings
+// (plus a post-connect fallback); unresolvable LIDs are left untouched and
+// retried on the next run.
 func (b *Bridge) MergeLIDConversations() {
 	rows, err := b.msgDB.Query(`SELECT jid, COALESCE(name, ''), is_group, COALESCE(last_message_id, ''), last_timestamp, unread_count FROM conversations WHERE jid LIKE '%@lid'`)
 	if err != nil {
@@ -650,12 +556,110 @@ func (b *Bridge) handleCallOffer(evt *events.CallOffer) {
 func (b *Bridge) handleGroupInfo(evt *events.GroupInfo) {
 	jid := evt.JID.String()
 	if evt.Name != nil {
+		b.setGroupName(jid, evt.Name.Name)
 		b.UpdateConversationName(jid, evt.Name.Name)
 	}
 	b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: jid})
 }
 
+// groupName returns the group's subject, hitting the server at most once per
+// hour per group — GetGroupInfo is a network round-trip and groups rarely
+// rename. Rename events (handleGroupInfo) refresh the cache immediately.
+func (b *Bridge) groupName(jid types.JID) string {
+	key := jid.String()
+	b.groupNameMu.Lock()
+	cached, ok := b.groupNames[key]
+	b.groupNameMu.Unlock()
+	if ok && time.Since(cached.fetched) < time.Hour {
+		return cached.name
+	}
+
+	groupInfo, err := b.client.GetGroupInfo(context.Background(), jid)
+	if err != nil {
+		// Don't cache failures — retry on the next message.
+		b.log.Warnf("GetGroupInfo failed for %s: %v", key, err)
+		return ""
+	}
+	if groupInfo.Name == "" {
+		b.log.Warnf("GetGroupInfo returned empty name for %s", key)
+	}
+	b.setGroupName(key, groupInfo.Name)
+	return groupInfo.Name
+}
+
+func (b *Bridge) setGroupName(jid, name string) {
+	b.groupNameMu.Lock()
+	b.groupNames[jid] = cachedGroupName{name: name, fetched: time.Now()}
+	b.groupNameMu.Unlock()
+}
+
 // Helper functions
+
+// bestContactName picks a DM display name. The user's address book FullName
+// (synced from the primary device) is authoritative — it may overwrite an
+// existing name. Push names (self-chosen, mutable) and business names only
+// fill in when there's nothing better; eventPushName is the push name carried
+// by a live message event ("" when not applicable, e.g. our own messages).
+func bestContactName(contact types.ContactInfo, eventPushName string) (name string, authoritative bool) {
+	switch {
+	case contact.FullName != "":
+		return contact.FullName, true
+	case eventPushName != "":
+		return eventPushName, false
+	case contact.PushName != "":
+		return contact.PushName, false
+	case contact.BusinessName != "":
+		return contact.BusinessName, false
+	}
+	return "", false
+}
+
+// lookupContact fetches a contact record, checking under the resolved phone
+// JID first and falling back to the original LID — whatsmeow's contact store
+// may be keyed by either. Returns a zero ContactInfo when neither is found.
+func (b *Bridge) lookupContact(resolved, original types.JID) types.ContactInfo {
+	if c, err := b.client.Store.Contacts.GetContact(context.Background(), resolved); err == nil && c.Found {
+		return c
+	}
+	if original != resolved {
+		if c, err := b.client.Store.Contacts.GetContact(context.Background(), original); err == nil && c.Found {
+			return c
+		}
+	}
+	return types.ContactInfo{}
+}
+
+// buildMessageRow assembles the MessageRow fields shared by the live message
+// handler and history sync: content classification, raw proto (kept for
+// later media download), reply context, and media mime type.
+func buildMessageRow(msg *waE2E.Message, id, convJID, senderJID string, ts int64, isFromMe bool, status string) *MessageRow {
+	contentType, textBody := classifyMessage(msg)
+	rawProto, _ := proto.Marshal(msg)
+
+	var replyToID sql.NullString
+	if ctx := getContextInfo(msg); ctx != nil && ctx.GetStanzaID() != "" {
+		replyToID = sql.NullString{String: ctx.GetStanzaID(), Valid: true}
+	}
+
+	var mediaMime sql.NullString
+	if mime := getMediaMime(msg); mime != "" {
+		mediaMime = sql.NullString{String: mime, Valid: true}
+	}
+
+	return &MessageRow{
+		ID:              id,
+		ConversationJID: convJID,
+		SenderJID:       senderJID,
+		Timestamp:       ts,
+		ContentType:     contentType,
+		TextBody:        sql.NullString{String: textBody, Valid: textBody != ""},
+		MediaMime:       mediaMime,
+		ReplyToID:       replyToID,
+		IsFromMe:        isFromMe,
+		Status:          status,
+		RawProto:        rawProto,
+	}
+}
 
 func classifyMessage(msg *waE2E.Message) (contentType string, textBody string) {
 	switch {
@@ -764,7 +768,6 @@ func (b *Bridge) buildTextMessage(text string, replyToID string) *waE2E.Message 
 
 // autoDownloadMedia downloads small media (stickers, audio) automatically.
 func (b *Bridge) autoDownloadMedia(msgID string, msg *waE2E.Message) {
-	_ = time.Now() // avoid unused import
 	path, err := b.DownloadMedia(msgID, msg)
 	if err != nil {
 		b.log.Warnf("Auto-download failed for %s: %v", msgID, err)

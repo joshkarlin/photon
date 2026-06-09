@@ -47,7 +47,7 @@ import java.io.File
 
 private sealed class InputState {
     data object Default : InputState()
-    data class Recording(val seconds: Int = 0) : InputState()
+    data object Recording : InputState()
 }
 
 @Composable
@@ -68,15 +68,25 @@ fun MessageInputBar(
     var recorder by remember { mutableStateOf<MediaRecorder?>(null) }
     var recordingPath by remember { mutableStateOf<String?>(null) }
 
+    // Start a new recording into a fresh file (permission already granted).
+    fun beginRecording() {
+        val path = File(context.filesDir, "voice_${System.currentTimeMillis()}.ogg").absolutePath
+        recordingPath = path
+        recorder = startRecording(context, path)
+        if (recorder != null) state = InputState.Recording
+    }
+
+    // Stop and release the active recorder.
+    fun stopRecorder() {
+        recorder?.stop()
+        recorder?.release()
+        recorder = null
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (granted) {
-            val path = File(context.filesDir, "voice_${System.currentTimeMillis()}.ogg").absolutePath
-            recordingPath = path
-            recorder = startRecording(context, path)
-            if (recorder != null) state = InputState.Recording()
-        }
+        if (granted) beginRecording()
     }
 
     val mediaPickerLauncher = rememberLauncherForActivityResult(
@@ -112,10 +122,7 @@ fun MessageInputBar(
             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             return
         }
-        val path = File(context.filesDir, "voice_${System.currentTimeMillis()}.ogg").absolutePath
-        recordingPath = path
-        recorder = startRecording(context, path)
-        if (recorder != null) state = InputState.Recording()
+        beginRecording()
     }
 
     // Timer for recording
@@ -268,9 +275,7 @@ fun MessageInputBar(
                     color = Color(0xFF666666),
                     modifier = Modifier
                         .clickable {
-                            recorder?.stop()
-                            recorder?.release()
-                            recorder = null
+                            stopRecorder()
                             recordingPath?.let { File(it).delete() }
                             state = InputState.Default
                         }
@@ -284,9 +289,7 @@ fun MessageInputBar(
                     color = Color.White,
                     modifier = Modifier
                         .clickable {
-                            recorder?.stop()
-                            recorder?.release()
-                            recorder = null
+                            stopRecorder()
                             val path = recordingPath
                             val file = path?.let { File(it) }
                             if (path != null && file != null && file.exists() && file.length() > 0) {

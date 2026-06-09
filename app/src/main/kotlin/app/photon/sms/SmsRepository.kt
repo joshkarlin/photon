@@ -4,15 +4,14 @@ import android.content.ContentResolver
 import android.content.ContentValues
 import android.content.Context
 import android.database.ContentObserver
-import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.provider.ContactsContract
 import android.provider.Telephony
 import android.telephony.SmsManager
 import android.util.Log
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
+import app.photon.signal.AndroidContactResolver
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
@@ -22,12 +21,13 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 
 class SmsRepository(private val context: Context, scope: CoroutineScope) {
 
     private val resolver: ContentResolver = context.contentResolver
-    private val contactCache = mutableMapOf<String, String>()
+    private val contactResolver = AndroidContactResolver(context)
 
     // Tracks when the user last opened each SMS conversation in Photon.
     // Used to compute unread state without being the default SMS app
@@ -44,7 +44,7 @@ class SmsRepository(private val context: Context, scope: CoroutineScope) {
      * the cached `+447...` would persist until the next SMS write.
      */
     fun refreshContactNames() {
-        contactCache.clear()
+        contactResolver.invalidate()
         resolver.notifyChange(Telephony.Sms.CONTENT_URI, null)
     }
 
@@ -74,29 +74,30 @@ class SmsRepository(private val context: Context, scope: CoroutineScope) {
         resolver.notifyChange(Telephony.Sms.CONTENT_URI, null)
     }
 
-    val conversations: StateFlow<List<Conversation>?> = callbackFlow<List<Conversation>?> {
+    // Emits on every SMS provider change. The ContentObserver callback runs
+    // on the main looper, so it only signals — the actual provider scans
+    // happen in map{} below, upstream of flowOn(IO), never on main.
+    private fun smsChanges(): Flow<Unit> = callbackFlow {
         val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
             override fun onChange(selfChange: Boolean) {
-                trySend(loadConversations())
+                trySend(Unit)
             }
         }
         resolver.registerContentObserver(Telephony.Sms.CONTENT_URI, true, observer)
-        send(loadConversations())
+        send(Unit)
         awaitClose { resolver.unregisterContentObserver(observer) }
-    }.flowOn(Dispatchers.IO)
-        .distinctUntilChanged()
-        .stateIn(scope, SharingStarted.Eagerly, null)
+    }
 
-    fun messages(address: String): Flow<List<Message>> = callbackFlow {
-        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
-            override fun onChange(selfChange: Boolean) {
-                trySend(loadMessages(address))
-            }
-        }
-        resolver.registerContentObserver(Telephony.Sms.CONTENT_URI, true, observer)
-        send(loadMessages(address))
-        awaitClose { resolver.unregisterContentObserver(observer) }
-    }.flowOn(Dispatchers.IO).distinctUntilChanged()
+    val conversations: StateFlow<List<Conversation>?> = smsChanges()
+        .map<Unit, List<Conversation>?> { loadConversations() }
+        .flowOn(Dispatchers.IO)
+        .distinctUntilChanged()
+        .stateIn(scope, SharingStarted.WhileSubscribed(5_000), null)
+
+    fun messages(address: String): Flow<List<Message>> = smsChanges()
+        .map { loadMessages(address) }
+        .flowOn(Dispatchers.IO)
+        .distinctUntilChanged()
 
     fun getConversation(address: String): Conversation? {
         return loadConversations().find { it.jid == normalizeAddress(address) }
@@ -184,7 +185,7 @@ class SmsRepository(private val context: Context, scope: CoroutineScope) {
                 if (address !in conversations) {
                     conversations[address] = Conversation(
                         jid = address,
-                        name = if (isAlphanumeric) address else resolveContactName(rawAddress),
+                        name = if (isAlphanumeric) address else contactResolver.resolve(rawAddress),
                         isGroup = false,
                         lastMessageId = null,
                         lastTimestamp = date / 1000,
@@ -192,7 +193,6 @@ class SmsRepository(private val context: Context, scope: CoroutineScope) {
                         isMuted = false,
                         avatarUrl = null,
                         updatedAt = date / 1000,
-                        lastMessagePreview = body,
                     )
                 } else if (unread) {
                     val existing = conversations[address]!!
@@ -277,25 +277,6 @@ class SmsRepository(private val context: Context, scope: CoroutineScope) {
         }
 
         return messages
-    }
-
-    private fun resolveContactName(phoneNumber: String): String? {
-        contactCache[phoneNumber]?.let { return it }
-
-        val uri = Uri.withAppendedPath(
-            ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
-            Uri.encode(phoneNumber),
-        )
-        val cursor = resolver.query(
-            uri,
-            arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME),
-            null, null, null,
-        )
-        val name = cursor?.use { c ->
-            if (c.moveToFirst()) c.getString(0) else null
-        }
-        if (name != null) contactCache[phoneNumber] = name
-        return name
     }
 
     private fun normalizeAddress(address: String): String {

@@ -60,10 +60,6 @@ type SendTypingPayload struct {
 	Composing bool   `json:"composing"`
 }
 
-type GetProfilePicPayload struct {
-	JID string `json:"jid"`
-}
-
 type SetRetentionPayload struct {
 	MaxMessages  int `json:"max_messages"`
 	MaxDays      int `json:"max_days"`

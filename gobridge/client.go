@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +24,12 @@ type RetentionConfig struct {
 	MediaTTLMins int   // Minutes before temp media files are deleted
 }
 
+// cachedGroupName is a groupNames cache entry; see Bridge.groupName.
+type cachedGroupName struct {
+	name    string
+	fetched time.Time
+}
+
 // Bridge holds the whatsmeow client, message DB, and WebSocket connections.
 type Bridge struct {
 	client  *whatsmeow.Client
@@ -32,15 +40,19 @@ type Bridge struct {
 	mu        sync.RWMutex
 	conns     []*websocket.Conn
 	retention RetentionConfig
+
+	groupNameMu sync.Mutex
+	groupNames  map[string]cachedGroupName
 }
 
 // NewBridge creates a new Bridge instance.
 func NewBridge(client *whatsmeow.Client, msgDB *sql.DB, dataDir string, log waLog.Logger) *Bridge {
 	return &Bridge{
-		client:  client,
-		msgDB:   msgDB,
-		dataDir: dataDir,
-		log:     log,
+		client:     client,
+		msgDB:      msgDB,
+		dataDir:    dataDir,
+		log:        log,
+		groupNames: make(map[string]cachedGroupName),
 		retention: RetentionConfig{
 			MaxMessages:  50,
 			MaxDays:      7,
@@ -139,9 +151,16 @@ func (b *Bridge) pruneMedia() {
 	}
 
 	cutoff := time.Now().Add(-time.Duration(ttl) * time.Minute)
-	mediaDir := b.dataDir + "/media"
+	// Thumbnails (saveThumbnail) follow the same age policy as full media.
+	b.pruneMediaDir(filepath.Join(b.dataDir, "media"), cutoff, "media_url")
+	b.pruneMediaDir(filepath.Join(b.dataDir, "thumbs"), cutoff, "thumbnail_path")
+}
 
-	entries, err := os.ReadDir(mediaDir)
+// pruneMediaDir deletes files older than cutoff and NULLs the given messages
+// column (files are named <messageID>.<ext>) so the UI stops referencing the
+// deleted path and offers re-download where applicable.
+func (b *Bridge) pruneMediaDir(dir string, cutoff time.Time, column string) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
@@ -155,18 +174,9 @@ func (b *Bridge) pruneMedia() {
 			continue
 		}
 		if info.ModTime().Before(cutoff) {
-			path := mediaDir + "/" + entry.Name()
-			os.Remove(path)
-			// Clear media_url in DB so the message shows as downloadable again
-			msgID := entry.Name()
-			// Strip extension to get message ID
-			for i := len(msgID) - 1; i >= 0; i-- {
-				if msgID[i] == '.' {
-					msgID = msgID[:i]
-					break
-				}
-			}
-			b.msgDB.Exec(`UPDATE messages SET media_url = NULL WHERE id = ?`, msgID)
+			os.Remove(filepath.Join(dir, entry.Name()))
+			msgID := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+			b.msgDB.Exec(`UPDATE messages SET `+column+` = NULL WHERE id = ?`, msgID)
 		}
 	}
 }
@@ -215,15 +225,24 @@ func (b *Bridge) BroadcastEvent(eventType string, payload interface{}) {
 	}
 }
 
-// Connect connects to WhatsApp. Call after pairing or on startup with existing session.
-func (b *Bridge) Connect(ctx context.Context) error {
-	b.BroadcastEvent("connection_state", ConnectionStateEvent{State: "connecting"})
-	err := b.client.Connect()
-	if err != nil {
-		b.BroadcastEvent("connection_state", ConnectionStateEvent{State: "disconnected"})
-		return err
-	}
-	return nil
+// markMessageFailed flips an outgoing row to "failed" and notifies the UI so
+// it can offer retry.
+func (b *Bridge) markMessageFailed(jid, id string) {
+	b.UpdateMessageStatus(id, "failed")
+	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
+		ConversationJID: jid, MessageID: id,
+	})
+}
+
+// markMessageSent records a server-confirmed send. The row adopts the
+// server's timestamp (replacing the optimistic local one) so it sorts
+// correctly relative to messages that arrived during the send.
+func (b *Bridge) markMessageSent(jid, id string, ts int64) {
+	b.UpdateMessageStatusAndTimestamp(id, "sent", ts)
+	b.UpsertConversation(jid, "", false, id, ts)
+	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
+		ConversationJID: jid, MessageID: id,
+	})
 }
 
 // RequestPairingCode generates an 8-character pairing code for the given phone number.
@@ -301,21 +320,11 @@ func (b *Bridge) SendTextMessage(ctx context.Context, jid string, text string, r
 	msg := b.buildTextMessage(text, replyToID)
 	resp, err := b.client.SendMessage(ctx, targetJID, msg, whatsmeow.SendRequestExtra{ID: id})
 	if err != nil {
-		b.UpdateMessageStatus(id, "failed")
-		b.BroadcastEvent("message_updated", MessageUpdatedEvent{
-			ConversationJID: jid, MessageID: id,
-		})
+		b.markMessageFailed(jid, id)
 		return id, ts, err
 	}
 
-	// Replace the placeholder timestamp with the server-confirmed one so the
-	// row sorts correctly relative to messages that arrived during the send.
-	b.UpdateMessageStatusAndTimestamp(id, "sent", resp.Timestamp.Unix())
-	b.UpsertConversation(jid, "", false, id, resp.Timestamp.Unix())
-	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
-		ConversationJID: jid, MessageID: id,
-	})
-
+	b.markMessageSent(jid, id, resp.Timestamp.Unix())
 	return id, resp.Timestamp.Unix(), nil
 }
 
@@ -343,27 +352,17 @@ func (b *Bridge) RetryTextMessage(ctx context.Context, messageID string) error {
 
 	targetJID, err := types.ParseJID(jid)
 	if err != nil {
-		b.UpdateMessageStatus(messageID, "failed")
-		b.BroadcastEvent("message_updated", MessageUpdatedEvent{
-			ConversationJID: jid, MessageID: messageID,
-		})
+		b.markMessageFailed(jid, messageID)
 		return err
 	}
 
 	msg := b.buildTextMessage(text, replyToID)
 	resp, err := b.client.SendMessage(ctx, targetJID, msg, whatsmeow.SendRequestExtra{ID: messageID})
 	if err != nil {
-		b.UpdateMessageStatus(messageID, "failed")
-		b.BroadcastEvent("message_updated", MessageUpdatedEvent{
-			ConversationJID: jid, MessageID: messageID,
-		})
+		b.markMessageFailed(jid, messageID)
 		return err
 	}
-	b.UpdateMessageStatusAndTimestamp(messageID, "sent", resp.Timestamp.Unix())
-	b.UpsertConversation(jid, "", false, messageID, resp.Timestamp.Unix())
-	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
-		ConversationJID: jid, MessageID: messageID,
-	})
+	b.markMessageSent(jid, messageID, resp.Timestamp.Unix())
 	return nil
 }
 

@@ -16,16 +16,18 @@ import org.whispersystems.signalservice.api.SignalServiceSenderKeyStore
 import org.whispersystems.signalservice.api.SignalServiceSessionStore
 import org.whispersystems.signalservice.api.push.DistributionId
 
-class PhotonProtocolStore(db: SignalProtocolDatabase) :
-    SignalServiceAccountDataStore,
+// kyberStore defaults from db so one instance both backs the KyberPreKeyStore
+// delegation and serves the last-resort overrides below.
+class PhotonProtocolStore(
+    db: SignalProtocolDatabase,
+    private val kyberStore: PhotonKyberPreKeyStore = PhotonKyberPreKeyStore(db),
+) : SignalServiceAccountDataStore,
     IdentityKeyStore by PhotonIdentityKeyStore(db),
     SessionStore by PhotonSessionStore(db),
     PreKeyStore by PhotonPreKeyStore(db),
     SignedPreKeyStore by PhotonSignedPreKeyStore(db),
-    KyberPreKeyStore by PhotonKyberPreKeyStore(db),
+    KyberPreKeyStore by kyberStore,
     SenderKeyStore by PhotonSenderKeyStore(db) {
-
-    private val kyberStore = PhotonKyberPreKeyStore(db)
 
     // SignalServiceAccountDataStore
     override fun isMultiDevice(): Boolean = true

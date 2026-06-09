@@ -27,6 +27,12 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
+// Hoisted so each visible row doesn't allocate formatters on every
+// recomposition (same pattern as MessageLayouts.kt).
+private val hourMinuteFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
+private val weekdayFormat = SimpleDateFormat("EEE", Locale.getDefault())
+private val dayMonthFormat = SimpleDateFormat("dd/MM", Locale.getDefault())
+
 @Composable
 fun ConversationRow(
     conv: Conversation,
@@ -95,12 +101,12 @@ fun formatTimestamp(epochSeconds: Long): String {
     return when {
         now.get(Calendar.DATE) == then.get(Calendar.DATE) &&
             now.get(Calendar.YEAR) == then.get(Calendar.YEAR) ->
-            SimpleDateFormat("HH:mm", Locale.getDefault()).format(date)
+            hourMinuteFormat.format(date)
         now.get(Calendar.DATE) - then.get(Calendar.DATE) == 1 &&
             now.get(Calendar.YEAR) == then.get(Calendar.YEAR) -> "Yesterday"
         now.get(Calendar.WEEK_OF_YEAR) == then.get(Calendar.WEEK_OF_YEAR) &&
             now.get(Calendar.YEAR) == then.get(Calendar.YEAR) ->
-            SimpleDateFormat("EEE", Locale.getDefault()).format(date)
-        else -> SimpleDateFormat("dd/MM", Locale.getDefault()).format(date)
+            weekdayFormat.format(date)
+        else -> dayMonthFormat.format(date)
     }
 }

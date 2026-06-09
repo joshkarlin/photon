@@ -11,44 +11,41 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 )
 
-// DownloadMedia downloads media for a message and saves it to disk.
-func (b *Bridge) DownloadMedia(msgID string, msg *waE2E.Message) (string, error) {
-	ctx := context.Background()
-	var data []byte
-	var err error
-	ext := ".bin"
-
+// downloadableMedia returns the message's media part (all of which satisfy
+// whatsmeow.DownloadableMessage), or nil if the message carries none.
+func downloadableMedia(msg *waE2E.Message) whatsmeow.DownloadableMessage {
 	switch {
 	case msg.GetImageMessage() != nil:
-		m := msg.GetImageMessage()
-		data, err = b.client.Download(ctx, m)
-		ext = mimeToExt(m.GetMimetype())
+		return msg.GetImageMessage()
 	case msg.GetVideoMessage() != nil:
-		m := msg.GetVideoMessage()
-		data, err = b.client.Download(ctx, m)
-		ext = mimeToExt(m.GetMimetype())
+		return msg.GetVideoMessage()
 	case msg.GetAudioMessage() != nil:
-		m := msg.GetAudioMessage()
-		data, err = b.client.Download(ctx, m)
-		ext = mimeToExt(m.GetMimetype())
+		return msg.GetAudioMessage()
 	case msg.GetDocumentMessage() != nil:
-		m := msg.GetDocumentMessage()
-		data, err = b.client.Download(ctx, m)
-		ext = mimeToExt(m.GetMimetype())
+		return msg.GetDocumentMessage()
 	case msg.GetStickerMessage() != nil:
-		m := msg.GetStickerMessage()
-		data, err = b.client.Download(ctx, m)
-		ext = mimeToExt(m.GetMimetype())
+		return msg.GetStickerMessage()
 	default:
+		return nil
+	}
+}
+
+// DownloadMedia downloads media for a message and saves it to disk.
+func (b *Bridge) DownloadMedia(msgID string, msg *waE2E.Message) (string, error) {
+	media := downloadableMedia(msg)
+	if media == nil {
 		return "", fmt.Errorf("no downloadable media in message %s", msgID)
 	}
 
+	data, err := b.client.Download(context.Background(), media)
 	if err != nil {
 		return "", fmt.Errorf("download failed for %s: %w", msgID, err)
 	}
+	ext := mimeToExt(getMediaMime(msg))
 
 	filename := msgID + ext
 	path := filepath.Join(b.dataDir, "media", filename)
@@ -92,7 +89,7 @@ func (b *Bridge) saveThumbnail(msgID string, data []byte) string {
 // row goes in with status="sending" before the upload starts so users see
 // it the instant they tap send.
 func (b *Bridge) UploadAndSend(jid, filePath, mimeType, caption, replyToID string) (string, int64, error) {
-	targetJID, err := parseJID(jid)
+	targetJID, err := types.ParseJID(jid)
 	if err != nil {
 		return "", 0, err
 	}
@@ -104,15 +101,7 @@ func (b *Bridge) UploadAndSend(jid, filePath, mimeType, caption, replyToID strin
 	id := b.client.GenerateMessageID()
 	ts := time.Now().Unix()
 
-	contentType := "document"
-	switch {
-	case strings.HasPrefix(mimeType, "image/"):
-		contentType = "image"
-	case strings.HasPrefix(mimeType, "video/"):
-		contentType = "video"
-	case strings.HasPrefix(mimeType, "audio/"):
-		contentType = "audio"
-	}
+	contentType, mediaType := mediaKind(mimeType)
 
 	b.InsertMessage(&MessageRow{
 		ID:              id,
@@ -133,50 +122,43 @@ func (b *Bridge) UploadAndSend(jid, filePath, mimeType, caption, replyToID strin
 		ContentType: contentType, IsFromMe: true,
 	})
 
-	markFailed := func() {
-		b.UpdateMessageStatus(id, "failed")
-		b.BroadcastEvent("message_updated", MessageUpdatedEvent{
-			ConversationJID: jid, MessageID: id,
-		})
-	}
-
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		markFailed()
+		b.markMessageFailed(jid, id)
 		return id, ts, fmt.Errorf("read file failed: %w", err)
-	}
-
-	mediaType := whatsmeow.MediaDocument
-	switch {
-	case strings.HasPrefix(mimeType, "image/"):
-		mediaType = whatsmeow.MediaImage
-	case strings.HasPrefix(mimeType, "video/"):
-		mediaType = whatsmeow.MediaVideo
-	case strings.HasPrefix(mimeType, "audio/"):
-		mediaType = whatsmeow.MediaAudio
 	}
 
 	ctx := context.Background()
 	resp, err := b.client.Upload(ctx, data, mediaType)
 	if err != nil {
-		markFailed()
+		b.markMessageFailed(jid, id)
 		return id, ts, fmt.Errorf("upload failed: %w", err)
 	}
 
 	msg := buildMediaMessage(resp, mimeType, caption, replyToID, data)
 	sendResp, err := b.client.SendMessage(ctx, targetJID, msg, whatsmeow.SendRequestExtra{ID: id})
 	if err != nil {
-		markFailed()
+		b.markMessageFailed(jid, id)
 		return id, ts, fmt.Errorf("send failed: %w", err)
 	}
 
-	b.UpdateMessageStatusAndTimestamp(id, "sent", sendResp.Timestamp.Unix())
-	b.UpsertConversation(jid, "", false, id, sendResp.Timestamp.Unix())
-	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
-		ConversationJID: jid, MessageID: id,
-	})
-
+	b.markMessageSent(jid, id, sendResp.Timestamp.Unix())
 	return id, sendResp.Timestamp.Unix(), nil
+}
+
+// mediaKind maps a mime type to both our content_type column value and
+// whatsmeow's upload media type in one place.
+func mediaKind(mimeType string) (contentType string, mediaType whatsmeow.MediaType) {
+	switch {
+	case strings.HasPrefix(mimeType, "image/"):
+		return "image", whatsmeow.MediaImage
+	case strings.HasPrefix(mimeType, "video/"):
+		return "video", whatsmeow.MediaVideo
+	case strings.HasPrefix(mimeType, "audio/"):
+		return "audio", whatsmeow.MediaAudio
+	default:
+		return "document", whatsmeow.MediaDocument
+	}
 }
 
 func buildMediaMessage(resp whatsmeow.UploadResponse, mimeType, caption, replyToID string, data []byte) *waE2E.Message {

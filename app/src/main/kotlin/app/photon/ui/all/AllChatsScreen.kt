@@ -40,7 +40,7 @@ fun AllChatsScreen(
     val allChats = remember(waConvs, sigConvs, smsConvs) {
         if (!anyLoaded) null else buildList {
             (waConvs ?: emptyList()).filter { c ->
-                !c.jid.startsWith("status@") && !c.jid.startsWith("0@") && c.lastTimestamp > 0
+                !c.isPseudoChat && c.lastTimestamp > 0
             }.forEach { add(TaggedConversation(it, Platform.WHATSAPP)) }
             (sigConvs ?: emptyList()).forEach { add(TaggedConversation(it, Platform.SIGNAL)) }
             (smsConvs ?: emptyList()).forEach { add(TaggedConversation(it, Platform.SMS)) }

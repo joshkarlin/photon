@@ -46,14 +46,17 @@ class SignalGroupV2Manager(
     companion object {
         private const val TAG = "SignalGroupV2Manager"
         private const val DAY_SECONDS = 86_400L
+
+        // Day-truncated-second → credential. Refilled by getOrFetchCredentials().
+        // Process-wide: the manager is recreated on every WS reconnect (~30s),
+        // and credentials stay valid for a 7-day window, so an instance-level
+        // cache would refetch on each reconnect for nothing.
+        private val credentialsByDay = ConcurrentHashMap<Long, AuthCredentialWithPniResponse>()
     }
 
     private val clientZk: ClientZkOperations = ClientZkOperations.create(config)
     private val operations: GroupsV2Operations = GroupsV2Operations(clientZk, GroupsV2Operations.HIGHEST_KNOWN_EPOCH)
     private val groupsApi: GroupsV2Api = GroupsV2Api(authWs, pushSocket, operations)
-
-    // Day-truncated-second → credential. Refilled by getOrFetchCredentials().
-    private val credentialsByDay = ConcurrentHashMap<Long, AuthCredentialWithPniResponse>()
 
     /**
      * Derive the stable, encrypted-then-hashed group identifier from a

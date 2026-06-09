@@ -7,13 +7,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
-import app.photon.data.PhotonPreferences
 import app.photon.data.model.Message
 import app.photon.service.NotificationHelper
 import app.photon.service.PhotonService
 import app.photon.ui.shared.ChatScreenContent
 import app.photon.ui.shared.components.MediaViewer
-import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.launch
 
 private fun formatJidAsPhone(jid: String): String {
@@ -32,8 +30,11 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val conversation = remember(jid) { repo.getConversation(jid) }
-    val isGroup = jid.contains("@g.us")
+    val isGroup = conversation?.isGroup ?: jid.contains("@g.us")
     var viewingMedia by remember { mutableStateOf<Message?>(null) }
+    // Newest incoming message id we've already marked read, so we don't
+    // re-send markRead for the same messages on every list emission.
+    var lastMarkedReadId by remember(jid) { mutableStateOf<String?>(null) }
 
     // Load participant names for group chats
     val db = PhotonService._database
@@ -57,8 +58,12 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
         onMediaTap = { msg -> viewingMedia = msg },
         onMessagesLoaded = { messages ->
             NotificationHelper.cancelForConversation(context, jid)
-            val unreadIds = messages.filter { !it.isFromMe }.take(20).map { it.id }
-            if (unreadIds.isNotEmpty()) {
+            // messages arrive newest-first; only mark read when a new
+            // incoming message appears.
+            val newestIncomingId = messages.firstOrNull { !it.isFromMe }?.id
+            if (newestIncomingId != null && newestIncomingId != lastMarkedReadId) {
+                lastMarkedReadId = newestIncomingId
+                val unreadIds = messages.filter { !it.isFromMe }.take(20).map { it.id }
                 scope.launch { try { repo.markRead(jid, unreadIds) } catch (_: Exception) {} }
             }
         },

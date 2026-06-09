@@ -72,6 +72,32 @@ private fun formatReactionsInline(msg: Message): String {
 }
 
 /**
+ * One-line "↳ who: preview" label for a quoted/replied-to message. Shared by
+ * the per-message reply quote lines and the reply chip above the input bar.
+ *
+ * @param quotedSenderName human-readable name for the quoted sender (ignored
+ *   for self-messages, which always show "You")
+ * @param jidFallbackChars how many leading JID characters to show when no
+ *   name is known
+ */
+fun quoteLabel(
+    quoted: Message,
+    quotedSenderName: String?,
+    jidFallbackChars: Int = 8,
+): String {
+    val who = when {
+        quoted.isFromMe -> "You"
+        !quotedSenderName.isNullOrBlank() -> quotedSenderName
+        else -> quoted.senderJid.substringBefore("@").take(jidFallbackChars)
+    }
+    val preview = when {
+        !quoted.textBody.isNullOrBlank() -> quoted.textBody.replace('\n', ' ')
+        else -> "[ ${quoted.contentType} ]"
+    }.take(60)
+    return "↳ $who: $preview"
+}
+
+/**
  * Compact one-line quote shown above a message that is a reply. Caller passes the
  * human-readable name for the quoted message's sender (empty means "You"/self).
  */
@@ -83,17 +109,8 @@ private fun ReplyQuoteLine(
     monospace: Boolean = false,
     onClick: (() -> Unit)? = null,
 ) {
-    val who = when {
-        quoted.isFromMe -> "You"
-        !quotedSenderName.isNullOrBlank() -> quotedSenderName
-        else -> quoted.senderJid.substringBefore("@").take(8)
-    }
-    val preview = when {
-        !quoted.textBody.isNullOrBlank() -> quoted.textBody.replace('\n', ' ')
-        else -> "[ ${quoted.contentType} ]"
-    }.take(60)
     Text(
-        text = "↳ $who: $preview",
+        text = quoteLabel(quoted, quotedSenderName),
         fontSize = 11.sp,
         color = dimColor,
         fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,

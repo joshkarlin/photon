@@ -13,6 +13,9 @@ import app.photon.MainActivity
 import app.photon.R
 import app.photon.PhotonApp
 import app.photon.data.db.PhotonDatabase
+import app.photon.data.model.boolean
+import app.photon.data.model.isPseudoWhatsAppJid
+import app.photon.data.model.string
 import app.photon.data.repository.ChatRepository
 import app.photon.signal.AndroidRecordFix
 import app.photon.sms.SmsRepository
@@ -44,13 +47,14 @@ class PhotonService : Service() {
 
         goBridge = GoBridge(this)
         wsClient = WsClient(goBridge.port)
-        chatRepository = ChatRepository(PhotonDatabase(this), wsClient, scope)
+        val database = PhotonDatabase(this)
+        chatRepository = ChatRepository(database, wsClient, scope)
 
         // Expose as singletons for UI access
         _goBridge = goBridge
         _wsClient = wsClient
         _chatRepository = chatRepository
-        _database = PhotonDatabase(this)
+        _database = database
 
         // Initialize SMS
         _smsRepository = SmsRepository(this, scope)
@@ -65,7 +69,7 @@ class PhotonService : Service() {
         _signalManager = SignalAccountManager(signalProtocolStore, signalCreds, signalProtocolDb)
         val signalMessageDb = SignalMessageDatabase(this)
         _signalSender = SignalMessageSender(signalCreds, signalProtocolStore, signalMessageDb)
-        _signalRepository = SignalRepository(signalMessageDb, signalCreds, _signalSender, scope)
+        _signalRepository = SignalRepository(signalMessageDb, _signalSender, scope)
         _signalReceiver = SignalMessageReceiver(this, signalCreds, signalProtocolStore, signalMessageDb)
 
         // Start Signal message receiver if already paired
@@ -150,35 +154,29 @@ class PhotonService : Service() {
         _wsClient?.events?.collect { evt ->
             when (evt.type) {
                 "new_message" -> {
-                    val isFromMe = evt.payload["is_from_me"]?.toString()?.trim('"')
-                    if (isFromMe == "true") return@collect
+                    if (evt.boolean("is_from_me") == true) return@collect
 
-                    val convJid = evt.payload["conversation_jid"]?.toString()?.trim('"') ?: return@collect
-                    // Skip WhatsApp status-broadcast JIDs ("status@broadcast") and the
-                    // server-side "0@" metadata pseudo-chat — they shouldn't ring.
-                    if (convJid.startsWith("status@") || convJid.startsWith("0@") ||
-                        convJid.contains("@broadcast")) return@collect
+                    val convJid = evt.string("conversation_jid") ?: return@collect
+                    // Pseudo-chats (status broadcasts etc.) shouldn't ring.
+                    if (isPseudoWhatsAppJid(convJid)) return@collect
 
                     val conversation = _chatRepository?.getConversation(convJid)
                     if (conversation?.isMuted == true) return@collect
 
-                    val senderName = evt.payload["sender_name"]?.toString()?.trim('"')
-                    val body = evt.payload["text_body"]?.toString()?.trim('"')
-                    val name = senderName?.takeIf { it.isNotBlank() }
+                    val name = evt.string("sender_name")?.takeIf { it.isNotBlank() }
                         ?: conversation?.name
                         ?: convJid.substringBefore("@")
 
                     NotificationHelper.showMessageNotification(
-                        this@PhotonService, name, body, "WhatsApp", convJid,
+                        this@PhotonService, name, evt.string("text_body"), "WhatsApp", convJid,
                     )
                 }
                 "receipt" -> {
                     // Reading on any linked device fires a read receipt; clear the
                     // Photon notification for that conversation so the banner doesn't
                     // linger after the message has been consumed.
-                    val receiptType = evt.payload["type"]?.toString()?.trim('"')
-                    if (receiptType == "read") {
-                        val convJid = evt.payload["conversation_jid"]?.toString()?.trim('"')
+                    if (evt.string("type") == "read") {
+                        val convJid = evt.string("conversation_jid")
                         if (!convJid.isNullOrBlank()) {
                             NotificationHelper.cancelForConversation(this@PhotonService, convJid)
                         }
@@ -188,6 +186,8 @@ class PhotonService : Service() {
         }
     }
 
+    private var lastNotifiedStatus: String? = null
+
     private fun updateNotification() {
         val parts = mutableListOf<String>()
         val waState = _wsClient?.whatsappState?.value
@@ -195,6 +195,11 @@ class PhotonService : Service() {
         val sigState = _signalReceiver?.state?.value
         if (sigState == "connected") parts.add("Signal \u2713") else if (_signalCredentials?.isRegistered() == true) parts.add("Signal \u2717")
         val status = parts.joinToString("  ")
+        // Skip the re-post when nothing changed \u2014 this runs on a 10s timer
+        // and each notify() is binder/systemui work that keeps the device
+        // from idling.
+        if (status == lastNotifiedStatus) return
+        lastNotifiedStatus = status
         val nm = getSystemService(NotificationManager::class.java)
         nm.notify(NOTIFICATION_ID, buildNotification(status))
     }
@@ -283,17 +288,41 @@ class PhotonService : Service() {
             cachedQrText = null
         }
 
-        suspend fun restartWhatsApp() {
+        /**
+         * Stop the bridge, wipe all WhatsApp data, restart, and reconnect.
+         * Lives here (not in the settings UI) so the bridge's file layout
+         * and the restart choreography have a single owner.
+         */
+        suspend fun resetWhatsApp(filesDir: java.io.File) {
             _wsClient?.disconnect()
             _goBridge?.stop()
             kotlinx.coroutines.delay(300)
+            filesDir.listFiles()?.filter {
+                it.name.startsWith("messages.db") || it.name.startsWith("whatsmeow.db")
+            }?.forEach { it.delete() }
+            java.io.File(filesDir, "media").deleteRecursively()
+            java.io.File(filesDir, "thumbs").deleteRecursively()
+            // The Kotlin reader holds a long-lived handle; the deleted inode
+            // would keep serving stale rows without this.
+            _database?.invalidate()
             _goBridge?.start()
-            kotlinx.coroutines.delay(500)
+            kotlinx.coroutines.delay(1000)
             try { _wsClient?.connect() } catch (_: Exception) {}
         }
 
+        /**
+         * Unlink from the Signal account and wipe all Signal state. logout()
+         * calls DELETE /v1/devices/{id} so the primary cleanly forgets us —
+         * must run off the main thread.
+         */
+        fun resetSignal(context: android.content.Context) {
+            _signalReceiver?.stop()
+            _signalSender?.shutdown()
+            _signalManager?.logout()
+            val dbDir = context.getDatabasePath("signal_protocol.db").parentFile
+            dbDir?.listFiles()?.filter { it.name.startsWith("signal_") }?.forEach { it.delete() }
+        }
+
         val wsClient: WsClient get() = _wsClient!!
-        val chatRepository: ChatRepository get() = _chatRepository!!
-        val database: PhotonDatabase get() = _database!!
     }
 }

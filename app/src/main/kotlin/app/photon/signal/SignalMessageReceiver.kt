@@ -20,7 +20,6 @@ import kotlinx.coroutines.launch
 import org.signal.libsignal.metadata.certificate.CertificateValidator
 import org.signal.libsignal.protocol.ecc.ECPublicKey
 import org.whispersystems.signalservice.api.SignalServiceMessageReceiver
-import org.whispersystems.signalservice.api.SignalSessionLock
 import org.whispersystems.signalservice.api.crypto.AttachmentCipherInputStream
 import org.whispersystems.signalservice.api.crypto.EnvelopeMetadata
 import org.whispersystems.signalservice.api.crypto.SignalServiceCipher
@@ -28,18 +27,12 @@ import org.whispersystems.signalservice.api.messages.EnvelopeResponse
 import org.whispersystems.signalservice.api.messages.multidevice.DeviceContactsInputStream
 import org.whispersystems.signalservice.api.push.SignalServiceAddress
 import org.whispersystems.signalservice.api.util.AttachmentPointerUtil
-import org.whispersystems.signalservice.api.util.SleepTimer
-import org.whispersystems.signalservice.api.websocket.HealthMonitor
 import org.whispersystems.signalservice.api.websocket.SignalWebSocket
-import org.whispersystems.signalservice.api.websocket.WebSocketFactory
 import org.whispersystems.signalservice.internal.push.AttachmentPointer
 import org.whispersystems.signalservice.internal.push.DataMessage
 import org.whispersystems.signalservice.internal.push.SyncMessage
-import org.whispersystems.signalservice.internal.websocket.OkHttpWebSocketConnection
 import java.io.File
-import java.util.Optional
 import java.util.UUID
-import java.util.concurrent.locks.ReentrantLock
 
 class SignalMessageReceiver(
     private val context: android.content.Context,
@@ -52,18 +45,15 @@ class SignalMessageReceiver(
         // Generous cap on the contacts sync attachment (~10 MB is way more
         // than any plausible contact book).
         private const val MAX_CONTACTS_BLOB_BYTES: Long = 50L * 1024 * 1024
+        // Conversation name used until the GroupV2 state fetch resolves the
+        // real title. Also doubles as the "needs fetch" sentinel.
+        private const val PLACEHOLDER_GROUP_NAME = "Signal group"
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val config = SignalConfig.createConfiguration()
     private val contactResolver = AndroidContactResolver(context)
-    private val sessionLock = object : SignalSessionLock {
-        private val lock = ReentrantLock()
-        override fun acquire(): SignalSessionLock.Lock {
-            lock.lock()
-            return SignalSessionLock.Lock { lock.unlock() }
-        }
-    }
+    private val sessionLock = SignalConfig.newSessionLock()
 
     private val _state = MutableStateFlow("disconnected")
     val state: StateFlow<String> = _state
@@ -164,26 +154,14 @@ class SignalMessageReceiver(
     }
 
     private fun connectWebSocket() {
-        val factory = WebSocketFactory {
-            OkHttpWebSocketConnection(
-                "photon-recv",
-                config,
-                Optional.of(credentials),
-                SignalConfig.USER_AGENT,
-                object : HealthMonitor {
-                    override fun onKeepAliveResponse(sentTimestamp: Long, isIdentifiedWebSocket: Boolean) {}
-                    override fun onMessageError(status: Int, isIdentifiedWebSocket: Boolean) {
-                        Log.w(TAG, "Message error: $status")
-                    }
-                },
-                true,
-            )
+        val factory = SignalConfig.webSocketFactory(config, "photon-recv", credentials) { status ->
+            Log.w(TAG, "Message error: $status")
         }
 
         val ws = SignalWebSocket.AuthenticatedWebSocket(
             factory,
             { running },
-            object : SleepTimer { override fun sleep(millis: Long) = Thread.sleep(millis) },
+            SignalConfig.sleepTimer,
             30_000L,
         )
         ws.connect()
@@ -191,19 +169,10 @@ class SignalMessageReceiver(
         webSocket = ws
 
         // Unauthenticated socket is used by profile fetches and key uploads.
-        val unauthFactory = WebSocketFactory {
-            OkHttpWebSocketConnection(
-                "photon-recv-unauth", config, Optional.empty(), SignalConfig.USER_AGENT,
-                object : HealthMonitor {
-                    override fun onKeepAliveResponse(sentTimestamp: Long, isIdentifiedWebSocket: Boolean) {}
-                    override fun onMessageError(status: Int, isIdentifiedWebSocket: Boolean) {}
-                },
-                false,
-            )
-        }
+        val unauthFactory = SignalConfig.webSocketFactory(config, "photon-recv-unauth", null)
         val unauthWs = SignalWebSocket.UnauthenticatedWebSocket(
             unauthFactory, { running },
-            object : SleepTimer { override fun sleep(millis: Long) = Thread.sleep(millis) },
+            SignalConfig.sleepTimer,
             30_000L,
         )
         unauthWs.connect()
@@ -392,12 +361,9 @@ class SignalMessageReceiver(
                 Log.w(TAG, "KeysApi.setPreKeys failed (${e.message}); trying PushServiceSocket fallback")
             }
 
-            // Fallback: HTTP PUT via reflection.
-            val pushSocket = PushServiceSocket(config, credentials, SignalConfig.USER_AGENT, false)
-            val method = pushSocket.javaClass.getDeclaredMethod(
-                "makeServiceRequest", String::class.java, String::class.java, String::class.java,
-            )
-            method.isAccessible = true
+            // Fallback: HTTP PUT via reflection. Reuse the socket built on
+            // connect when available; only the pre-connect path builds fresh.
+            val push = pushSocket ?: PushServiceSocket(config, credentials, SignalConfig.USER_AGENT, false)
             val preKeyState = org.whispersystems.signalservice.internal.push.PreKeyState(
                 org.whispersystems.signalservice.api.push.SignedPreKeyEntity(
                     signedPreKey.id.toLong(), signedPreKey.keyPair.publicKey, signedPreKey.signature,
@@ -415,7 +381,7 @@ class SignalMessageReceiver(
                 },
             )
             val json = org.whispersystems.signalservice.internal.util.JsonUtil.toJson(preKeyState)
-            method.invoke(pushSocket, "/v2/keys?identity=aci", "PUT", json)
+            push.serviceRequest("/v2/keys?identity=aci", "PUT", json)
             Log.i(TAG, "Uploaded fresh keys via PushServiceSocket fallback: signed=$signedPreKeyId " +
                 "lastResortKyber=$lastResortId ec=${ecPreKeys.size} kyber=${kyberPreKeys.size}")
         } catch (e: Exception) {
@@ -577,20 +543,7 @@ class SignalMessageReceiver(
         // member list. Bailing out without storing it leaves the group
         // permanently unnamed and unable to receive outgoing sends.
         if (isGroup && groupMasterKey != null) {
-            val existingName = messageDb.getConversation(conversationJid)?.name
-            val placeholder = existingName?.takeIf { it.isNotBlank() && it != conversationJid }
-                ?: "Signal group"
-            messageDb.upsertConversation(jid = conversationJid, name = placeholder, isGroup = true)
-            val storedRevision = messageDb.getGroupMeta(conversationJid)?.revision ?: -1
-            messageDb.updateGroupMeta(conversationJid, groupMasterKey, groupRevision)
-            val needsFetch = existingName.isNullOrBlank() ||
-                existingName == "Signal group" ||
-                existingName == conversationJid ||
-                storedRevision < groupRevision
-            if (needsFetch) {
-                Log.i(TAG, "Group ${conversationJid.take(12)}…: seeding masterKey + fetching state (rev=$groupRevision)")
-                scope.launch { resolveGroupMetadata(conversationJid, groupMasterKey) }
-            }
+            seedGroupConversation(conversationJid, groupMasterKey, groupRevision)
         }
 
         // Handle reactions
@@ -618,11 +571,7 @@ class SignalMessageReceiver(
             return
         }
 
-        val contentType = when {
-            body != null -> "text"
-            data.sticker != null -> "sticker"
-            else -> "text"
-        }
+        val contentType = if (body != null) "text" else "sticker"
 
         // Resolve a friendly name for the sender. Order: Android local
         // contacts (this device's address book) → Signal profile name (when
@@ -642,16 +591,6 @@ class SignalMessageReceiver(
             }
         } else {
             messageDb.upsertConversation(jid = conversationJid, name = senderName, isGroup = false)
-            maybeFetchProfile(senderAci)
-        }
-
-        // Quote reference (if this incoming message is a reply). Stored as the stable
-        // "{authorAci}_{sentTimestampMs}" prefix — matches our local ID scheme minus the
-        // random suffix, so hydration can find the original via findMessageByPrefix.
-        val replyToPrefix = data.quote?.let { q ->
-            val qAuthor = q.authorAci ?: return@let null
-            val qId = q.id ?: return@let null
-            "${qAuthor}_$qId"
         }
 
         messageDb.insertMessage(
@@ -661,7 +600,7 @@ class SignalMessageReceiver(
             timestamp = timestamp / 1000,
             contentType = contentType,
             textBody = body,
-            replyToId = replyToPrefix,
+            replyToId = replyPrefix(data.quote),
             isFromMe = false,
             status = "received",
         )
@@ -672,7 +611,7 @@ class SignalMessageReceiver(
         // Show notification — for groups, title is the group name (with the
         // sender's name woven into the body); for DMs it's the sender.
         val notifTitle = if (isGroup) {
-            "Signal group"
+            PLACEHOLDER_GROUP_NAME
         } else {
             senderName ?: senderAci.take(8)
         }
@@ -734,28 +673,12 @@ class SignalMessageReceiver(
             val groupV2 = data.groupV2
             val groupMasterKey = groupV2?.masterKey?.toByteArray()?.takeIf { it.size == 32 }
             if (groupMasterKey != null) {
-                val gm = groupManager
-                val derived = try { gm?.groupIdFromMasterKey(groupMasterKey) } catch (_: Exception) { null }
-                if (derived != null) {
-                    val convJid = Base64.encodeToString(derived, Base64.NO_WRAP or Base64.URL_SAFE)
-                    val existing = messageDb.getConversation(convJid)?.name
-                    val placeholder = existing?.takeIf { it.isNotBlank() && it != convJid }
-                        ?: "Signal group"
-                    messageDb.upsertConversation(jid = convJid, name = placeholder, isGroup = true)
-                    val rev = groupV2.revision ?: 0
-                    val storedRev = messageDb.getGroupMeta(convJid)?.revision ?: -1
-                    messageDb.updateGroupMeta(convJid, groupMasterKey, rev)
-                    if (existing.isNullOrBlank() || existing == "Signal group" || storedRev < rev) {
-                        scope.launch { resolveGroupMetadata(convJid, groupMasterKey) }
-                    }
+                val convJid = try { groupManager?.jidFromMasterKey(groupMasterKey) } catch (_: Exception) { null }
+                if (convJid != null) {
+                    seedGroupConversation(convJid, groupMasterKey, groupV2.revision ?: 0)
 
                     val body = data.body
                     if (body != null) {
-                        val syncReplyPrefix = data.quote?.let { q ->
-                            val qAuthor = q.authorAci ?: return@let null
-                            val qId = q.id ?: return@let null
-                            "${qAuthor}_$qId"
-                        }
                         messageDb.insertMessage(
                             id = messageId,
                             conversationJid = convJid,
@@ -763,7 +686,7 @@ class SignalMessageReceiver(
                             timestamp = timestamp / 1000,
                             contentType = "text",
                             textBody = body,
-                            replyToId = syncReplyPrefix,
+                            replyToId = replyPrefix(data.quote),
                             isFromMe = true,
                             status = "sent",
                         )
@@ -815,11 +738,6 @@ class SignalMessageReceiver(
                     isGroup = false,
                 )
                 if (destinationAci != myAci) maybeFetchProfile(destinationAci)
-                val syncReplyPrefix = data.quote?.let { q ->
-                    val qAuthor = q.authorAci ?: return@let null
-                    val qId = q.id ?: return@let null
-                    "${qAuthor}_$qId"
-                }
                 messageDb.insertMessage(
                     id = messageId,
                     conversationJid = destinationAci,
@@ -827,7 +745,7 @@ class SignalMessageReceiver(
                     timestamp = timestamp / 1000,
                     contentType = "text",
                     textBody = body,
-                    replyToId = syncReplyPrefix,
+                    replyToId = replyPrefix(data.quote),
                     isFromMe = true,
                     status = "sent",
                 )
@@ -1000,6 +918,41 @@ class SignalMessageReceiver(
     }
 
     /**
+     * Quote references are stored as the stable "{authorAci}_{sentTimestampMs}"
+     * prefix — matches our local ID scheme minus the random suffix, so
+     * hydration can find the original via findMessageByPrefix.
+     */
+    private fun replyPrefix(quote: DataMessage.Quote?): String? {
+        val author = quote?.authorAci ?: return null
+        val id = quote.id ?: return null
+        return "${author}_$id"
+    }
+
+    /**
+     * Seed (or refresh) a GroupV2 conversation row from a message that
+     * carries the group's master key. Plants a placeholder name on first
+     * sight, persists masterKey + revision, and kicks off an async state
+     * fetch whenever the name is still unresolved or the revision moved.
+     * Shared by the incoming-data and sync-sent paths.
+     */
+    private fun seedGroupConversation(conversationJid: String, masterKey: ByteArray, revision: Int) {
+        val existingName = messageDb.getConversation(conversationJid)?.name
+        val placeholder = existingName?.takeIf { it.isNotBlank() && it != conversationJid }
+            ?: PLACEHOLDER_GROUP_NAME
+        messageDb.upsertConversation(jid = conversationJid, name = placeholder, isGroup = true)
+        val storedRevision = messageDb.getGroupMeta(conversationJid)?.revision ?: -1
+        messageDb.updateGroupMeta(conversationJid, masterKey, revision)
+        val needsFetch = existingName.isNullOrBlank() ||
+            existingName == PLACEHOLDER_GROUP_NAME ||
+            existingName == conversationJid ||
+            storedRevision < revision
+        if (needsFetch) {
+            Log.i(TAG, "Group ${conversationJid.take(12)}…: seeding masterKey + fetching state (rev=$revision)")
+            scope.launch { resolveGroupMetadata(conversationJid, masterKey) }
+        }
+    }
+
+    /**
      * Async-fetch the GroupV2 state from the server (title + members),
      * decrypt it via libsignal's GroupsV2Operations, and write back: the
      * conversation row's `name` becomes the decrypted title, and every
@@ -1016,21 +969,13 @@ class SignalMessageReceiver(
             Log.w(TAG, "Group fetch returned null for ${conversationJid.take(12)}… — see GroupV2Manager warnings")
             return
         }
-        val title = group.title?.takeIf { it.isNotBlank() } ?: "Signal group"
+        val title = group.title?.takeIf { it.isNotBlank() } ?: PLACEHOLDER_GROUP_NAME
         messageDb.upsertConversation(jid = conversationJid, name = title, isGroup = true)
 
         val acis = gm.memberAcis(group)
         for (memberAci in acis) {
             val aciString = memberAci.toString()
-            // Best-effort display name for each member:
-            //   1. Their stored profile name (if we ever fetched it)
-            //   2. The contact name resolved from their phone via Android contacts
-            //   3. Bare ACI prefix as last resort — better than the bytes
-            val contact = messageDb.getContact(aciString)
-            val name = contact?.profileName?.takeIf { it.isNotBlank() }
-                ?: contact?.phone?.let { contactResolver.resolve(it) }
-                ?: contact?.phone
-                ?: aciString.take(8)
+            val name = messageDb.memberDisplayName(aciString) { contactResolver.resolve(it) }
             messageDb.upsertParticipant(conversationJid, aciString, name, "member")
         }
         Log.i(TAG, "Resolved group ${conversationJid.take(12)}…: $title (${acis.size} members)")
@@ -1070,12 +1015,9 @@ class SignalMessageReceiver(
         }
 
         for (ts in timestamps) {
-            // Try to match messages by timestamp prefix — we added random suffixes so
-            // we need to update by pattern. Use SQL LIKE for flexibility.
-            messageDb.writableDatabase.execSQL(
-                "UPDATE messages SET status = ? WHERE id LIKE ? AND is_from_me = 1 AND status != 'read'",
-                arrayOf(newStatus, "${myAci}_${ts}_%"),
-            )
+            // Receipts only carry the original sent timestamp; match our rows
+            // by the stable "{aci}_{ts}" prefix (ids carry a random suffix).
+            messageDb.updateStatusByIdPrefix("${myAci}_$ts", newStatus)
         }
     }
 }

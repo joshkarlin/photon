@@ -22,35 +22,14 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
-// fkDriver wraps the modernc sqlite driver and enables foreign keys on every connection.
+// fkDriver wraps the modernc sqlite driver and enables foreign keys, WAL
+// mode, and a busy timeout on every connection. Both the whatsmeow session
+// store and the message DB open through it so the pragmas live in one place
+// and apply to every pooled connection (a one-shot Exec only configures
+// whichever connection happens to serve it).
 type fkDriver struct {
 	inner driver.Driver
 }
-
-type fkConnector struct {
-	dsn   string
-	inner driver.Driver
-}
-
-func (c *fkConnector) Connect(ctx context.Context) (driver.Conn, error) {
-	conn, err := c.inner.(driver.DriverContext).OpenConnector(c.dsn)
-	if err != nil {
-		return nil, err
-	}
-	cn, err := conn.Connect(ctx)
-	if err != nil {
-		return nil, err
-	}
-	// Enable foreign keys, WAL mode, and busy timeout
-	if execer, ok := cn.(driver.ExecerContext); ok {
-		execer.ExecContext(ctx, "PRAGMA foreign_keys=ON", nil)
-		execer.ExecContext(ctx, "PRAGMA journal_mode=WAL", nil)
-		execer.ExecContext(ctx, "PRAGMA busy_timeout=5000", nil)
-	}
-	return cn, nil
-}
-
-func (c *fkConnector) Driver() driver.Driver { return c.inner }
 
 func (d *fkDriver) Open(dsn string) (driver.Conn, error) {
 	conn, err := d.inner.Open(dsn)
@@ -118,19 +97,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize message database (use plain path, not file: URI)
+	// Initialize message database (use plain path, not file: URI). The
+	// sqlite_fk driver applies the WAL/foreign keys/busy timeout pragmas.
 	msgDSN := filepath.Join(*dataDir, "messages.db")
-	msgDB, err := sql.Open("sqlite", msgDSN)
+	msgDB, err := sql.Open("sqlite_fk", msgDSN)
 	if err != nil {
 		logger.Errorf("Failed to open message DB: %v", err)
 		os.Exit(1)
 	}
 	defer msgDB.Close()
-
-	// Enable WAL mode, foreign keys, and busy timeout
-	msgDB.Exec("PRAGMA journal_mode=WAL")
-	msgDB.Exec("PRAGMA foreign_keys=ON")
-	msgDB.Exec("PRAGMA busy_timeout=5000")
 
 	// Get or create device
 	device, err := container.GetFirstDevice(ctx)

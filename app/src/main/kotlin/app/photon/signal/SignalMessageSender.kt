@@ -7,7 +7,6 @@ import org.signal.core.models.ServiceId
 import org.whispersystems.signalservice.api.SignalServiceAccountDataStore
 import org.whispersystems.signalservice.api.SignalServiceDataStore
 import org.whispersystems.signalservice.api.SignalServiceMessageSender
-import org.whispersystems.signalservice.api.SignalSessionLock
 import org.whispersystems.signalservice.api.attachment.AttachmentApi
 import org.whispersystems.signalservice.api.crypto.ContentHint
 import org.whispersystems.signalservice.api.keys.KeysApi
@@ -19,18 +18,13 @@ import org.whispersystems.signalservice.api.messages.multidevice.RequestMessage
 import org.whispersystems.signalservice.api.messages.multidevice.SentTranscriptMessage
 import org.whispersystems.signalservice.api.messages.multidevice.SignalServiceSyncMessage
 import org.whispersystems.signalservice.api.push.SignalServiceAddress
-import org.whispersystems.signalservice.api.util.SleepTimer
-import org.whispersystems.signalservice.api.websocket.HealthMonitor
 import org.whispersystems.signalservice.api.websocket.SignalWebSocket
-import org.whispersystems.signalservice.api.websocket.WebSocketFactory
 import org.whispersystems.signalservice.internal.push.PushServiceSocket
-import org.whispersystems.signalservice.internal.websocket.OkHttpWebSocketConnection
 import java.io.File
 import java.io.FileInputStream
 import java.util.Optional
 import java.util.UUID
 import java.util.concurrent.Executors
-import java.util.concurrent.locks.ReentrantLock
 
 class SignalMessageSender(
     private val credentials: SignalCredentials,
@@ -42,13 +36,7 @@ class SignalMessageSender(
     }
 
     private val config = SignalConfig.createConfiguration()
-    private val sessionLock = object : SignalSessionLock {
-        private val lock = ReentrantLock()
-        override fun acquire(): SignalSessionLock.Lock {
-            lock.lock()
-            return SignalSessionLock.Lock { lock.unlock() }
-        }
-    }
+    private val sessionLock = SignalConfig.newSessionLock()
     private val executor = Executors.newCachedThreadPool()
 
     // Lazily initialized, reused across sends
@@ -63,30 +51,11 @@ class SignalMessageSender(
 
             val pushSocket = PushServiceSocket(config, credentials, SignalConfig.USER_AGENT, false)
 
-            val wsFactory = WebSocketFactory {
-                OkHttpWebSocketConnection(
-                    "photon-send", config, Optional.of(credentials), SignalConfig.USER_AGENT,
-                    object : HealthMonitor {
-                        override fun onKeepAliveResponse(sentTimestamp: Long, isIdentifiedWebSocket: Boolean) {}
-                        override fun onMessageError(status: Int, isIdentifiedWebSocket: Boolean) {}
-                    },
-                    true,
-                )
-            }
-            val unauthFactory = WebSocketFactory {
-                OkHttpWebSocketConnection(
-                    "photon-send-unauth", config, Optional.empty(), SignalConfig.USER_AGENT,
-                    object : HealthMonitor {
-                        override fun onKeepAliveResponse(sentTimestamp: Long, isIdentifiedWebSocket: Boolean) {}
-                        override fun onMessageError(status: Int, isIdentifiedWebSocket: Boolean) {}
-                    },
-                    false,
-                )
-            }
+            val wsFactory = SignalConfig.webSocketFactory(config, "photon-send", credentials)
+            val unauthFactory = SignalConfig.webSocketFactory(config, "photon-send-unauth", null)
 
-            val sleepTimer = object : SleepTimer { override fun sleep(millis: Long) = Thread.sleep(millis) }
-            val aws = SignalWebSocket.AuthenticatedWebSocket(wsFactory, { true }, sleepTimer, 30_000L)
-            val uws = SignalWebSocket.UnauthenticatedWebSocket(unauthFactory, { true }, sleepTimer, 30_000L)
+            val aws = SignalWebSocket.AuthenticatedWebSocket(wsFactory, { true }, SignalConfig.sleepTimer, 30_000L)
+            val uws = SignalWebSocket.UnauthenticatedWebSocket(unauthFactory, { true }, SignalConfig.sleepTimer, 30_000L)
             aws.connect()
             authWs = aws
 
@@ -139,27 +108,24 @@ class SignalMessageSender(
         val aci = ServiceId.ACI.parseOrNull(conversationJid)
         val groupMeta = if (aci == null) messageDb.getGroupMeta(conversationJid) else null
 
-        if (aci == null && groupMeta == null) {
-            Log.w(TAG, "Refusing send: $conversationJid is neither an ACI nor a known group")
+        fun insertRow(status: String) {
             messageDb.insertMessage(
                 id = messageId, conversationJid = conversationJid,
                 senderJid = credentials.aciString ?: "",
                 timestamp = timestamp / 1000, contentType = "text",
                 textBody = text, replyToId = replyPrefix,
-                isFromMe = true, status = "failed",
+                isFromMe = true, status = status,
             )
             messageDb.updateConversationLastMessage(conversationJid, messageId, timestamp / 1000)
+        }
+
+        if (aci == null && groupMeta == null) {
+            Log.w(TAG, "Refusing send: $conversationJid is neither an ACI nor a known group")
+            insertRow("failed")
             return
         }
 
-        messageDb.insertMessage(
-            id = messageId, conversationJid = conversationJid,
-            senderJid = credentials.aciString ?: "",
-            timestamp = timestamp / 1000, contentType = "text",
-            textBody = text, replyToId = replyPrefix,
-            isFromMe = true, status = "sending",
-        )
-        messageDb.updateConversationLastMessage(conversationJid, messageId, timestamp / 1000)
+        insertRow("sending")
 
         try {
             if (aci != null) {
@@ -371,11 +337,9 @@ class SignalMessageSender(
             messageDb.updateGroupMeta(conversationJid, groupMeta.masterKey, group.revision)
             for (memberAci in groupManager.memberAcis(group)) {
                 val aciString = memberAci.toString()
-                val contact = messageDb.getContact(aciString)
-                val displayName = contact?.profileName?.takeIf { it.isNotBlank() }
-                    ?: contact?.phone
-                    ?: aciString.take(8)
-                messageDb.upsertParticipant(conversationJid, aciString, displayName, "member")
+                messageDb.upsertParticipant(
+                    conversationJid, aciString, messageDb.memberDisplayName(aciString), "member",
+                )
             }
             groupManager.memberAcis(group).filter { it != myAci }
         }

@@ -3,8 +3,6 @@ package app.photon.signal
 import android.util.Log
 import app.photon.signal.store.SignalProtocolDatabase
 import app.photon.signal.store.PhotonProtocolStore
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import org.signal.libsignal.protocol.IdentityKey
 import org.signal.libsignal.protocol.IdentityKeyPair
 import org.signal.libsignal.protocol.ecc.ECKeyPair
@@ -38,18 +36,12 @@ class SignalAccountManager(
 
     private val config = SignalConfig.createConfiguration()
 
-    private val _signalState = MutableStateFlow(
-        if (credentials.isRegistered()) "disconnected" else "logged_out"
-    )
-    val signalState: StateFlow<String> = _signalState
-
     private var provisioningCloseable: Closeable? = null
 
     suspend fun startProvisioning(
         onQrUrl: (String) -> Unit,
         onComplete: (Boolean, String?) -> Unit,
     ) {
-        _signalState.value = "connecting"
         try {
             val identityKeyPair = IdentityKeyPair.generate()
 
@@ -60,7 +52,6 @@ class SignalAccountManager(
                 object : ProvisioningSocket.ProvisioningSocketExceptionHandler {
                     override fun handleException(socketId: Int, throwable: Throwable) {
                         Log.e(TAG, "Provisioning socket $socketId error", throwable)
-                        _signalState.value = "disconnected"
                         onComplete(false, throwable.message)
                     }
                 },
@@ -77,13 +68,11 @@ class SignalAccountManager(
                     onComplete(true, null)
                 } catch (e: Exception) {
                     Log.e(TAG, "Provisioning failed", e)
-                    _signalState.value = "disconnected"
                     onComplete(false, e.message)
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start provisioning", e)
-            _signalState.value = "disconnected"
             onComplete(false, e.message)
         }
     }
@@ -184,12 +173,10 @@ class SignalAccountManager(
             // They'll be uploaded when the message receiver connects via KeysApi.
             generateAndStoreOneTimePreKeys()
 
-            _signalState.value = "connected"
             Log.i(TAG, "Device linked: $phoneNumber, device $deviceId")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to finish provisioning", e)
             credentials.clear() // Clear partial credentials so we don't appear "registered"
-            _signalState.value = "disconnected"
             throw e
         }
     }
@@ -315,11 +302,7 @@ class SignalAccountManager(
             val deviceId = credentials.deviceId
             if (credentials.isRegistered() && deviceId > 1) {
                 val pushSocket = PushServiceSocket(config, credentials, SignalConfig.USER_AGENT, false)
-                val method = pushSocket.javaClass.getDeclaredMethod(
-                    "makeServiceRequest", String::class.java, String::class.java, String::class.java,
-                )
-                method.isAccessible = true
-                method.invoke(pushSocket, "/v1/devices/$deviceId", "DELETE", "")
+                pushSocket.serviceRequest("/v1/devices/$deviceId", "DELETE", "")
                 Log.i(TAG, "Removed linked device $deviceId from Signal server")
             }
         } catch (e: Exception) {
@@ -329,6 +312,5 @@ class SignalAccountManager(
             Log.w(TAG, "Server-side device removal failed (continuing with local clear): ${e.message}")
         }
         credentials.clear()
-        _signalState.value = "logged_out"
     }
 }

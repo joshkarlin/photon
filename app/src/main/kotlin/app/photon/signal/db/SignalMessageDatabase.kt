@@ -2,9 +2,13 @@ package app.photon.signal.db
 
 import android.content.ContentValues
 import android.content.Context
-import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import app.photon.data.db.toConversation
+import app.photon.data.db.toConversations
+import app.photon.data.db.toMessage
+import app.photon.data.db.toMessages
+import app.photon.data.db.toReaction
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
 import app.photon.data.model.Reaction
@@ -298,20 +302,6 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         return out
     }
 
-    fun upsertContact(jid: String, name: String?) {
-        // Preserve existing profile_key / phone_number on re-upsert.
-        writableDatabase.execSQL(
-            """
-            INSERT INTO contacts (jid, name, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(jid) DO UPDATE SET
-                name = COALESCE(excluded.name, contacts.name),
-                updated_at = excluded.updated_at
-            """,
-            arrayOf<Any?>(jid, name, System.currentTimeMillis()),
-        )
-    }
-
     fun updateContactPhone(jid: String, phone: String) {
         writableDatabase.execSQL(
             """
@@ -371,11 +361,17 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    fun getContactName(jid: String): String? {
-        val contact = getContact(jid) ?: return null
-        return contact.profileName?.takeIf { it.isNotBlank() }
-            ?: contact.name?.takeIf { it.isNotBlank() }
-            ?: contact.phone
+    /**
+     * Display-name policy for a group member, shared by receiver and
+     * sender so the participants table stays consistent: Signal profile
+     * name → local contact (when the caller supplies a phone resolver)
+     * → bare phone → ACI prefix as last resort.
+     */
+    fun memberDisplayName(aci: String, contactResolver: ((String) -> String?)? = null): String {
+        val contact = getContact(aci)
+        return contact?.profileName?.takeIf { it.isNotBlank() }
+            ?: contact?.phone?.let { phone -> contactResolver?.invoke(phone) ?: phone }
+            ?: aci.take(8)
     }
 
     /**
@@ -410,12 +406,9 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
     // ── Read methods (same as PhotonDatabase) ──
 
     fun getConversations(): List<Conversation> {
-        return readableDatabase.rawQuery("""
-            SELECT c.*, m.text_body as last_preview, m.content_type as last_type
-            FROM conversations c
-            LEFT JOIN messages m ON c.last_message_id = m.id
-            ORDER BY c.last_timestamp DESC
-        """, null).use { it.toConversations() }
+        return readableDatabase.rawQuery(
+            "SELECT * FROM conversations ORDER BY last_timestamp DESC", null,
+        ).use { it.toConversations() }
     }
 
     fun getConversation(jid: String): Conversation? {
@@ -538,10 +531,27 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
      * original sent timestamp + author) can't look up by exact ID.
      */
     fun findMessageByPrefix(prefix: String): Message? {
+        // Range scan instead of LIKE — LIKE is case-insensitive in SQLite so
+        // it can't use the PK index. IDs are ASCII "{aci}_{tsMs}_{rand}", so
+        // ["prefix_", "prefix_\uFFFF") covers every suffix.
         return readableDatabase.rawQuery(
-            "SELECT * FROM messages WHERE id LIKE ? LIMIT 1",
-            arrayOf("${prefix}_%"),
+            "SELECT * FROM messages WHERE id >= ? AND id < ? LIMIT 1",
+            arrayOf("${prefix}_", "${prefix}_\uFFFF"),
         ).use { if (it.moveToFirst()) it.toMessage() else null }
+    }
+
+    /**
+     * Status update for our own messages matched by the stable
+     * "{aci}_{tsMs}" prefix — delivery/read receipts only carry the original
+     * sent timestamp, not the random suffix we add for PK uniqueness. Same
+     * index-friendly range form as findMessageByPrefix. Never regresses a
+     * 'read' back to 'delivered'.
+     */
+    fun updateStatusByIdPrefix(prefix: String, status: String) {
+        writableDatabase.execSQL(
+            "UPDATE messages SET status = ? WHERE id >= ? AND id < ? AND is_from_me = 1 AND status != 'read'",
+            arrayOf(status, "${prefix}_", "${prefix}_\uFFFF"),
+        )
     }
 
     fun getReactions(messageIds: List<String>): Map<String, List<Reaction>> {
@@ -558,73 +568,5 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             }
             result
         }
-    }
-
-    // ── Cursor mappers (identical to PhotonDatabase) ──
-
-    private fun Cursor.toConversations(): List<Conversation> {
-        val list = mutableListOf<Conversation>()
-        while (moveToNext()) list.add(toConversation())
-        return list
-    }
-
-    private fun Cursor.toConversation(): Conversation {
-        return Conversation(
-            jid = getString(getColumnIndexOrThrow("jid")),
-            name = getStringOrNull("name"),
-            isGroup = getInt(getColumnIndexOrThrow("is_group")) == 1,
-            lastMessageId = getStringOrNull("last_message_id"),
-            lastTimestamp = getLong(getColumnIndexOrThrow("last_timestamp")),
-            unreadCount = getInt(getColumnIndexOrThrow("unread_count")),
-            isMuted = getInt(getColumnIndexOrThrow("is_muted")) == 1,
-            avatarUrl = getStringOrNull("avatar_url"),
-            updatedAt = getLong(getColumnIndexOrThrow("updated_at")),
-            lastMessagePreview = getStringOrNull("last_preview"),
-        )
-    }
-
-    private fun Cursor.toMessages(): List<Message> {
-        val list = mutableListOf<Message>()
-        while (moveToNext()) list.add(toMessage())
-        return list
-    }
-
-    private fun Cursor.toMessage(): Message {
-        return Message(
-            id = getString(getColumnIndexOrThrow("id")),
-            conversationJid = getString(getColumnIndexOrThrow("conversation_jid")),
-            senderJid = getString(getColumnIndexOrThrow("sender_jid")),
-            timestamp = getLong(getColumnIndexOrThrow("timestamp")),
-            contentType = getString(getColumnIndexOrThrow("content_type")),
-            textBody = getStringOrNull("text_body"),
-            mediaUrl = getStringOrNull("media_url"),
-            mediaMime = getStringOrNull("media_mime"),
-            mediaSize = getLongOrNull("media_size"),
-            thumbnailPath = getStringOrNull("thumbnail_path"),
-            stickerPackId = getStringOrNull("sticker_pack_id"),
-            replyToId = getStringOrNull("reply_to_id"),
-            editVersion = getInt(getColumnIndexOrThrow("edit_version")),
-            isFromMe = getInt(getColumnIndexOrThrow("is_from_me")) == 1,
-            status = getString(getColumnIndexOrThrow("status")),
-        )
-    }
-
-    private fun Cursor.toReaction(): Reaction {
-        return Reaction(
-            messageId = getString(getColumnIndexOrThrow("message_id")),
-            senderJid = getString(getColumnIndexOrThrow("sender_jid")),
-            emoji = getString(getColumnIndexOrThrow("emoji")),
-            timestamp = getLong(getColumnIndexOrThrow("timestamp")),
-        )
-    }
-
-    private fun Cursor.getStringOrNull(column: String): String? {
-        val idx = getColumnIndex(column)
-        return if (idx >= 0 && !isNull(idx)) getString(idx) else null
-    }
-
-    private fun Cursor.getLongOrNull(column: String): Long? {
-        val idx = getColumnIndex(column)
-        return if (idx >= 0 && !isNull(idx)) getLong(idx) else null
     }
 }

@@ -23,13 +23,6 @@ enum class MessageLayout(val label: String) {
     fun next(): MessageLayout = entries[(ordinal + 1) % entries.size]
 }
 
-enum class VoiceInputMode(val label: String) {
-    SPLIT("SPLIT"),
-    COMBINED("COMBINED");
-
-    fun next(): VoiceInputMode = entries[(ordinal + 1) % entries.size]
-}
-
 enum class ScrollSpeed(val label: String, val dp: Int) {
     SLOW("SLOW", 12),
     MEDIUM("MEDIUM", 20),
@@ -53,7 +46,6 @@ class PhotonPreferences(private val context: Context) {
     private val showThumbnailsKey = booleanPreferencesKey("show_thumbnails")
     private val dmLayoutKey = stringPreferencesKey("dm_layout")
     private val groupLayoutKey = stringPreferencesKey("group_layout")
-    private val voiceInputModeKey = stringPreferencesKey("voice_input_mode")
     private val notificationsKey = booleanPreferencesKey("notifications_enabled")
     private val chatScrollSpeedKey = stringPreferencesKey("chat_scroll_speed")
     private val menuScrollSpeedKey = stringPreferencesKey("menu_scroll_speed")
@@ -66,9 +58,6 @@ class PhotonPreferences(private val context: Context) {
     }
     val groupLayout: Flow<MessageLayout> = context.dataStore.data.map {
         try { MessageLayout.valueOf(it[groupLayoutKey] ?: "TRANSCRIPT") } catch (_: Exception) { MessageLayout.TRANSCRIPT }
-    }
-    val voiceInputMode: Flow<VoiceInputMode> = context.dataStore.data.map {
-        try { VoiceInputMode.valueOf(it[voiceInputModeKey] ?: "SPLIT") } catch (_: Exception) { VoiceInputMode.SPLIT }
     }
     val notificationsEnabled: Flow<Boolean> = context.dataStore.data.map { it[notificationsKey] ?: true }
     val chatScrollSpeed: Flow<ScrollSpeed> = context.dataStore.data.map {
@@ -96,10 +85,6 @@ class PhotonPreferences(private val context: Context) {
 
     suspend fun setGroupLayout(value: MessageLayout) {
         context.dataStore.edit { it[groupLayoutKey] = value.name }
-    }
-
-    suspend fun setVoiceInputMode(value: VoiceInputMode) {
-        context.dataStore.edit { it[voiceInputModeKey] = value.name }
     }
 
     suspend fun setNotificationsEnabled(value: Boolean) {

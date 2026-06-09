@@ -57,8 +57,15 @@ func (b *Bridge) RegisterWSHandler(mux *http.ServeMux) {
 				continue
 			}
 
-			response := b.handleRequest(r.Context(), msg)
-			b.sendToConn(conn, response)
+			// Handle each request in its own goroutine so a slow one
+			// (send_media uploads) doesn't block subsequent requests on the
+			// socket. Responses carry the request's correlation ID, so
+			// out-of-order replies are fine, and nhooyr's Conn serializes
+			// concurrent writes internally (BroadcastEvent already relies
+			// on that).
+			go func(msg WsMessage) {
+				b.sendToConn(conn, b.handleRequest(r.Context(), msg))
+			}(msg)
 		}
 	})
 }
@@ -269,8 +276,4 @@ func (b *Bridge) handleSetRetention(ctx context.Context, raw json.RawMessage) (j
 func mustMarshal(v interface{}) json.RawMessage {
 	data, _ := json.Marshal(v)
 	return data
-}
-
-func parseJID(jid string) (types.JID, error) {
-	return types.ParseJID(jid)
 }
