@@ -458,6 +458,25 @@ class SignalMessageReceiver(
             val serverTimestamp = envelopeResponse.serverDeliveredTimestamp
 
             val result = cipher.decrypt(envelope, serverTimestamp)
+            if (result == null) {
+                // Contentless envelope — the server's own delivery receipt.
+                // There's nothing to decrypt; the envelope itself is the
+                // signal that our message (sent at clientTimestamp) reached
+                // the recipient's server queue. Without this branch, the
+                // unguarded result.content NPE'd and delivery ticks from the
+                // server were lost.
+                val myAci = credentials.aciString
+                val ts = envelope.clientTimestamp
+                if (envelope.type == org.whispersystems.signalservice.internal.push.Envelope.Type.SERVER_DELIVERY_RECEIPT &&
+                    myAci != null && ts != null
+                ) {
+                    messageDb.updateStatusByIdPrefix("${myAci}_$ts", "delivered")
+                } else {
+                    Log.d(TAG, "Contentless envelope (type=${envelope.type}); acking")
+                }
+                ws.sendAck(envelopeResponse)
+                return
+            }
             val content = result.content
             val metadata = result.metadata
 
