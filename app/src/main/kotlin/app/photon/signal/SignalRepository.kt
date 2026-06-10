@@ -64,8 +64,7 @@ class SignalRepository(
         }
     }
 
-    suspend fun downloadMedia(messageId: String): String? {
-        // TODO
-        return null
+    suspend fun downloadMedia(messageId: String): String? = withContext(Dispatchers.IO) {
+        app.photon.service.PhotonService._signalReceiver?.downloadAttachment(messageId)
     }
 }

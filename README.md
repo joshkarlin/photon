@@ -157,7 +157,9 @@ Per-platform status, refresh connection, and reset (clear data + re-pair).
 - **Signal pre-key upload**: Uses reflection fallback to upload via PushServiceSocket (KeysApi WebSocket path returns 422). Works but fragile.
 - **Signal history sync**: Not implemented — only new messages after pairing appear. Requires backup/restore mechanism.
 - **Signal device name**: Fix implemented, pending verification — the name is now encrypted with the identity key (`DeviceNameUtil.encryptDeviceName`) before registration. Devices paired before the fix still show garbled text until re-paired (Reset in settings).
-- **Signal media send**: Outgoing implemented, pending device testing — files upload to the CDN and send as attachments (DM + group, voice-note flag for audio, retry re-uploads). Incoming Signal media download is still not implemented.
+- **Signal media send**: Outgoing implemented, pending device testing — files upload to the CDN and send as attachments (DM + group, voice-note flag for audio, retry re-uploads).
+- **Signal media receive**: Fix implemented, pending verification — incoming attachments used to be dropped entirely (photos never appeared). They're now stored with their CDN pointer (caption as text body), voice notes auto-download, and photos/videos download on tap via the media viewer. Downloads are pruned on the same 5-minute ephemeral TTL as WhatsApp media (re-downloadable on tap while the CDN pointer is valid — Signal pointers expire after ~45 days).
+- **Signal sent messages missing on primary**: Fix implemented, pending verification — the message sender was constructed with `useBinaryId=false, useStringId=false`, so sent transcripts carried no `destinationServiceId` in any form and the primary device dropped them. Both flags are now enabled.
 - **Dictation**: LP3 has no built-in STT engine. Android 13's `RecognitionService` framework has a known bug where `PermissionChecker.checkCallingPermissionForDataDelivery()` rejects third-party callers with ERROR_INSUFFICIENT_PERMISSIONS (error 9), even with RECORD_AUDIO granted. No code-level workaround exists — requires a system-level STT service or alternative approach.
 - **Voice notes**: Recording implemented; sending is now wired for both WhatsApp and Signal but untested on device.
 - **Java Records on Android**: Turasa v143 uses Java Records which Android's desugaring can't serialize via Jackson. Fixed with `AndroidRecordFix.kt` (reflection patch on JsonUtil's ObjectMapper).
@@ -166,7 +168,6 @@ Per-platform status, refresh connection, and reset (clear data + re-pair).
 ## Planned features
 
 - [ ] Signal history sync (backup download + restore)
-- [ ] Signal media download (incoming attachments; outgoing send implemented)
 - [ ] Signal group admin: create, leave, add/remove members, edit title
 - [ ] MMS support (picture messages)
 - [ ] Dictation (requires system-level STT or alternative approach)

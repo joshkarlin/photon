@@ -94,6 +94,19 @@ class PhotonService : Service() {
                         updateNotification()
                     }
                 }
+                // Ephemeral media sweep (the Go bridge prunes its own dirs;
+                // this covers the Kotlin-owned ones).
+                launch {
+                    while (true) {
+                        delay(5 * 60_000)
+                        try {
+                            _signalReceiver?.pruneMedia()
+                            pruneStagedSendFiles()
+                        } catch (e: Exception) {
+                            Log.w("PhotonService", "Media prune failed: ${e.message}")
+                        }
+                    }
+                }
                 monitorProcess()
             } catch (e: Exception) {
                 Log.e("PhotonService", "Failed to start Go bridge", e)
@@ -182,6 +195,24 @@ class PhotonService : Service() {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * Outgoing media staged by MessageInput (voice notes, picked files) lands
+     * in filesDir as voice_*.ogg / send_media_* and was never cleaned up by
+     * either platform. A 24h TTL (vs the 5min viewed-media TTL) keeps
+     * retry-from-file working for recent failed sends.
+     */
+    private fun pruneStagedSendFiles() {
+        val cutoff = System.currentTimeMillis() - 24L * 60 * 60 * 1000
+        filesDir.listFiles()?.forEach { f ->
+            if (f.isFile &&
+                (f.name.startsWith("voice_") || f.name.startsWith("send_media_")) &&
+                f.lastModified() < cutoff
+            ) {
+                f.delete()
             }
         }
     }

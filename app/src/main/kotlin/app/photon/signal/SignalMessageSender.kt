@@ -73,11 +73,19 @@ class SignalMessageSender(
                 KeysApi(aws, uws),
                 Optional.empty(),
                 executor,
-                System.currentTimeMillis(),
-                0,
+                0L,    // maxEnvelopeSize (0 = unenforced)
+                0,     // maxIncrementalMacsPerEnvelope
                 { true },
-                false,
-                false,
+                // useBinaryId / useStringId: these gate whether destination
+                // ServiceIds are written into sync payloads AT ALL. With both
+                // false (the old values), sent transcripts carried no
+                // destinationServiceId in any form, so the primary device
+                // couldn't attribute them to a thread and silently dropped
+                // them — outgoing messages never appeared on the main device.
+                // Current clients read the binary field; the string field is
+                // included for older-client compatibility.
+                true,
+                true,
             )
             sender = s
             return s

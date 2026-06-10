@@ -45,6 +45,13 @@ class SignalMessageReceiver(
         // Generous cap on the contacts sync attachment (~10 MB is way more
         // than any plausible contact book).
         private const val MAX_CONTACTS_BLOB_BYTES: Long = 50L * 1024 * 1024
+        // Cap on incoming media downloads (Signal's own attachment limit is
+        // ~100 MB).
+        private const val MAX_ATTACHMENT_BYTES: Long = 100L * 1024 * 1024
+        // Downloaded media TTL — matches the WhatsApp bridge's ephemeral
+        // policy (viewed, then auto-deleted; re-downloadable on tap while
+        // the CDN pointer is still valid).
+        private const val MEDIA_TTL_MS: Long = 5L * 60 * 1000
         // Conversation name used until the GroupV2 state fetch resolves the
         // real title. Also doubles as the "needs fetch" sentinel.
         private const val PLACEHOLDER_GROUP_NAME = "Signal group"
@@ -566,12 +573,19 @@ class SignalMessageReceiver(
 
         // Regular message
         val body = data.body
-        if (body == null && data.sticker == null) {
+        val attachment = data.attachments.firstOrNull()
+        if (body == null && data.sticker == null && attachment == null) {
             // No displayable content (could be key update, profile key, etc.)
             return
         }
 
-        val contentType = if (body != null) "text" else "sticker"
+        // Media beats text: a photo with a caption is an "image" row whose
+        // text_body carries the caption, mirroring the WhatsApp model.
+        val contentType = when {
+            attachment != null -> contentTypeForMime(attachment.contentType)
+            body != null -> "text"
+            else -> "sticker"
+        }
 
         // Resolve a friendly name for the sender. Order: Android local
         // contacts (this device's address book) → Signal profile name (when
@@ -600,13 +614,24 @@ class SignalMessageReceiver(
             timestamp = timestamp / 1000,
             contentType = contentType,
             textBody = body,
+            mediaMime = attachment?.contentType,
+            mediaSize = attachment?.size?.toLong(),
             replyToId = replyPrefix(data.quote),
             isFromMe = false,
             status = "received",
+            // Serialized pointer so the blob can be fetched on demand later
+            // (tap-to-view); images/videos aren't auto-downloaded.
+            rawProto = attachment?.encode(),
         )
 
         messageDb.updateConversationLastMessage(conversationJid, messageId, timestamp / 1000)
         messageDb.incrementUnread(conversationJid)
+
+        // Voice notes auto-download (small, and the UI autoplays them on
+        // open) — mirrors the WhatsApp bridge's auto-download policy.
+        if (attachment != null && contentType == "audio") {
+            scope.launch { downloadAttachment(messageId) }
+        }
 
         // Show notification — for groups, title is the group name (with the
         // sender's name woven into the body); for DMs it's the sender.
@@ -615,9 +640,10 @@ class SignalMessageReceiver(
         } else {
             senderName ?: senderAci.take(8)
         }
-        val notifBody = if (isGroup && !senderName.isNullOrBlank() && body != null) {
-            "$senderName: $body"
-        } else body
+        val preview = body ?: "[$contentType]"
+        val notifBody = if (isGroup && !senderName.isNullOrBlank()) {
+            "$senderName: $preview"
+        } else preview
         app.photon.service.NotificationHelper.showMessageNotification(
             context, notifTitle, notifBody, "Signal", conversationJid,
         )
@@ -678,17 +704,21 @@ class SignalMessageReceiver(
                     seedGroupConversation(convJid, groupMasterKey, groupV2.revision ?: 0)
 
                     val body = data.body
-                    if (body != null) {
+                    val attachment = data.attachments.firstOrNull()
+                    if (body != null || attachment != null) {
                         messageDb.insertMessage(
                             id = messageId,
                             conversationJid = convJid,
                             senderJid = myAci,
                             timestamp = timestamp / 1000,
-                            contentType = "text",
+                            contentType = if (attachment != null) contentTypeForMime(attachment.contentType) else "text",
                             textBody = body,
+                            mediaMime = attachment?.contentType,
+                            mediaSize = attachment?.size?.toLong(),
                             replyToId = replyPrefix(data.quote),
                             isFromMe = true,
                             status = "sent",
+                            rawProto = attachment?.encode(),
                         )
                         messageDb.updateConversationLastMessage(convJid, messageId, timestamp / 1000)
                         Log.d(TAG, "Stored sync sent message into group ${convJid.take(12)}…")
@@ -711,7 +741,8 @@ class SignalMessageReceiver(
                 }
 
             val body = data.body
-            if (body != null) {
+            val attachment = data.attachments.firstOrNull()
+            if (body != null || attachment != null) {
                 // Capture destination phone and profile key so profile fetch can find names.
                 sent.destinationE164?.let { messageDb.updateContactPhone(destinationAci, it) }
                 val syncProfileKey = data.profileKey?.toByteArray()
@@ -743,11 +774,14 @@ class SignalMessageReceiver(
                     conversationJid = destinationAci,
                     senderJid = myAci,
                     timestamp = timestamp / 1000,
-                    contentType = "text",
+                    contentType = if (attachment != null) contentTypeForMime(attachment.contentType) else "text",
                     textBody = body,
+                    mediaMime = attachment?.contentType,
+                    mediaSize = attachment?.size?.toLong(),
                     replyToId = replyPrefix(data.quote),
                     isFromMe = true,
                     status = "sent",
+                    rawProto = attachment?.encode(),
                 )
                 messageDb.updateConversationLastMessage(destinationAci, messageId, timestamp / 1000)
             }
@@ -779,6 +813,100 @@ class SignalMessageReceiver(
                 Log.d(TAG, "Contacts sync had no blob")
             }
         }
+    }
+
+    /**
+     * Map an attachment mime type to our content_type column vocabulary.
+     */
+    private fun contentTypeForMime(mime: String?): String = when {
+        mime == null -> "document"
+        mime.startsWith("image/") -> "image"
+        mime.startsWith("video/") -> "video"
+        mime.startsWith("audio/") -> "audio"
+        else -> "document"
+    }
+
+    private fun extensionForMime(mime: String?): String = when {
+        mime == null -> ""
+        mime.startsWith("image/png") -> ".png"
+        mime.startsWith("image/webp") -> ".webp"
+        mime.startsWith("image/gif") -> ".gif"
+        mime.startsWith("image/") -> ".jpg"
+        mime.startsWith("video/") -> ".mp4"
+        mime.startsWith("audio/") -> ".ogg"
+        else -> ""
+    }
+
+    /**
+     * Download an incoming attachment by message id. The serialized
+     * AttachmentPointer was stored in raw_proto at receive time; this fetches
+     * and decrypts the blob from Signal's CDN, writes it under
+     * filesDir/signal_media, and records the path on the message row so the
+     * UI renders it directly next time. Returns the local path, or null when
+     * the pointer is missing/expired (Signal CDN attachments expire after
+     * ~45 days) or the download fails. Safe to call repeatedly — an existing
+     * downloaded file short-circuits.
+     */
+    fun downloadAttachment(messageId: String): String? {
+        val push = pushSocket ?: run {
+            Log.w(TAG, "downloadAttachment: pushSocket not initialised")
+            return null
+        }
+        val row = messageDb.getMessage(messageId) ?: return null
+        row.mediaUrl?.let { existing ->
+            if (File(existing).exists()) return existing
+        }
+        val pointerBytes = messageDb.getMessageRawProto(messageId) ?: run {
+            Log.w(TAG, "downloadAttachment: no stored pointer for $messageId")
+            return null
+        }
+        return try {
+            val proto = AttachmentPointer.ADAPTER.decode(pointerBytes)
+            val pointer = AttachmentPointerUtil.createSignalAttachmentPointer(proto)
+            val digest = pointer.digest.orElse(null) ?: run {
+                Log.w(TAG, "downloadAttachment: pointer has no digest for $messageId")
+                return null
+            }
+            val mediaDir = File(context.filesDir, "signal_media").apply { mkdirs() }
+            val cipherFile = File(context.cacheDir, "sig_att_$messageId.bin")
+            try {
+                val messageReceiver = SignalServiceMessageReceiver(push)
+                val plain = messageReceiver.retrieveAttachment(
+                    pointer,
+                    cipherFile,
+                    MAX_ATTACHMENT_BYTES,
+                    AttachmentCipherInputStream.IntegrityCheck.forEncryptedDigest(digest),
+                )
+                val outFile = File(mediaDir, messageId + extensionForMime(row.mediaMime))
+                plain.use { input -> outFile.outputStream().use { input.copyTo(it) } }
+                messageDb.updateMediaUrl(messageId, outFile.absolutePath)
+                Log.i(TAG, "Downloaded attachment for $messageId (${outFile.length()}B)")
+                outFile.absolutePath
+            } finally {
+                cipherFile.delete()
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Attachment download failed for $messageId: ${t.javaClass.simpleName}: ${t.message}")
+            null
+        }
+    }
+
+    /**
+     * Delete downloaded Signal media older than the TTL and clear the
+     * media_url on the affected rows (the stored AttachmentPointer keeps
+     * tap-to-redownload working). Called periodically by PhotonService.
+     */
+    fun pruneMedia() {
+        val mediaDir = File(context.filesDir, "signal_media")
+        val cutoff = System.currentTimeMillis() - MEDIA_TTL_MS
+        var pruned = 0
+        mediaDir.listFiles()?.forEach { f ->
+            if (f.isFile && f.lastModified() < cutoff && f.delete()) {
+                messageDb.clearMediaUrlByPath(f.absolutePath)
+                pruned++
+            }
+        }
+        if (pruned > 0) Log.i(TAG, "Pruned $pruned downloaded Signal media files")
     }
 
     /**

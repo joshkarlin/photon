@@ -239,6 +239,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         replyToId: String? = null,
         isFromMe: Boolean = false,
         status: String = "received",
+        rawProto: ByteArray? = null,
     ) {
         writableDatabase.insertWithOnConflict(
             "messages", null,
@@ -255,10 +256,22 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                 put("reply_to_id", replyToId)
                 put("is_from_me", if (isFromMe) 1 else 0)
                 put("status", status)
+                // For incoming media: the serialized AttachmentPointer proto,
+                // so the attachment can be downloaded on demand later.
+                if (rawProto != null) put("raw_proto", rawProto)
             },
             SQLiteDatabase.CONFLICT_IGNORE,
         )
         notifyChanged()
+    }
+
+    fun getMessageRawProto(id: String): ByteArray? {
+        readableDatabase.rawQuery(
+            "SELECT raw_proto FROM messages WHERE id = ?", arrayOf(id),
+        ).use { c ->
+            if (!c.moveToFirst() || c.isNull(0)) return null
+            return c.getBlob(0)
+        }
     }
 
     fun updateMessageStatus(id: String, status: String) {
@@ -273,6 +286,18 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         writableDatabase.execSQL(
             "UPDATE messages SET media_url = ? WHERE id = ?",
             arrayOf(url, id),
+        )
+        notifyChanged()
+    }
+
+    /**
+     * Clear media_url on whatever message references a pruned file, so the
+     * UI falls back to the download-on-tap path instead of a dead file.
+     */
+    fun clearMediaUrlByPath(path: String) {
+        writableDatabase.execSQL(
+            "UPDATE messages SET media_url = NULL WHERE media_url = ?",
+            arrayOf(path),
         )
         notifyChanged()
     }
