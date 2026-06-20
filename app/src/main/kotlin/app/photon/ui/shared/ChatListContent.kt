@@ -19,7 +19,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.platform.LocalContext
@@ -57,6 +60,32 @@ fun ChatListContent(
         val step = dir.toInt() * menuScrollSpeed.items
         val target = (listState.firstVisibleItemIndex + step).coerceAtLeast(0)
         listState.scrollToItem(target)
+    }
+
+    // When a new message promotes a different chat to the top of the list, keep
+    // the user pinned to the top *only* if they were already parked there — so
+    // the newly-promoted chat is visible rather than scrolled off above. If they
+    // had scrolled down, the keyed LazyColumn preserves their position instead.
+    // Processed in a single collector so the reorder frame (top changes and the
+    // at-top reading flips together) reads the pre-reorder at-top intent.
+    val convState = rememberUpdatedState(conversations)
+    LaunchedEffect(Unit) {
+        var wasAtTop = true
+        var prevTop = convState.value?.firstOrNull()?.jid
+        snapshotFlow {
+            (convState.value?.firstOrNull()?.jid) to
+                (listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0)
+        }.collect { (top, atTop) ->
+            if (top != prevTop) {
+                if (wasAtTop && convState.value?.isNotEmpty() == true) {
+                    listState.scrollToItem(0)
+                    wasAtTop = true
+                }
+                prevTop = top
+            } else {
+                wasAtTop = atTop
+            }
+        }
     }
 
     Column(
