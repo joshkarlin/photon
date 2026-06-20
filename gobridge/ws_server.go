@@ -88,6 +88,8 @@ func (b *Bridge) handleRequest(ctx context.Context, msg WsMessage) WsMessage {
 		payload, err = b.handleSendMessage(ctx, msg.Payload)
 	case "retry_message":
 		payload, err = b.handleRetryMessage(ctx, msg.Payload)
+	case "delete_message":
+		payload, err = b.handleDeleteMessage(ctx, msg.Payload)
 	case "send_media":
 		payload, err = b.handleSendMedia(ctx, msg.Payload)
 	case "send_reaction":
@@ -145,7 +147,18 @@ func (b *Bridge) handleRetryMessage(ctx context.Context, raw json.RawMessage) (j
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, err
 	}
-	if err := b.RetryTextMessage(ctx, p.MessageID); err != nil {
+	if err := b.RetryMessage(ctx, p.MessageID); err != nil {
+		return nil, err
+	}
+	return mustMarshal(struct{}{}), nil
+}
+
+func (b *Bridge) handleDeleteMessage(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var p DeleteMessagePayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	if err := b.DeleteMessage(ctx, p.JID, p.MessageID, p.ForEveryone); err != nil {
 		return nil, err
 	}
 	return mustMarshal(struct{}{}), nil
@@ -203,10 +216,13 @@ func (b *Bridge) handleMarkRead(ctx context.Context, raw json.RawMessage) (json.
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, err
 	}
+	// Clear the local unread badge unconditionally: the user has read these
+	// messages on-device, which is independent of whether the network
+	// read-receipt (blue ticks to the sender) goes through. Coupling the two
+	// meant any MarkRead failure (offline, LID-chat quirks) left the badge
+	// stuck. The receipt is still best-effort below.
+	b.ResetUnread(p.JID)
 	err := b.MarkRead(ctx, p.JID, p.MessageIDs)
-	if err == nil {
-		b.ResetUnread(p.JID)
-	}
 	return mustMarshal(struct{}{}), err
 }
 

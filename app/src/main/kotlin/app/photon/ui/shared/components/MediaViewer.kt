@@ -50,11 +50,16 @@ fun MediaViewer(
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    var localPath by remember { mutableStateOf(existingPath) }
-    var loading by remember { mutableStateOf(existingPath == null) }
+    // Only treat existingPath as usable if the file is actually still on disk.
+    // Media gets pruned on a TTL while media_url stays set on the row, so a
+    // stale path would otherwise skip the re-download and render a broken
+    // fallback instead of just fetching the file again.
+    val cachedPath = remember(existingPath) { existingPath?.takeIf { File(it).exists() } }
+    var localPath by remember { mutableStateOf(cachedPath) }
+    var loading by remember { mutableStateOf(cachedPath == null) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    // Download on open (skip if already have local path)
+    // Download on open (skip if already have a valid local file)
     LaunchedEffect(messageId) {
         if (localPath != null) return@LaunchedEffect
         try {

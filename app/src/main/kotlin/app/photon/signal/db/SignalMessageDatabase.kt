@@ -274,10 +274,50 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    /**
+     * Incoming messages whose read state hasn't been synced to our other
+     * devices yet. The status column doubles as the tracker: incoming rows
+     * insert as "received" and flip to "read" once a SyncMessage.read
+     * covering them has gone out, so each message is synced at most once.
+     */
+    fun getUnsyncedIncomingReads(jid: String): List<String> {
+        readableDatabase.rawQuery(
+            "SELECT id FROM messages WHERE conversation_jid = ? AND is_from_me = 0 AND status != 'read'",
+            arrayOf(jid),
+        ).use { c ->
+            val ids = mutableListOf<String>()
+            while (c.moveToNext()) ids.add(c.getString(0))
+            return ids
+        }
+    }
+
+    fun markMessagesRead(ids: List<String>) {
+        if (ids.isEmpty()) return
+        val placeholders = ids.joinToString(",") { "?" }
+        writableDatabase.execSQL(
+            "UPDATE messages SET status = 'read' WHERE id IN ($placeholders)",
+            ids.toTypedArray(),
+        )
+        // No notifyChanged(): incoming status isn't rendered anywhere, and
+        // this runs from the chat-open markRead path — a change emission
+        // here would just cause a redundant requery.
+    }
+
     fun updateMessageStatus(id: String, status: String) {
         writableDatabase.execSQL(
             "UPDATE messages SET status = ? WHERE id = ?",
             arrayOf(status, id),
+        )
+        notifyChanged()
+    }
+
+    /** Remove a message and its reactions from the local DB. */
+    fun deleteMessage(id: String) {
+        writableDatabase.execSQL("DELETE FROM messages WHERE id = ?", arrayOf(id))
+        // Reactions are keyed by the "{author}_{timestampMs}" prefix of the id.
+        writableDatabase.execSQL(
+            "DELETE FROM reactions WHERE message_id = ?",
+            arrayOf(id.substringBeforeLast("_")),
         )
         notifyChanged()
     }

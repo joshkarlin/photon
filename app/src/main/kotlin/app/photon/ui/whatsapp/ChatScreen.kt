@@ -8,6 +8,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import app.photon.data.model.Message
+import app.photon.data.model.string
 import app.photon.service.NotificationHelper
 import app.photon.service.PhotonService
 import app.photon.ui.shared.ChatScreenContent
@@ -73,6 +74,9 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
         onRetry = { messageId ->
             scope.launch { try { repo.retryMessage(messageId) } catch (_: Exception) {} }
         },
+        onDelete = { message, forEveryone ->
+            scope.launch { try { repo.deleteMessage(jid, message.id, forEveryone) } catch (_: Exception) {} }
+        },
         onTitleClick = if (!isGroup) {
             {
                 // For WhatsApp DMs the phone-shaped JIDs (`12345@s.whatsapp.net`)
@@ -94,8 +98,11 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
             existingPath = media.mediaUrl,
             onDownloadMedia = { id ->
                 val resp = PhotonService.wsClient.downloadMedia(id)
-                val parsed = kotlinx.serialization.json.Json.decodeFromJsonElement(app.photon.data.model.DownloadMediaResponse.serializer(), resp.payload)
-                parsed.localPath
+                // Surface the bridge's actual error (e.g. expired CDN media)
+                // instead of letting the strict success-deserializer throw an
+                // opaque JSON parse error that hides the real cause.
+                resp.string("error")?.let { throw RuntimeException(it) }
+                resp.string("local_path")
             },
             onDismiss = { viewingMedia = null },
         )

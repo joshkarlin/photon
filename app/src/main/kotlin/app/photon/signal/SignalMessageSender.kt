@@ -14,6 +14,7 @@ import org.whispersystems.signalservice.api.message.MessageApi
 import org.whispersystems.signalservice.api.messages.SignalServiceAttachment
 import org.whispersystems.signalservice.api.messages.SignalServiceAttachmentPointer
 import org.whispersystems.signalservice.api.messages.SignalServiceDataMessage
+import org.whispersystems.signalservice.api.messages.multidevice.ReadMessage
 import org.whispersystems.signalservice.api.messages.multidevice.RequestMessage
 import org.whispersystems.signalservice.api.messages.multidevice.SentTranscriptMessage
 import org.whispersystems.signalservice.api.messages.multidevice.SignalServiceSyncMessage
@@ -249,18 +250,23 @@ class SignalMessageSender(
         timestamp: Long,
         replyPrefix: String?,
         attachments: List<SignalServiceAttachment> = emptyList(),
+        remoteDeleteTarget: Long? = null,
     ) {
         val recipientPhone = messageDb.getContact(conversationJid)?.phone
         val recipientAddress = if (recipientPhone != null) {
             SignalServiceAddress(aci, recipientPhone)
         } else SignalServiceAddress(aci)
 
-        val quote = replyPrefix?.let { buildQuote(it) }
         val builder = SignalServiceDataMessage.newBuilder()
             .withTimestamp(timestamp)
-        if (!text.isNullOrBlank()) builder.withBody(text)
-        if (attachments.isNotEmpty()) builder.withAttachments(attachments)
-        if (quote != null) builder.withQuote(quote)
+        if (remoteDeleteTarget != null) {
+            builder.withRemoteDelete(SignalServiceDataMessage.RemoteDelete(remoteDeleteTarget))
+        } else {
+            val quote = replyPrefix?.let { buildQuote(it) }
+            if (!text.isNullOrBlank()) builder.withBody(text)
+            if (attachments.isNotEmpty()) builder.withAttachments(attachments)
+            if (quote != null) builder.withQuote(quote)
+        }
         val message = builder.build()
 
         val sender = getOrCreateSender()
@@ -312,6 +318,7 @@ class SignalMessageSender(
         timestamp: Long,
         replyPrefix: String?,
         attachments: List<SignalServiceAttachment> = emptyList(),
+        remoteDeleteTarget: Long? = null,
     ) {
         val myAci = credentials.aci
             ?: throw IllegalStateException("No local ACI available")
@@ -365,13 +372,17 @@ class SignalMessageSender(
             .withRevision(currentRevision)
             .build()
 
-        val quote = replyPrefix?.let { buildQuote(it) }
         val builder = SignalServiceDataMessage.newBuilder()
             .withTimestamp(timestamp)
             .asGroupMessage(groupContext)
-        if (!text.isNullOrBlank()) builder.withBody(text)
-        if (attachments.isNotEmpty()) builder.withAttachments(attachments)
-        if (quote != null) builder.withQuote(quote)
+        if (remoteDeleteTarget != null) {
+            builder.withRemoteDelete(SignalServiceDataMessage.RemoteDelete(remoteDeleteTarget))
+        } else {
+            val quote = replyPrefix?.let { buildQuote(it) }
+            if (!text.isNullOrBlank()) builder.withBody(text)
+            if (attachments.isNotEmpty()) builder.withAttachments(attachments)
+            if (quote != null) builder.withQuote(quote)
+        }
         val message = builder.build()
 
         val recipientAddresses = members.map { SignalServiceAddress(it) }
@@ -500,6 +511,45 @@ class SignalMessageSender(
     }
 
     /**
+     * Delete a message. Local-only (forEveryone=false) just drops the row.
+     * "Delete for everyone" sends a RemoteDelete targeting the original
+     * message's sent timestamp — parsed from the local id, which encodes
+     * "{authorAci}_{timestampMs}_{rand}" — on a fresh-timestamped DataMessage
+     * to the recipient/group, plus a sent transcript so our other linked
+     * devices remove it too. Returns false (leaving the local row intact) if
+     * the network delete couldn't be sent, so the user can retry.
+     */
+    fun deleteMessage(conversationJid: String, messageId: String, forEveryone: Boolean): Boolean {
+        if (forEveryone) {
+            val targetTs = messageId.split("_").getOrNull(1)?.toLongOrNull()
+                ?: messageDb.getMessage(messageId)?.let { it.timestamp * 1000 }
+                ?: run {
+                    Log.w(TAG, "deleteMessage: can't derive target timestamp for $messageId")
+                    return false
+                }
+            val now = System.currentTimeMillis()
+            val aci = ServiceId.ACI.parseOrNull(conversationJid)
+            val groupMeta = if (aci == null) messageDb.getGroupMeta(conversationJid) else null
+            try {
+                when {
+                    aci != null -> sendDmInternal(aci, conversationJid, null, now, null, remoteDeleteTarget = targetTs)
+                    groupMeta != null -> sendGroupInternal(conversationJid, groupMeta, null, now, null, remoteDeleteTarget = targetTs)
+                    else -> {
+                        Log.w(TAG, "deleteMessage: $conversationJid is neither ACI nor known group")
+                        return false
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Remote delete failed for $messageId: ${e.message}")
+                invalidate()
+                return false
+            }
+        }
+        messageDb.deleteMessage(messageId)
+        return true
+    }
+
+    /**
      * Send an empty NullMessage to a contact. NullMessage is a Signal protocol
      * primitive used purely for session housekeeping — it carries no body, no
      * attachment, no metadata, and the recipient's app processes it silently
@@ -521,6 +571,38 @@ class SignalMessageSender(
             true
         } catch (e: Exception) {
             Log.w(TAG, "sendSessionPing failed for $aci: ${e.javaClass.simpleName}: ${e.message}")
+            invalidate()
+            false
+        }
+    }
+
+    /**
+     * Tell our other devices (primary included) that we've read messages, so
+     * their unread badges clear. Android primaries clear a thread when they
+     * receive our sent transcript, but iOS primaries don't — and neither
+     * clears on a read-without-reply — so this sync is what keeps read state
+     * consistent across devices, mirroring what official clients send.
+     *
+     * Each entry is (authorAci, sentTimestampMs) of an incoming message —
+     * the pair other devices use to locate it. Returns false on failure so
+     * the caller can leave the messages marked unsynced and retry later.
+     *
+     * Note: this is the self-sync only. Official clients also send a READ
+     * receipt to the message author, but that's gated on the user's
+     * read-receipts privacy setting, which Photon doesn't know — so we
+     * deliberately don't.
+     */
+    fun sendReadSync(reads: List<Pair<String, Long>>): Boolean {
+        val readMessages = reads.mapNotNull { (aci, timestampMs) ->
+            ServiceId.ACI.parseOrNull(aci)?.let { ReadMessage(it, timestampMs) }
+        }
+        if (readMessages.isEmpty()) return true
+        return try {
+            getOrCreateSender().sendSyncMessage(SignalServiceSyncMessage.forRead(readMessages))
+            Log.i(TAG, "Sent read sync for ${readMessages.size} message(s)")
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Read sync failed (${readMessages.size} message(s)): ${e.message}")
             invalidate()
             false
         }

@@ -120,6 +120,14 @@ class WsClient(private val port: Int = 8765) {
         })
     }
 
+    suspend fun deleteMessage(jid: String, messageId: String, forEveryone: Boolean): WsEvent {
+        return request("delete_message", buildJsonObject {
+            put("jid", jid)
+            put("message_id", messageId)
+            put("for_everyone", forEveryone)
+        })
+    }
+
     suspend fun sendReaction(jid: String, messageId: String, senderJid: String, emoji: String): WsEvent {
         return request("send_reaction", buildJsonObject {
             put("jid", jid)

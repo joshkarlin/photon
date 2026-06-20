@@ -55,6 +55,12 @@ type RetryMessagePayload struct {
 	MessageID string `json:"message_id"`
 }
 
+type DeleteMessagePayload struct {
+	JID          string `json:"jid"`
+	MessageID    string `json:"message_id"`
+	ForEveryone  bool   `json:"for_everyone"`
+}
+
 type SendTypingPayload struct {
 	JID       string `json:"jid"`
 	Composing bool   `json:"composing"`

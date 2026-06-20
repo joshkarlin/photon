@@ -118,6 +118,38 @@ func (b *Bridge) IncrementUnread(jid string) {
 	}
 }
 
+// SendersForMessages returns the sender_jid for each of the given message IDs,
+// keyed by message ID. Used by MarkRead to attribute group read receipts to the
+// participant who actually sent each message (whatsmeow requires the correct
+// participant, and one MarkRead call per distinct sender).
+func (b *Bridge) SendersForMessages(ids []string) map[string]string {
+	out := make(map[string]string, len(ids))
+	if len(ids) == 0 {
+		return out
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := `SELECT id, sender_jid FROM messages WHERE id IN (` + strings.Join(placeholders, ",") + `)`
+	rows, err := b.msgDB.Query(query, args...)
+	if err != nil {
+		b.log.Errorf("SendersForMessages query failed: %v", err)
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, sender string
+		if err := rows.Scan(&id, &sender); err != nil {
+			continue
+		}
+		out[id] = sender
+	}
+	return out
+}
+
 // ResetUnread sets unread count to 0 for a conversation.
 func (b *Bridge) ResetUnread(jid string) {
 	_, err := b.msgDB.Exec(`UPDATE conversations SET unread_count = 0 WHERE jid = ?`, jid)
@@ -282,6 +314,14 @@ func (b *Bridge) GetMessageRawProto(msgID string) ([]byte, error) {
 		return nil, fmt.Errorf("message %s not found: %w", msgID, err)
 	}
 	return raw, nil
+}
+
+// DeleteMessageRow removes a message and its reactions from the local DB.
+func (b *Bridge) DeleteMessageRow(msgID string) {
+	if _, err := b.msgDB.Exec(`DELETE FROM messages WHERE id = ?`, msgID); err != nil {
+		b.log.Warnf("Failed to delete message %s: %v", msgID, err)
+	}
+	b.msgDB.Exec(`DELETE FROM reactions WHERE message_id = ?`, msgID)
 }
 
 // UpdateMediaURL sets the local media path for a downloaded message.

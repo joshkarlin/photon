@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.MediaRecorder
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -27,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,6 +45,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.painterResource
 import androidx.core.content.ContextCompat
 import app.photon.R
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 private sealed class InputState {
@@ -58,6 +63,7 @@ fun MessageInputBar(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusRequester = remember { FocusRequester() }
 
@@ -92,7 +98,8 @@ fun MessageInputBar(
     val mediaPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
-        if (uri == null || onSendMedia == null) return@rememberLauncherForActivityResult
+        val sendMedia = onSendMedia
+        if (uri == null || sendMedia == null) return@rememberLauncherForActivityResult
         val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
         val ext = when {
             mime.startsWith("image/jpeg") -> ".jpg"
@@ -103,16 +110,30 @@ fun MessageInputBar(
             mime.startsWith("image/") -> ".jpg"
             else -> ".bin"
         }
-        val outFile = File(context.filesDir, "send_media_${System.currentTimeMillis()}$ext")
-        try {
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                outFile.outputStream().use { output -> input.copyTo(output) }
+        // Copy off the main thread (a multi-MB image would jank it) and never
+        // fail silently: the old version just logged and returned, so a null
+        // stream or empty copy looked to the user like the send vanished. On
+        // any failure we toast and drop the staged file; on success we hand
+        // the local path to the platform sender, which inserts the bubble.
+        scope.launch {
+            val outFile = File(context.filesDir, "send_media_${System.currentTimeMillis()}$ext")
+            val ok = withContext(Dispatchers.IO) {
+                try {
+                    val input = context.contentResolver.openInputStream(uri)
+                        ?: return@withContext false
+                    input.use { i -> outFile.outputStream().use { o -> i.copyTo(o) } }
+                    outFile.exists() && outFile.length() > 0
+                } catch (e: Exception) {
+                    android.util.Log.e("MessageInput", "Failed to copy media", e)
+                    false
+                }
             }
-            if (outFile.exists() && outFile.length() > 0) {
-                onSendMedia(outFile.absolutePath, mime)
+            if (ok) {
+                sendMedia(outFile.absolutePath, mime)
+            } else {
+                outFile.delete()
+                Toast.makeText(context, "Couldn't attach that file", Toast.LENGTH_SHORT).show()
             }
-        } catch (e: Exception) {
-            android.util.Log.e("MessageInput", "Failed to copy media", e)
         }
     }
 

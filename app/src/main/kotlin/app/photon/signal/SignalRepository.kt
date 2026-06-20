@@ -50,12 +50,37 @@ class SignalRepository(
         }
     }
 
+    suspend fun deleteMessage(jid: String, messageId: String, forEveryone: Boolean) {
+        withContext(Dispatchers.IO) {
+            sender?.deleteMessage(jid, messageId, forEveryone)
+        }
+    }
+
     suspend fun sendReaction(jid: String, messageId: String, senderJid: String, emoji: String) {
         // TODO
     }
 
     suspend fun markRead(jid: String, messageIds: List<String>) {
         db.resetUnread(jid)
+        val sender = sender ?: return
+        withContext(Dispatchers.IO) {
+            // Sync read state to our other devices so the primary's unread
+            // badge clears. Message ids encode "{authorAci}_{timestampMs}_…",
+            // which is exactly the (author, sent-timestamp) pair the sync
+            // carries. Rows only flip to status='read' after a successful
+            // send, so failures retry on the next chat open.
+            val pending = db.getUnsyncedIncomingReads(jid)
+            if (pending.isEmpty()) return@withContext
+            val reads = pending.mapNotNull { id ->
+                val prefix = id.substringBeforeLast("_")
+                val timestampMs = prefix.substringAfterLast("_").toLongOrNull()
+                val authorAci = prefix.substringBeforeLast("_")
+                if (timestampMs != null && authorAci.isNotEmpty()) authorAci to timestampMs else null
+            }
+            if (sender.sendReadSync(reads)) {
+                db.markMessagesRead(pending)
+            }
+        }
     }
 
     suspend fun sendMedia(jid: String, filePath: String, mimeType: String, caption: String?, replyToId: String?) {

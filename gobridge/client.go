@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"nhooyr.io/websocket"
@@ -331,24 +332,16 @@ func (b *Bridge) SendTextMessage(ctx context.Context, jid string, text string, r
 // RetryTextMessage re-attempts a previously failed outgoing text message,
 // reusing the original stanza ID and text. Returns an error if the row
 // can't be found, isn't from us, or isn't a text message.
-func (b *Bridge) RetryTextMessage(ctx context.Context, messageID string) error {
-	var jid, text, replyToID string
-	var status string
+func (b *Bridge) RetryMessage(ctx context.Context, messageID string) error {
+	var jid, text, replyToID, contentType, mediaMime, mediaURL string
 	err := b.msgDB.QueryRowContext(ctx, `
-		SELECT conversation_jid, COALESCE(text_body, ''), COALESCE(reply_to_id, ''), status
+		SELECT conversation_jid, COALESCE(text_body, ''), COALESCE(reply_to_id, ''),
+		       content_type, COALESCE(media_mime, ''), COALESCE(media_url, '')
 		  FROM messages WHERE id = ? AND is_from_me = 1
-	`, messageID).Scan(&jid, &text, &replyToID, &status)
+	`, messageID).Scan(&jid, &text, &replyToID, &contentType, &mediaMime, &mediaURL)
 	if err != nil {
 		return fmt.Errorf("retry: row not found: %w", err)
 	}
-	if text == "" {
-		return fmt.Errorf("retry: only text messages supported")
-	}
-
-	b.UpdateMessageStatus(messageID, "sending")
-	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
-		ConversationJID: jid, MessageID: messageID,
-	})
 
 	targetJID, err := types.ParseJID(jid)
 	if err != nil {
@@ -356,13 +349,74 @@ func (b *Bridge) RetryTextMessage(ctx context.Context, messageID string) error {
 		return err
 	}
 
-	msg := b.buildTextMessage(text, replyToID)
+	b.UpdateMessageStatus(messageID, "sending")
+	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
+		ConversationJID: jid, MessageID: messageID,
+	})
+
+	// Text and media diverge only in how the *.Message is built. Media must
+	// re-read the original local source file (media_url for outgoing rows is
+	// the file the user picked, not a downloaded copy) and re-upload to the
+	// CDN before sending — the original upload's URL/keys aren't persisted.
+	// Both reuse the original stanza ID so recipients dedupe a retry that
+	// actually went through the first time.
+	var msg *waE2E.Message
+	if contentType == "text" || contentType == "" {
+		if text == "" {
+			b.markMessageFailed(jid, messageID)
+			return fmt.Errorf("retry: text row has empty body")
+		}
+		msg = b.buildTextMessage(text, replyToID)
+	} else {
+		if mediaURL == "" {
+			b.markMessageFailed(jid, messageID)
+			return fmt.Errorf("retry: media row has no source file path")
+		}
+		data, err := os.ReadFile(mediaURL)
+		if err != nil {
+			b.markMessageFailed(jid, messageID)
+			return fmt.Errorf("retry: source file gone (%s): %w", mediaURL, err)
+		}
+		_, mediaType := mediaKind(mediaMime)
+		resp, err := b.client.Upload(ctx, data, mediaType)
+		if err != nil {
+			b.markMessageFailed(jid, messageID)
+			return fmt.Errorf("retry: upload failed: %w", err)
+		}
+		// text_body carries the caption for media rows.
+		msg = buildMediaMessage(resp, mediaMime, text, replyToID, data)
+	}
+
 	resp, err := b.client.SendMessage(ctx, targetJID, msg, whatsmeow.SendRequestExtra{ID: messageID})
 	if err != nil {
 		b.markMessageFailed(jid, messageID)
 		return err
 	}
 	b.markMessageSent(jid, messageID, resp.Timestamp.Unix())
+	return nil
+}
+
+// DeleteMessage removes a message locally and, when forEveryone is set,
+// revokes it on the network first (WhatsApp's "delete for everyone"). The
+// revoke reuses the original stanza ID via BuildRevoke. If the revoke send
+// fails we leave the local row intact so the user can retry rather than
+// being left thinking it was deleted everywhere when it wasn't.
+func (b *Bridge) DeleteMessage(ctx context.Context, jid, messageID string, forEveryone bool) error {
+	if forEveryone {
+		targetJID, err := types.ParseJID(jid)
+		if err != nil {
+			return err
+		}
+		targetJID = b.resolveLIDJID(targetJID)
+		revoke := b.client.BuildRevoke(targetJID, types.EmptyJID, messageID)
+		if _, err := b.client.SendMessage(ctx, targetJID, revoke); err != nil {
+			return fmt.Errorf("revoke failed: %w", err)
+		}
+	}
+	b.DeleteMessageRow(messageID)
+	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
+		ConversationJID: jid, MessageID: messageID,
+	})
 	return nil
 }
 
@@ -381,18 +435,52 @@ func (b *Bridge) SendTyping(ctx context.Context, jid string, composing bool) err
 }
 
 // MarkRead marks messages as read.
+//
+// For DMs, the sender (participant) is ignored by whatsmeow, so a single call
+// covers all message IDs. For group chats the participant MUST be the actual
+// user who sent each message, and whatsmeow requires one MarkRead call per
+// distinct sender — passing our own JID produced malformed receipts that never
+// cleared the unread badge on the primary device. So for groups we look up each
+// message's sender and batch the read receipts per sender.
 func (b *Bridge) MarkRead(ctx context.Context, jid string, messageIDs []string) error {
 	targetJID, err := types.ParseJID(jid)
 	if err != nil {
 		return err
 	}
 
-	ids := make([]types.MessageID, len(messageIDs))
-	for i, id := range messageIDs {
-		ids[i] = types.MessageID(id)
+	isGroup := targetJID.Server == types.GroupServer
+	if !isGroup {
+		ids := make([]types.MessageID, len(messageIDs))
+		for i, id := range messageIDs {
+			ids[i] = types.MessageID(id)
+		}
+		return b.client.MarkRead(ctx, ids, time.Now(), targetJID, types.EmptyJID)
 	}
 
-	return b.client.MarkRead(ctx, ids, time.Now(), targetJID, b.client.Store.ID.ToNonAD())
+	// Group: bucket message IDs by their sender, then one receipt per sender.
+	senders := b.SendersForMessages(messageIDs)
+	bySender := make(map[string][]types.MessageID)
+	for _, id := range messageIDs {
+		sender := senders[id]
+		if sender == "" {
+			continue
+		}
+		bySender[sender] = append(bySender[sender], types.MessageID(id))
+	}
+	var firstErr error
+	for sender, ids := range bySender {
+		senderJID, perr := types.ParseJID(sender)
+		if perr != nil {
+			if firstErr == nil {
+				firstErr = perr
+			}
+			continue
+		}
+		if err := b.client.MarkRead(ctx, ids, time.Now(), targetJID, senderJID); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // Logout disconnects and removes the device from WhatsApp.

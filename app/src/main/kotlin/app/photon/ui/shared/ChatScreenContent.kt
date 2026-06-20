@@ -63,6 +63,7 @@ fun ChatScreenContent(
     onMessagesLoaded: ((List<Message>) -> Unit)? = null,
     onReact: ((messageId: String, senderJid: String, emoji: String) -> Unit)? = null,
     onRetry: ((messageId: String) -> Unit)? = null,
+    onDelete: ((message: Message, forEveryone: Boolean) -> Unit)? = null,
     onTitleClick: (() -> Unit)? = null,
     supportsReply: Boolean = true,
 ) {
@@ -230,11 +231,18 @@ fun ChatScreenContent(
         )
     }
 
-    // Reaction picker overlay
+    // Message actions overlay (react + delete), shown on long-press.
     reactingTo?.let { msg ->
-        ReactionPicker(
+        MessageActions(
+            message = msg,
+            canReact = onReact != null && msg.status != "failed" && msg.status != "sending",
+            canDelete = onDelete != null,
             onPick = { emoji ->
                 onReact?.invoke(msg.id, msg.senderJid, emoji)
+                reactingTo = null
+            },
+            onDelete = { forEveryone ->
+                onDelete?.invoke(msg, forEveryone)
                 reactingTo = null
             },
             onDismiss = { reactingTo = null },
@@ -243,11 +251,21 @@ fun ChatScreenContent(
 }
 
 @Composable
-private fun ReactionPicker(
+private fun MessageActions(
+    message: Message,
+    canReact: Boolean,
+    canDelete: Boolean,
     onPick: (String) -> Unit,
+    onDelete: (forEveryone: Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val emojis = listOf("❤️", "👍", "😂", "😮", "😢", "🙏")
+    // "Delete for everyone" only makes sense for our own messages the server
+    // has acknowledged — there's a sent message out there to revoke. Anything
+    // else (incoming, or our own failed/sending rows) is a local-only removal.
+    val forEveryone = message.isFromMe && message.status in setOf("sent", "delivered", "read")
+    var confirming by remember { mutableStateOf(false) }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -255,19 +273,56 @@ private fun ReactionPicker(
             .clickable(onClick = onDismiss),
         contentAlignment = Alignment.Center,
     ) {
-        androidx.compose.foundation.layout.Row(
-            horizontalArrangement = Arrangement.spacedBy(20.dp),
+        // Inner column; the clickable scrim above dismisses, so stop taps on
+        // the card from bubbling up by giving it its own (no-op) clickable.
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier
                 .background(Color(0xFF0D0D0D))
+                .clickable(enabled = false) {}
                 .padding(horizontal = 20.dp, vertical = 16.dp),
         ) {
-            emojis.forEach { emoji ->
+            if (canReact) {
+                Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                    emojis.forEach { emoji ->
+                        Text(
+                            text = emoji,
+                            fontSize = 28.sp,
+                            modifier = Modifier
+                                .clickable { onPick(emoji) }
+                                .padding(8.dp),
+                        )
+                    }
+                }
+            }
+
+            if (canReact && canDelete) {
+                HorizontalDivider(
+                    color = Color(0xFF1A1A1A),
+                    modifier = Modifier.padding(vertical = 12.dp),
+                )
+            }
+
+            if (canDelete) {
+                val label = when {
+                    confirming -> "TAP AGAIN TO CONFIRM"
+                    forEveryone -> "DELETE FOR EVERYONE"
+                    else -> "DELETE"
+                }
                 Text(
-                    text = emoji,
-                    fontSize = 28.sp,
+                    text = label,
+                    fontSize = 14.sp,
+                    letterSpacing = 2.sp,
+                    color = Color(0xFFCC4444),
                     modifier = Modifier
-                        .clickable { onPick(emoji) }
-                        .padding(8.dp),
+                        .clickable {
+                            // For-everyone is irreversible and visible to the
+                            // recipient, so require a second tap. Local-only
+                            // deletes are harmless — delete immediately.
+                            if (forEveryone && !confirming) confirming = true
+                            else onDelete(forEveryone)
+                        }
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
                 )
             }
         }

@@ -43,6 +43,7 @@ fun SignalChatScreen(jid: String, onContact: (phone: String, name: String) -> Un
         participantNames = participantNames,
         onSendText = { msg, replyToId -> scope.launch { repo.sendMessage(jid, msg, replyToId) } },
         onSendAudio = { path, replyToId -> scope.launch { repo.sendMedia(jid, path, "audio/ogg", null, replyToId) } },
+        onSendMedia = { path, mime, replyToId -> scope.launch { repo.sendMedia(jid, path, mime, null, replyToId) } },
         onBack = onBack,
         onMediaTap = { msg -> viewingMedia = msg },
         onMessagesLoaded = { messages ->
@@ -54,6 +55,9 @@ fun SignalChatScreen(jid: String, onContact: (phone: String, name: String) -> Un
         },
         onRetry = { messageId ->
             scope.launch { try { repo.retryMessage(messageId) } catch (_: Exception) {} }
+        },
+        onDelete = { message, forEveryone ->
+            scope.launch { try { repo.deleteMessage(jid, message.id, forEveryone) } catch (_: Exception) {} }
         },
         onTitleClick = if (!isGroup) {
             { val phone = repo.getContactPhone(jid); if (phone != null) onContact(phone, title) }

@@ -64,6 +64,10 @@ class ChatRepository(
         return ws.retryMessage(messageId).also { nudge() }
     }
 
+    suspend fun deleteMessage(jid: String, messageId: String, forEveryone: Boolean): WsEvent {
+        return ws.deleteMessage(jid, messageId, forEveryone).also { nudge() }
+    }
+
     suspend fun sendMedia(jid: String, filePath: String, mimeType: String, caption: String?, replyToId: String?): WsEvent {
         return ws.sendMedia(jid, filePath, mimeType, caption, replyToId).also { nudge() }
     }
