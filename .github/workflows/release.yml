@@ -1,0 +1,77 @@
+name: Release
+
+# Push a tag like v0.3.0 to build a signed APK and publish a GitHub Release.
+# Obtainium watches this repo's releases and picks up the attached APK.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"          # e.g. 0.3.0
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$TAG"
+          # Monotonic versionCode from semver: major*10000 + minor*100 + patch.
+          CODE=$(( ${MAJOR:-0} * 10000 + ${MINOR:-0} * 100 + ${PATCH:-0} ))
+          echo "name=$TAG" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "Version $TAG -> versionCode $CODE"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Build Go bridge (arm64)
+        working-directory: gobridge
+        run: |
+          GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build \
+            -buildvcs=false -trimpath -ldflags="-s -w" \
+            -o ../app/src/main/jniLibs/arm64-v8a/libgobridge.so .
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Decode keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+
+      - name: Build signed APK
+        env:
+          KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          ./gradlew assembleRelease \
+            -PversionNameOverride=${{ steps.ver.outputs.name }} \
+            -PversionCodeOverride=${{ steps.ver.outputs.code }}
+
+      - name: Rename APK
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/release/app-release.apk \
+             "out/photon-${{ steps.ver.outputs.name }}.apk"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/photon-${{ steps.ver.outputs.name }}.apk
+          generate_release_notes: true

@@ -20,8 +20,11 @@ android {
         applicationId = "app.photon"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.2.0"
+        // Overridable from CI: the release workflow passes -PversionCodeOverride
+        // and -PversionNameOverride derived from the git tag. Falls back to the
+        // baked-in values for local debug builds.
+        versionCode = (project.findProperty("versionCodeOverride") as String?)?.toInt() ?: 1
+        versionName = (project.findProperty("versionNameOverride") as String?) ?: "0.2.0"
         ndk {
             abiFilters += "arm64-v8a"
         }
@@ -40,12 +43,13 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("release")
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
+            // Minify disabled: Signal's libsignal/Jackson code relies on
+            // reflection and field-name serialization that R8 would strip or
+            // rename, breaking the protocol at runtime (see AndroidRecordFix and
+            // the PushServiceSocket reflection workaround). APK size is dominated
+            // by native libs anyway.
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 
