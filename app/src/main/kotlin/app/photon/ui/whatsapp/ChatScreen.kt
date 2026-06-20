@@ -1,6 +1,7 @@
 package app.photon.ui.whatsapp
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -30,16 +31,22 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
     val repo = PhotonService._chatRepository ?: return
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val conversation = remember(jid) { repo.getConversation(jid) }
+    // Observe conversations so the title and participant names refresh live as
+    // new messages arrive (e.g. a group member's name learned after open, or
+    // history-sync names landing). Falls back to a one-shot read before the hot
+    // flow emits.
+    val convs by repo.conversations.collectAsState()
+    val conversation = convs?.firstOrNull { it.jid == jid } ?: remember(jid) { repo.getConversation(jid) }
     val isGroup = conversation?.isGroup ?: jid.contains("@g.us")
     var viewingMedia by remember { mutableStateOf<Message?>(null) }
     // Newest incoming message id we've already marked read, so we don't
     // re-send markRead for the same messages on every list emission.
     var lastMarkedReadId by remember(jid) { mutableStateOf<String?>(null) }
 
-    // Load participant names for group chats
+    // Load participant names for group chats — re-read on every conversation
+    // update so a sender's name shows once it's known, without navigating away.
     val db = PhotonService._database
-    val participantNames = remember(jid) {
+    val participantNames = remember(jid, convs) {
         if (isGroup && db != null) {
             db.getParticipants(jid).associate { it.jid to (it.displayName ?: it.jid.substringBefore("@")) }
         } else emptyMap()

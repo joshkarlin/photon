@@ -115,10 +115,14 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 		return
 	}
 
-	// Resolve LID JIDs to phone-based JIDs for consistent conversation keys
+	// Resolve LID JIDs to phone-based JIDs for consistent conversation keys.
+	// The sender is resolved too so a group member has the same key in both
+	// live messages and history sync — otherwise the same person's older
+	// (history) and newer (live) messages key under different JIDs and the
+	// participant name only ever attaches to one of them.
 	resolvedChat := b.resolveLIDJID(evt.Info.Chat)
 	chatJID := resolvedChat.String()
-	senderJID := evt.Info.Sender.String()
+	senderJID := b.resolveLIDJID(evt.Info.Sender).String()
 	isFromMe := evt.Info.IsFromMe
 	msgID := evt.Info.ID
 	ts := evt.Info.Timestamp.Unix()
@@ -311,6 +315,10 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 		skippedNil := 0
 		skippedOld := 0
 		var pending []*MessageRow
+		// Collect each distinct group sender's best name from history push
+		// names so historical messages render the contact/profile name instead
+		// of a bare number. Upserted once per sender after the loop.
+		histParticipantNames := map[string]string{}
 		for _, histMsg := range msgs {
 			// Respect retention limits
 			if cfg.MaxMessages > 0 && convMsgCount >= cfg.MaxMessages {
@@ -346,7 +354,17 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 			// ts already declared above for cutoff check
 			senderJID := jid
 			if !isFromMe && info.GetParticipant() != "" {
-				senderJID = info.GetParticipant()
+				// Resolve LID → phone so the key matches live messages.
+				senderJID = b.resolveLIDString(info.GetParticipant())
+			}
+
+			// Remember the sender's push name for participant backfill.
+			if isGroup && !isFromMe {
+				if pn := wm.GetPushName(); pn != "" {
+					if _, seen := histParticipantNames[senderJID]; !seen {
+						histParticipantNames[senderJID] = pn
+					}
+				}
 			}
 
 			pending = append(pending, buildMessageRow(msg, msgID, jid, senderJID, ts, isFromMe, "read"))
@@ -356,6 +374,22 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 		// One transaction per conversation — per-row implicit transactions
 		// mean thousands of WAL commits during initial pairing.
 		b.InsertMessages(pending)
+
+		// Backfill group participant names: prefer the address-book contact
+		// name, fall back to the history push name. Done once per distinct
+		// sender so old messages render names like live ones do.
+		for sjid, pushName := range histParticipantNames {
+			name := pushName
+			if parsed, perr := types.ParseJID(sjid); perr == nil {
+				contact := b.lookupContact(parsed, parsed)
+				if cn, _ := bestContactName(contact, pushName); cn != "" {
+					name = cn
+				}
+			}
+			if name != "" {
+				b.UpsertParticipant(jid, sjid, name, "member")
+			}
+		}
 
 		if skippedNil > 0 || skippedOld > 0 {
 			b.log.Debugf("  Conv %s: inserted %d, skipped %d nil, %d old", jid, convMsgCount, skippedNil, skippedOld)
