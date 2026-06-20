@@ -127,7 +127,11 @@ private fun WhatsAppPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
         Spacer(Modifier.height(16.dp))
         HorizontalDivider(color = divColor)
 
-        if (waState == "connected" || waState == "disconnected") {
+        if (waState == "logged_out") {
+            // Not paired: the only useful action is to start the pairing flow.
+            SettingsRow("LINK DEVICE", onClick = onReset)
+            HorizontalDivider(color = divMinor)
+        } else {
             SettingsRow("REFRESH CONNECTION", onClick = {
                 scope.launch {
                     try {
@@ -144,8 +148,8 @@ private fun WhatsAppPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
                     onReset()
                 }
             })
+            HorizontalDivider(color = divMinor)
         }
-        HorizontalDivider(color = divMinor)
     }
 }
 
@@ -179,10 +183,10 @@ private fun SignalPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
             HorizontalDivider(color = divMinor)
         }
 
-        if (sigRegistered) {
-            Spacer(Modifier.height(16.dp))
-            HorizontalDivider(color = divColor)
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider(color = divColor)
 
+        if (sigRegistered) {
             SettingsRow("REFRESH CONNECTION") {
                 scope.launch {
                     PhotonService._signalReceiver?.stop()
@@ -197,6 +201,10 @@ private fun SignalPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
                     onReset()
                 }
             }
+            HorizontalDivider(color = divMinor)
+        } else {
+            // Not linked: offer the pairing flow directly from settings.
+            SettingsRow("LINK DEVICE", onClick = onReset)
             HorizontalDivider(color = divMinor)
         }
     }
@@ -320,7 +328,7 @@ private fun stateColor(state: String) = when (state) {
 private fun formatState(state: String) = when (state) {
     "connected" -> "CONNECTED"
     "connecting" -> "CONNECTING"
-    "logged_out" -> "NOT CONNECTED"
+    "logged_out" -> "NOT LINKED"
     "disconnected" -> "DISCONNECTED"
     else -> state.uppercase()
 }
