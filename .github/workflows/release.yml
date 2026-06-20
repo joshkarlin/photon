@@ -42,7 +42,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.23"
+          # Read the version from go.mod so it can't drift from what the module
+          # requires (setup-go v6 defaults to GOTOOLCHAIN=local, so a pinned
+          # older version won't auto-upgrade and the build fails).
+          go-version-file: gobridge/go.mod
           cache-dependency-path: gobridge/go.sum
 
       - name: Build Go bridge (arm64)
