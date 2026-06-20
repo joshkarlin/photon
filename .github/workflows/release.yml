@@ -19,13 +19,25 @@ jobs:
       - name: Derive version from tag
         id: ver
         run: |
-          TAG="${GITHUB_REF_NAME#v}"          # e.g. 0.3.0
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$TAG"
-          # Monotonic versionCode from semver: major*10000 + minor*100 + patch.
-          CODE=$(( ${MAJOR:-0} * 10000 + ${MINOR:-0} * 100 + ${PATCH:-0} ))
+          TAG="${GITHUB_REF_NAME#v}"          # 0.3.0  or  0.3.0-rc.1
+          BASE="${TAG%%-*}"                    # 0.3.0
+          PRE="${TAG#"$BASE"}"                 # ""  or  -rc.1
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
+          BASECODE=$(( ${MAJOR:-0} * 10000 + ${MINOR:-0} * 100 + ${PATCH:-0} ))
+          if [ -z "$PRE" ]; then
+            # Final release sorts above all prereleases of the same base.
+            CODE=$(( BASECODE * 1000 + 999 ))
+            PRERELEASE=false
+          else
+            NUM="${PRE##*.}"                   # rc.1 -> 1
+            case "$NUM" in ""|*[!0-9]*) NUM=1 ;; esac
+            CODE=$(( BASECODE * 1000 + NUM ))
+            PRERELEASE=true
+          fi
           echo "name=$TAG" >> "$GITHUB_OUTPUT"
           echo "code=$CODE" >> "$GITHUB_OUTPUT"
-          echo "Version $TAG -> versionCode $CODE"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Version $TAG -> versionCode $CODE (prerelease=$PRERELEASE)"
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -74,4 +86,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: out/photon-${{ steps.ver.outputs.name }}.apk
+          prerelease: ${{ steps.ver.outputs.prerelease }}
           generate_release_notes: true
