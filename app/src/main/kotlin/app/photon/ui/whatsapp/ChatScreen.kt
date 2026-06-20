@@ -3,6 +3,7 @@ package app.photon.ui.whatsapp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -50,6 +51,16 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
         if (isGroup && db != null) {
             db.getParticipants(jid).associate { it.jid to (it.displayName ?: it.jid.substringBefore("@")) }
         } else emptyMap()
+    }
+
+    // On opening a group, backfill any missing sender names from the contact
+    // store — covers historical senders that history sync couldn't name (and
+    // groups that were misclassified before a re-pair). The bridge broadcasts
+    // conversation_updated, which refreshes participantNames above.
+    LaunchedEffect(jid, isGroup) {
+        if (isGroup) {
+            try { repo.resolveParticipants(jid) } catch (_: Exception) {}
+        }
     }
 
     val title = conversation?.name?.takeIf { it.isNotBlank() } ?: formatJidAsPhone(jid)

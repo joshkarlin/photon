@@ -79,4 +79,11 @@ class ChatRepository(
     suspend fun markRead(jid: String, messageIds: List<String>): WsEvent {
         return ws.markRead(jid, messageIds).also { nudge() }
     }
+
+    // Backfill group participant display names from the contact store. The
+    // bridge broadcasts conversation_updated when anything changes, which
+    // refreshes the conversations flow (and thus participant names) on its own.
+    suspend fun resolveParticipants(jid: String): WsEvent {
+        return ws.resolveParticipants(jid)
+    }
 }

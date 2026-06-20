@@ -112,6 +112,8 @@ func (b *Bridge) handleRequest(ctx context.Context, msg WsMessage) WsMessage {
 		payload = mustMarshal(struct{}{})
 	case "set_retention":
 		payload, err = b.handleSetRetention(ctx, msg.Payload)
+	case "resolve_participants":
+		payload, err = b.handleResolveParticipants(msg.Payload)
 	default:
 		err = fmt.Errorf("unknown request type: %s", msg.Type)
 	}
@@ -161,6 +163,15 @@ func (b *Bridge) handleDeleteMessage(ctx context.Context, raw json.RawMessage) (
 	if err := b.DeleteMessage(ctx, p.JID, p.MessageID, p.ForEveryone); err != nil {
 		return nil, err
 	}
+	return mustMarshal(struct{}{}), nil
+}
+
+func (b *Bridge) handleResolveParticipants(raw json.RawMessage) (json.RawMessage, error) {
+	var p ResolveParticipantsPayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	b.ResolveGroupParticipants(p.JID)
 	return mustMarshal(struct{}{}), nil
 }
 

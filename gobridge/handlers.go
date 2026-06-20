@@ -307,7 +307,17 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 		jid := b.resolveLIDString(rawJID)
 
 		name := conv.GetName()
-		isGroup := conv.GetIsDefaultSubgroup() || (len(conv.GetParticipant()) > 0)
+		// Detect groups by the JID server (g.us). The history payload's
+		// participant list is frequently empty, which previously misclassified
+		// groups as individual chats — and that skipped the participant-name
+		// backfill below, so historical senders rendered as bare numbers.
+		isGroup := false
+		if parsedConvJID, perr := types.ParseJID(jid); perr == nil {
+			isGroup = parsedConvJID.Server == types.GroupServer
+		}
+		if !isGroup {
+			isGroup = conv.GetIsDefaultSubgroup() || (len(conv.GetParticipant()) > 0)
+		}
 
 		msgs := conv.GetMessages()
 		b.log.Debugf("  Conv %s: %d messages in history", jid, len(msgs))
@@ -661,6 +671,53 @@ func (b *Bridge) lookupContact(resolved, original types.JID) types.ContactInfo {
 		}
 	}
 	return types.ContactInfo{}
+}
+
+// ResolveGroupParticipants fills display names for every distinct sender in a
+// group's stored messages from whatsmeow's contact store (address-book name
+// preferred, observed push name as fallback). This lets historical senders —
+// stored before any live message taught us their name, or before the contact
+// store was populated — render names without re-pairing. Cheap and idempotent,
+// so it's safe to call on every group open.
+func (b *Bridge) ResolveGroupParticipants(groupJID string) {
+	rows, err := b.msgDB.Query(
+		`SELECT DISTINCT sender_jid FROM messages WHERE conversation_jid = ? AND is_from_me = 0`,
+		groupJID,
+	)
+	if err != nil {
+		b.log.Errorf("ResolveGroupParticipants query failed: %v", err)
+		return
+	}
+	var senders []string
+	for rows.Next() {
+		var sjid string
+		if scanErr := rows.Scan(&sjid); scanErr == nil && sjid != "" {
+			senders = append(senders, sjid)
+		}
+	}
+	rows.Close()
+
+	updated := false
+	for _, sjid := range senders {
+		parsed, perr := types.ParseJID(sjid)
+		if perr != nil {
+			continue
+		}
+		resolved := b.resolveLIDJID(parsed)
+		name, _ := bestContactName(b.lookupContact(resolved, parsed), "")
+		// LID that resolved to a phone but has no contact name → show the number.
+		if name == "" && resolved.Server == types.DefaultUserServer && resolved != parsed {
+			name = "+" + resolved.User
+		}
+		if name != "" {
+			if upErr := b.UpsertParticipant(groupJID, sjid, name, "member"); upErr == nil {
+				updated = true
+			}
+		}
+	}
+	if updated {
+		b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: groupJID})
+	}
 }
 
 // buildMessageRow assembles the MessageRow fields shared by the live message

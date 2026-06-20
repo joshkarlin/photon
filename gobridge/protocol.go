@@ -61,6 +61,10 @@ type DeleteMessagePayload struct {
 	ForEveryone  bool   `json:"for_everyone"`
 }
 
+type ResolveParticipantsPayload struct {
+	JID string `json:"jid"`
+}
+
 type SendTypingPayload struct {
 	JID       string `json:"jid"`
 	Composing bool   `json:"composing"`
