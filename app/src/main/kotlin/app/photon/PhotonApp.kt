@@ -28,10 +28,18 @@ class PhotonApp : Application() {
 
     private fun createNotificationChannels() {
         val manager = getSystemService(NotificationManager::class.java)
+        // IMPORTANCE_NONE suppresses the ongoing foreground-service notification
+        // from the shade by default, so launchers (e.g. inkOS) don't show an
+        // unread asterisk on the app icon. The service still runs; the
+        // notification is still built for startForeground but stays hidden. A
+        // user who wants the live WA/Signal status can re-enable this channel in
+        // Android settings. New channel id because importance is immutable once a
+        // channel exists — the old _v2 (MIN) is removed below.
+        manager.deleteNotificationChannel("photon_service_v2")
         val serviceChannel = NotificationChannel(
             CHANNEL_SERVICE,
             "Background Service",
-            NotificationManager.IMPORTANCE_MIN,
+            NotificationManager.IMPORTANCE_NONE,
         ).apply { setShowBadge(false) }
         manager.createNotificationChannel(serviceChannel)
 
@@ -47,7 +55,7 @@ class PhotonApp : Application() {
     }
 
     companion object {
-        const val CHANNEL_SERVICE = "photon_service_v2"
+        const val CHANNEL_SERVICE = "photon_service_v3"
         const val CHANNEL_MESSAGES = "photon_messages"
     }
 }
