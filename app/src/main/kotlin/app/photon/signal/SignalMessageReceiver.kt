@@ -17,6 +17,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import org.signal.core.models.ServiceId
 import org.signal.libsignal.metadata.certificate.CertificateValidator
 import org.signal.libsignal.protocol.ecc.ECPublicKey
 import org.whispersystems.signalservice.api.SignalServiceMessageReceiver
@@ -539,9 +540,69 @@ class SignalMessageReceiver(
         }
     }
 
+    /**
+     * Conversation rows must key Signal contacts by ACI. Some envelopes can
+     * identify the sender/destination by PNI; when that happens, use the E164
+     * carried with the envelope/sync transcript to find the contact-sync ACI.
+     * If the mapping is not available yet, keep the raw id so the message is
+     * not lost, and persist the phone mapping so a later contacts sync has
+     * enough information to converge.
+     */
+    private fun normalizeServiceIdForConversation(
+        serviceId: ServiceId,
+        e164: String?,
+        context: String,
+    ): String {
+        val raw = serviceId.toString()
+        if (serviceId is ServiceId.ACI || ServiceId.ACI.parseOrNull(raw) != null) {
+            return raw
+        }
+
+        val aci = e164?.let { messageDb.getAciForPhone(it) }
+        if (aci != null) {
+            Log.i(TAG, "$context: normalized non-ACI ${raw.take(8)}… to ACI ${aci.take(8)}… via $e164")
+            return aci
+        }
+
+        if (e164 != null) {
+            messageDb.updateContactPhone(raw, e164)
+        }
+        Log.w(
+            TAG,
+            "$context: non-ACI service id ${raw.take(8)}… has no ACI mapping " +
+                "(phone=${e164 ?: "none"}); using raw id until contacts sync resolves it",
+        )
+        return raw
+    }
+
+    private fun normalizeServiceIdStringForConversation(
+        serviceId: String?,
+        e164: String?,
+        context: String,
+    ): String? {
+        val parsed = serviceId?.let { ServiceId.parseOrNull(it) }
+        if (parsed != null) return normalizeServiceIdForConversation(parsed, e164, context)
+
+        val aci = e164?.let { messageDb.getAciForPhone(it) }
+        if (aci != null) {
+            Log.i(TAG, "$context: resolved missing/invalid service id to ACI ${aci.take(8)}… via $e164")
+            return aci
+        }
+
+        if (!serviceId.isNullOrBlank()) {
+            Log.w(TAG, "$context: unparseable service id ${serviceId.take(8)}…")
+            return serviceId
+        }
+        return null
+    }
+
     private fun processDataMessage(data: DataMessage, metadata: EnvelopeMetadata) {
-        val senderAci = metadata.sourceServiceId.toString()
         val senderE164 = metadata.sourceE164
+        val senderAci = normalizeServiceIdForConversation(
+            serviceId = metadata.sourceServiceId,
+            e164 = senderE164,
+            context = "Incoming data source",
+        )
         val timestamp = data.timestamp ?: System.currentTimeMillis()
 
         // Phone number is the cheapest fallback name; profile fetch (below) may upgrade it.
@@ -773,12 +834,23 @@ class SignalMessageReceiver(
                 Log.w(TAG, "Sync sent has groupV2 but groupManager unavailable; falling through")
             }
 
-            // DM case: needs a destination on the sync transcript.
-            val destinationAci = sent.destinationServiceId
+            // DM case: needs a destination on the sync transcript. Normalize
+            // PNI destinations to ACI so sent-primary transcripts land in the
+            // same replyable thread Photon uses for direct sends.
+            val destinationServiceIdRaw = sent.destinationServiceId
+            val destinationServiceId = destinationServiceIdRaw?.let { ServiceId.parseOrNull(it) }
                 ?: sent.destinationServiceIdBinary?.let {
-                    try { org.signal.core.models.ServiceId.parseOrNull(it.toByteArray())?.toString() }
+                    try { ServiceId.parseOrNull(it.toByteArray()) }
                     catch (_: Exception) { null }
                 }
+            val destinationAci = destinationServiceId?.let {
+                normalizeServiceIdForConversation(it, sent.destinationE164, "Sync sent destination")
+            }
+                ?: normalizeServiceIdStringForConversation(
+                    destinationServiceIdRaw,
+                    sent.destinationE164,
+                    "Sync sent destination",
+                )
                 ?: sent.destinationE164
                 ?: run {
                     Log.w(TAG, "Sync sent message has no destination, skipping")

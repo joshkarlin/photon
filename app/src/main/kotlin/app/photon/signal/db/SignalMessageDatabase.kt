@@ -17,6 +17,7 @@ import app.photon.data.model.Reaction
 import app.photon.data.model.Participant
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
+import org.signal.core.models.ServiceId
 
 class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
     context, "signal_messages.db", null, 3,
@@ -469,6 +470,25 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                     profileFetchedAt = c.getLong(5),
                 )
             } else null
+        }
+    }
+
+    /**
+     * Resolve a phone number to the canonical ACI row learned from contacts
+     * sync. PNI rows can also carry the same phone number after a PNI-sourced
+     * envelope, but conversations must key by ACI so replies route through the
+     * sender path.
+     */
+    fun getAciForPhone(phone: String): String? {
+        return readableDatabase.rawQuery(
+            "SELECT jid FROM contacts WHERE phone_number = ?",
+            arrayOf(phone),
+        ).use { c ->
+            while (c.moveToNext()) {
+                val jid = c.getString(0)
+                if (ServiceId.ACI.parseOrNull(jid) != null) return@use jid
+            }
+            null
         }
     }
 

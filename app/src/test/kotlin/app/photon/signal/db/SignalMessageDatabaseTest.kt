@@ -90,6 +90,24 @@ class SignalMessageDatabaseTest {
     }
 
     /**
+     * Phone lookup for PNI normalization must return the canonical ACI contact,
+     * not a PNI/raw-id alias that learned the same phone from an envelope.
+     */
+    @Test
+    fun getAciForPhone_ignoresPniAliasRows() {
+        val phone = "+15550002222"
+        val aci = "00000000-0000-4000-8000-000000000001"
+        val pniAlias = "PNI:00000000-0000-4000-8000-000000000002"
+
+        db.updateContactPhone(pniAlias, phone)
+        assertEquals(null, db.getAciForPhone(phone))
+
+        db.updateContactPhone(aci, phone)
+
+        assertEquals(aci, db.getAciForPhone(phone))
+    }
+
+    /**
      * An incoming reaction is stored under the suffix-less "{author}_{ts}"
      * prefix; it must attach to the full message id "{author}_{ts}_{rand}" so it
      * actually renders. (Previously joined on the full id and never matched.)
