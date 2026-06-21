@@ -71,12 +71,7 @@ class SignalRepository(
             // send, so failures retry on the next chat open.
             val pending = db.getUnsyncedIncomingReads(jid)
             if (pending.isEmpty()) return@withContext
-            val reads = pending.mapNotNull { id ->
-                val prefix = id.substringBeforeLast("_")
-                val timestampMs = prefix.substringAfterLast("_").toLongOrNull()
-                val authorAci = prefix.substringBeforeLast("_")
-                if (timestampMs != null && authorAci.isNotEmpty()) authorAci to timestampMs else null
-            }
+            val reads = pending.mapNotNull { MessageKeys.parse(it) }
             if (sender.sendReadSync(reads)) {
                 db.markMessagesRead(pending)
             }

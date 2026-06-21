@@ -754,13 +754,7 @@ func (b *Bridge) ResolveGroupParticipants(groupJID string) {
 	// is a bare "+<digits>"), which shadowed real push/contact names. Removing
 	// them lets the real name repopulate below or via a future live message; the
 	// UI falls back to the number on its own when a participant has no row.
-	purged := int64(0)
-	if res, delErr := b.msgDB.Exec(
-		`DELETE FROM participants WHERE conversation_jid = ? AND display_name GLOB '+[0-9]*' AND display_name NOT GLOB '*[A-Za-z]*'`,
-		groupJID,
-	); delErr == nil {
-		purged, _ = res.RowsAffected()
-	}
+	purged := b.purgeNumberPlaceholders(groupJID)
 
 	rows, err := b.msgDB.Query(
 		`SELECT DISTINCT sender_jid FROM messages WHERE conversation_jid = ? AND is_from_me = 0`,

@@ -9,6 +9,7 @@ import app.photon.data.db.toConversations
 import app.photon.data.db.toMessage
 import app.photon.data.db.toMessages
 import app.photon.data.db.toReaction
+import app.photon.signal.MessageKeys
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
 import app.photon.data.model.Reaction
@@ -672,9 +673,8 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         // Reactions are stored under the suffix-less "{author}_{timestampMs}"
         // prefix, while message ids carry an extra "_{rand}". Query by prefix and
         // map results back onto the full ids the caller indexes by, so incoming
-        // reactions actually attach to their message.
-        val prefixToIds = messageIds.groupBy { it.substringBeforeLast("_") }
-        val prefixes = prefixToIds.keys.toList()
+        // reactions actually attach to their message. (See MessageKeys.)
+        val prefixes = messageIds.map { MessageKeys.prefixOf(it) }.distinct()
         val placeholders = prefixes.joinToString(",") { "?" }
         return readableDatabase.rawQuery(
             "SELECT * FROM reactions WHERE message_id IN ($placeholders)",
@@ -685,12 +685,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                 val r = c.toReaction()
                 byPrefix.getOrPut(r.messageId) { mutableListOf() }.add(r)
             }
-            val result = mutableMapOf<String, List<Reaction>>()
-            for ((prefix, ids) in prefixToIds) {
-                val rs = byPrefix[prefix] ?: continue
-                for (id in ids) result[id] = rs
-            }
-            result
+            MessageKeys.remapByPrefix(messageIds, byPrefix)
         }
     }
 }

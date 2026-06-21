@@ -99,4 +99,7 @@ dependencies {
         exclude(group = "org.signal", module = "libsignal-client")
     }
     implementation("org.signal:libsignal-android:0.92.1")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlin:kotlin-test:2.1.0")
 }

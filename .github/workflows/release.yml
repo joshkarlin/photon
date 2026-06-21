@@ -48,6 +48,10 @@ jobs:
           go-version-file: gobridge/go.mod
           cache-dependency-path: gobridge/go.sum
 
+      - name: Go tests
+        working-directory: gobridge
+        run: go test ./...
+
       - name: Build Go bridge (arm64)
         working-directory: gobridge
         run: |
@@ -76,7 +80,7 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         run: |
-          ./gradlew assembleRelease \
+          ./gradlew testReleaseUnitTest assembleRelease \
             -PversionNameOverride=${{ steps.ver.outputs.name }} \
             -PversionCodeOverride=${{ steps.ver.outputs.code }}
 
