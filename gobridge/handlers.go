@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -191,7 +192,7 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 		return
 	}
 
-	row := buildMessageRow(msg, msgID, chatJID, senderJID, ts, isFromMe, "sent")
+	row := b.buildMessageRow(msg, msgID, chatJID, senderJID, ts, isFromMe, "sent")
 	b.InsertMessage(row)
 	contentType, textBody := row.ContentType, row.TextBody.String
 
@@ -410,7 +411,7 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 				}
 			}
 
-			pending = append(pending, buildMessageRow(msg, msgID, jid, senderJID, ts, isFromMe, "read"))
+			pending = append(pending, b.buildMessageRow(msg, msgID, jid, senderJID, ts, isFromMe, "read"))
 			totalMsgs++
 			convMsgCount++
 		}
@@ -824,11 +825,50 @@ func (b *Bridge) ResolveGroupParticipants(groupJID string) {
 	}
 }
 
+// resolveMentions replaces "@<number>" mention tokens in WhatsApp text with the
+// mentioned contact's display name. WhatsApp stores the bare number in the body
+// and ships the mentioned JIDs in contextInfo; official clients substitute the
+// name on display. Resolution uses the contact store (address-book name, then
+// observed push name); unresolvable mentions are left as the number.
+func (b *Bridge) resolveMentions(msg *waE2E.Message, text string) string {
+	ctx := getContextInfo(msg)
+	if ctx == nil {
+		return text
+	}
+	return applyMentions(text, ctx.GetMentionedJID(), func(jid types.JID) string {
+		resolved := b.resolveLIDJID(jid)
+		name, _ := bestContactName(b.lookupContact(resolved, jid), "")
+		return name
+	})
+}
+
+// applyMentions replaces each "@<user part>" token with "@<name>" using nameFor
+// to resolve each mentioned JID. Unresolvable mentions (nameFor returns "") are
+// left as the raw number. Pure, so it's unit-testable without a client.
+func applyMentions(text string, mentionedJIDs []string, nameFor func(types.JID) string) string {
+	if text == "" {
+		return text
+	}
+	for _, mj := range mentionedJIDs {
+		parsed, err := types.ParseJID(mj)
+		if err != nil {
+			continue
+		}
+		name := nameFor(parsed)
+		if name == "" {
+			continue
+		}
+		text = strings.ReplaceAll(text, "@"+parsed.User, "@"+name)
+	}
+	return text
+}
+
 // buildMessageRow assembles the MessageRow fields shared by the live message
 // handler and history sync: content classification, raw proto (kept for
 // later media download), reply context, and media mime type.
-func buildMessageRow(msg *waE2E.Message, id, convJID, senderJID string, ts int64, isFromMe bool, status string) *MessageRow {
+func (b *Bridge) buildMessageRow(msg *waE2E.Message, id, convJID, senderJID string, ts int64, isFromMe bool, status string) *MessageRow {
 	contentType, textBody := classifyMessage(msg)
+	textBody = b.resolveMentions(msg, textBody)
 	rawProto, _ := proto.Marshal(msg)
 
 	var replyToID sql.NullString

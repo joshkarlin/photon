@@ -259,6 +259,33 @@ func TestRepairConversationMetadata(t *testing.T) {
 	}
 }
 
+func TestApplyMentions(t *testing.T) {
+	names := map[string]string{
+		"447111@s.whatsapp.net": "Alice",
+		"447222@s.whatsapp.net": "Bob",
+	}
+	nameFor := func(jid types.JID) string { return names[jid.String()] }
+
+	got := applyMentions(
+		"hey @447111 and @447222, ping @447999",
+		[]string{"447111@s.whatsapp.net", "447222@s.whatsapp.net", "447999@s.whatsapp.net"},
+		nameFor,
+	)
+	// Known mentions become names; the unknown one stays a number.
+	want := "hey @Alice and @Bob, ping @447999"
+	if got != want {
+		t.Errorf("applyMentions = %q, want %q", got, want)
+	}
+
+	// No mentions / empty text are no-ops.
+	if applyMentions("", []string{"447111@s.whatsapp.net"}, nameFor) != "" {
+		t.Error("empty text should stay empty")
+	}
+	if applyMentions("plain text", nil, nameFor) != "plain text" {
+		t.Error("no mentions should be a no-op")
+	}
+}
+
 // participantNames reads the participants table into a jid→display_name map.
 func participantNames(t *testing.T, b *Bridge, groupJID string) map[string]string {
 	t.Helper()
