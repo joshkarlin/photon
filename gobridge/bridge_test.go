@@ -120,6 +120,29 @@ func TestUpsertParticipantCoalesce(t *testing.T) {
 	}
 }
 
+func TestCanonicalSenderJID(t *testing.T) {
+	// No whatsmeow client needed: resolveLIDJID short-circuits for non-LID
+	// (phone) servers, so only the device-suffix stripping runs.
+	b := &Bridge{log: waLog.Noop}
+	cases := []struct{ in, want string }{
+		{"447951542239:4@s.whatsapp.net", "447951542239@s.whatsapp.net"}, // strip device agent
+		{"447505629916@s.whatsapp.net", "447505629916@s.whatsapp.net"},   // already canonical
+		{"447505629916:12@s.whatsapp.net", "447505629916@s.whatsapp.net"},
+	}
+	for _, tc := range cases {
+		jid, err := types.ParseJID(tc.in)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tc.in, err)
+		}
+		if got := b.canonicalSenderJID(jid); got != tc.want {
+			t.Errorf("canonicalSenderJID(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if got := b.canonicalSenderString(tc.in); got != tc.want {
+			t.Errorf("canonicalSenderString(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestSendersForMessages(t *testing.T) {
 	b := newTestBridge(t)
 	const grp = "123@g.us"

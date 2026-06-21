@@ -35,6 +35,24 @@ func (b *Bridge) resolveLIDString(jidStr string) string {
 	return b.resolveLIDJID(parsed).String()
 }
 
+// canonicalSenderJID returns the stable key for a message sender: LID resolved
+// to the phone JID and the device/agent suffix (":N") stripped. The same person
+// must key identically across history sync and live messages, and the contact
+// store is keyed without the device suffix — without ToNonAD a live sender like
+// "447...:4@s.whatsapp.net" never matches its contact.
+func (b *Bridge) canonicalSenderJID(jid types.JID) string {
+	return b.resolveLIDJID(jid).ToNonAD().String()
+}
+
+// canonicalSenderString is canonicalSenderJID for a raw JID string.
+func (b *Bridge) canonicalSenderString(jidStr string) string {
+	parsed, err := types.ParseJID(jidStr)
+	if err != nil {
+		return jidStr
+	}
+	return b.canonicalSenderJID(parsed)
+}
+
 // HandleEvent is the master event handler for whatsmeow events.
 func (b *Bridge) HandleEvent(evt interface{}) {
 	switch v := evt.(type) {
@@ -126,7 +144,7 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 	// participant name only ever attaches to one of them.
 	resolvedChat := b.resolveLIDJID(evt.Info.Chat)
 	chatJID := resolvedChat.String()
-	senderJID := b.resolveLIDJID(evt.Info.Sender).String()
+	senderJID := b.canonicalSenderJID(evt.Info.Sender)
 	isFromMe := evt.Info.IsFromMe
 	msgID := evt.Info.ID
 	ts := evt.Info.Timestamp.Unix()
@@ -369,10 +387,18 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 			msgID := info.GetID()
 			isFromMe := info.GetFromMe()
 			// ts already declared above for cutoff check
+			// In history sync the group sender lives on WebMessageInfo.Participant,
+			// NOT on the message key — reading only the key left it empty, so
+			// senderJID fell back to the group JID and every historical group
+			// message rendered as the group's number. Prefer the WebMessageInfo
+			// participant, fall back to the key, and canonicalize like live.
+			participant := wm.GetParticipant()
+			if participant == "" {
+				participant = info.GetParticipant()
+			}
 			senderJID := jid
-			if !isFromMe && info.GetParticipant() != "" {
-				// Resolve LID → phone so the key matches live messages.
-				senderJID = b.resolveLIDString(info.GetParticipant())
+			if !isFromMe && participant != "" {
+				senderJID = b.canonicalSenderString(participant)
 			}
 
 			// Remember the sender's push name for participant backfill.
@@ -773,7 +799,9 @@ func (b *Bridge) ResolveGroupParticipants(groupJID string) {
 	}
 	rows.Close()
 
-	b.log.Infof("ResolveGroupParticipants %s: %d distinct senders, purged %d placeholders", groupJID, len(senders), purged)
+	if len(senders) > 0 || purged > 0 {
+		b.log.Infof("ResolveGroupParticipants %s: %d distinct senders, purged %d placeholders", groupJID, len(senders), purged)
+	}
 	updated := purged > 0
 	for _, sjid := range senders {
 		parsed, perr := types.ParseJID(sjid)
