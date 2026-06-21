@@ -79,8 +79,17 @@ class PhotonDatabase(context: Context) {
         "reply_to_id, edit_version, is_from_me, status"
 
     fun getConversations(): List<Conversation> = query { d ->
-        d.rawQuery("SELECT * FROM conversations ORDER BY last_timestamp DESC", null)
-            .use { it.toConversations() }
+        // Only surface conversations that actually have a message. History sync
+        // creates a row for every chat in WhatsApp's payload, but messages
+        // outside the retention window are never inserted — leaving empty rows
+        // with blank (raw-JID) names. Hiding zero-message conversations drops
+        // those ghosts (existing and future) without a migration.
+        d.rawQuery(
+            "SELECT c.* FROM conversations c " +
+                "WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_jid = c.jid) " +
+                "ORDER BY c.last_timestamp DESC",
+            null,
+        ).use { it.toConversations() }
     } ?: emptyList()
 
     fun getConversation(jid: String): Conversation? = query { d ->

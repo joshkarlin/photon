@@ -9,6 +9,7 @@ import app.photon.data.db.toConversations
 import app.photon.data.db.toMessage
 import app.photon.data.db.toMessages
 import app.photon.data.db.toReaction
+import app.photon.signal.ConversationNaming
 import app.photon.signal.MessageKeys
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
@@ -572,10 +573,12 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                 val profileName = if (cur.isNull(3)) null else cur.getString(3)
                 // Resolution priority: local LP3 contact → Signal profile
                 // name (when the fetcher could decrypt one) → phone number.
-                val resolved = phone?.let { resolveByPhone(it) }
-                    ?: profileName?.takeIf { it.isNotBlank() }
-                    ?: phone
-                if (resolved != currentName) {
+                val resolved = ConversationNaming.resolveFromContact(phone, profileName, resolveByPhone)
+                // Only overwrite when we actually resolved a name. A null result
+                // means "no phone/profile" (every group, plus DMs we can't name
+                // yet) — nulling those wiped group titles, which then showed as a
+                // base64 JID in the UI.
+                if (resolved != null && resolved != currentName) {
                     writableDatabase.execSQL(
                         "UPDATE conversations SET name = ? WHERE jid = ?",
                         arrayOf<Any?>(resolved, jid),

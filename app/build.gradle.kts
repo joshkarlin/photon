@@ -43,6 +43,9 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("release")
+            // Opt-in debuggable release (-PdebuggableRelease=true) for on-device
+            // DB inspection without a key change / relink. Off by default.
+            isDebuggable = (project.findProperty("debuggableRelease") as String?)?.toBoolean() ?: false
             // Minify disabled: Signal's libsignal/Jackson code relies on
             // reflection and field-name serialization that R8 would strip or
             // rename, breaking the protocol at runtime (see AndroidRecordFix and
@@ -65,6 +68,12 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
     }
 
     packaging {
@@ -102,4 +111,6 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlin:kotlin-test:2.1.0")
+    testImplementation("org.robolectric:robolectric:4.13")
+    testImplementation("androidx.test:core:1.6.1")
 }
