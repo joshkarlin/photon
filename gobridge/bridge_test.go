@@ -163,6 +163,48 @@ func TestSendersForMessages(t *testing.T) {
 	}
 }
 
+func TestPruneMessages_capsPerConversationAndRemovesEmptyRows(t *testing.T) {
+	b := newTestBridge(t)
+	b.retention = RetentionConfig{MaxMessages: 2, MaxDays: 0}
+
+	b.UpsertConversation("chat@s.whatsapp.net", "Alice", false, "", 0)
+	b.UpsertConversation("ghost@s.whatsapp.net", "Ghost", false, "", 0) // no messages
+	if err := b.InsertMessages([]*MessageRow{
+		{ID: "m1", ConversationJID: "chat@s.whatsapp.net", SenderJID: "a", Timestamp: 1, ContentType: "text"},
+		{ID: "m2", ConversationJID: "chat@s.whatsapp.net", SenderJID: "a", Timestamp: 2, ContentType: "text"},
+		{ID: "m3", ConversationJID: "chat@s.whatsapp.net", SenderJID: "a", Timestamp: 3, ContentType: "text"},
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	b.pruneMessages()
+
+	// Per-conversation cap keeps the newest 2 (m2, m3); oldest pruned.
+	var kept int
+	b.msgDB.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_jid='chat@s.whatsapp.net'`).Scan(&kept)
+	if kept != 2 {
+		t.Errorf("messages kept = %d, want 2", kept)
+	}
+	var hasOldest int
+	b.msgDB.QueryRow(`SELECT COUNT(*) FROM messages WHERE id='m1'`).Scan(&hasOldest)
+	if hasOldest != 0 {
+		t.Errorf("oldest message m1 should have been pruned")
+	}
+
+	// The empty conversation is removed; the one with messages survives.
+	var jids []string
+	rows, _ := b.msgDB.Query(`SELECT jid FROM conversations ORDER BY jid`)
+	defer rows.Close()
+	for rows.Next() {
+		var j string
+		rows.Scan(&j)
+		jids = append(jids, j)
+	}
+	if len(jids) != 1 || jids[0] != "chat@s.whatsapp.net" {
+		t.Errorf("conversations after prune = %v, want [chat@s.whatsapp.net]", jids)
+	}
+}
+
 // participantNames reads the participants table into a jid→display_name map.
 func participantNames(t *testing.T, b *Bridge, groupJID string) map[string]string {
 	t.Helper()

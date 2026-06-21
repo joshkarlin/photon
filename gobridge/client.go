@@ -114,15 +114,26 @@ func (b *Bridge) pruneMessages() {
 
 	// Prune by count per conversation
 	if cfg.MaxMessages > 0 {
-		rows, err := b.msgDB.Query(`SELECT DISTINCT conversation_jid FROM conversations`)
+		// Collect the conversation JIDs first, then delete — holding a read
+		// cursor open while issuing the DELETEs deadlocks any single-writer
+		// SQLite (and was unnecessary). NB: the conversations table column is
+		// `jid`; the previous query used `conversation_jid` (the messages
+		// column), which errored and aborted the whole prune — so neither the
+		// per-conversation cap nor the empty-conversation cleanup ever ran.
+		var jids []string
+		rows, err := b.msgDB.Query(`SELECT DISTINCT conversation_jid FROM messages`)
 		if err != nil {
 			return
 		}
-		defer rows.Close()
-
 		for rows.Next() {
 			var jid string
-			rows.Scan(&jid)
+			if rows.Scan(&jid) == nil {
+				jids = append(jids, jid)
+			}
+		}
+		rows.Close()
+
+		for _, jid := range jids {
 			res, err := b.msgDB.Exec(`
 				DELETE FROM messages WHERE conversation_jid = ? AND id NOT IN (
 					SELECT id FROM messages WHERE conversation_jid = ?
