@@ -6,13 +6,17 @@ import app.photon.data.model.Message
 import app.photon.data.model.WsEvent
 import app.photon.service.WsClient
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.withContext
 
 // Go bridge events that mean rendered data changed. The bridge broadcasts
 // after each DB write, so these replace the old 500ms poll.
@@ -51,6 +55,22 @@ class ChatRepository(
         )
 
     fun getConversation(jid: String): Conversation? = db.getConversation(jid)
+
+    // Group participant display names, re-read on every refresh signal. Can't
+    // ride the conversations StateFlow: participant-name changes don't alter the
+    // Conversation rows, so its distinctUntilChanged swallows them. This flow
+    // dedupes on the name map itself, so names show as soon as they resolve
+    // (e.g. after resolve_participants runs on group open). Empty for DMs.
+    fun participantNames(jid: String): Flow<Map<String, String>> =
+        changes
+            .onStart { emit(Unit) }
+            .map {
+                withContext(Dispatchers.IO) {
+                    db.getParticipants(jid)
+                        .associate { p -> p.jid to (p.displayName ?: p.jid.substringBefore("@")) }
+                }
+            }
+            .distinctUntilChanged()
 
     private fun nudge() {
         localChanges.tryEmit(Unit)

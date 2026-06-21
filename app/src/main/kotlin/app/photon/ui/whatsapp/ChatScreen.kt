@@ -44,14 +44,10 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
     // re-send markRead for the same messages on every list emission.
     var lastMarkedReadId by remember(jid) { mutableStateOf<String?>(null) }
 
-    // Load participant names for group chats — re-read on every conversation
-    // update so a sender's name shows once it's known, without navigating away.
-    val db = PhotonService._database
-    val participantNames = remember(jid, convs) {
-        if (isGroup && db != null) {
-            db.getParticipants(jid).associate { it.jid to (it.displayName ?: it.jid.substringBefore("@")) }
-        } else emptyMap()
-    }
+    // Participant names as a flow so they refresh when names resolve (the
+    // conversations flow can't carry these — see ChatRepository.participantNames).
+    val participantNames by remember(jid) { repo.participantNames(jid) }
+        .collectAsState(initial = emptyMap())
 
     // On opening a group, backfill any missing sender names from the contact
     // store — covers historical senders that history sync couldn't name (and
