@@ -27,6 +27,8 @@ keystore.properties
 .claude/settings.local.json
 CLAUDE.local.md
 
+AGENTS.local.md
+
 # Built artifacts
 *.apk
 *.aab
