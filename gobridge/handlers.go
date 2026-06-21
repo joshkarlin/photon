@@ -773,14 +773,24 @@ func (b *Bridge) ResolveGroupParticipants(groupJID string) {
 	}
 	rows.Close()
 
+	b.log.Infof("ResolveGroupParticipants %s: %d distinct senders, purged %d placeholders", groupJID, len(senders), purged)
 	updated := purged > 0
 	for _, sjid := range senders {
 		parsed, perr := types.ParseJID(sjid)
 		if perr != nil {
+			b.log.Warnf("  diag sender=%q UNPARSEABLE", sjid)
 			continue
 		}
 		resolved := b.resolveLIDJID(parsed)
-		name, _ := bestContactName(b.lookupContact(resolved, parsed), "")
+		contact := b.lookupContact(resolved, parsed)
+		name, _ := bestContactName(contact, "")
+		// Diagnostic: what's currently stored for this sender, and what each
+		// name source returned. Lets a single group-open in logcat reveal whether
+		// it's a key mismatch, an empty contact store, or an unresolved LID.
+		var storedName string
+		_ = b.msgDB.QueryRow(`SELECT COALESCE(display_name,'') FROM participants WHERE conversation_jid=? AND jid=?`, groupJID, sjid).Scan(&storedName)
+		b.log.Infof("  diag sender=%s resolved=%s stored=%q contact(full=%q push=%q biz=%q) -> name=%q",
+			sjid, resolved.String(), storedName, contact.FullName, contact.PushName, contact.BusinessName, name)
 		// Only write real names. Never fall back to the phone number: this runs
 		// on every group open and overwrites existing rows, so a number fallback
 		// would clobber a good push name the live handler captured (members not
