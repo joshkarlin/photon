@@ -205,6 +205,60 @@ func TestPruneMessages_capsPerConversationAndRemovesEmptyRows(t *testing.T) {
 	}
 }
 
+func TestUpsertConversation_isGroupOverwrites(t *testing.T) {
+	b := newTestBridge(t)
+	// First write misclassifies a DM as a group; a later trusted upsert must
+	// be able to correct it (the old sticky-on-true made it permanent).
+	b.UpsertConversation("x@s.whatsapp.net", "Chat", true, "", 0)
+	b.UpsertConversation("x@s.whatsapp.net", "Chat", false, "", 0)
+
+	var isGroup int
+	b.msgDB.QueryRow(`SELECT is_group FROM conversations WHERE jid='x@s.whatsapp.net'`).Scan(&isGroup)
+	if isGroup != 0 {
+		t.Errorf("is_group = %d, want 0 (trusted upsert should overwrite)", isGroup)
+	}
+}
+
+func TestRepairConversationMetadata(t *testing.T) {
+	b := newTestBridge(t)
+	// A group misclassified as a DM, with a stale-old preview timestamp set from
+	// an older message (the history-tail bug). Newer message also present.
+	b.UpsertConversation("123-456@g.us", "Group", false, "old1", 1000)
+	if err := b.InsertMessages([]*MessageRow{
+		{ID: "old1", ConversationJID: "123-456@g.us", SenderJID: "a", Timestamp: 1000, ContentType: "text"},
+		{ID: "new1", ConversationJID: "123-456@g.us", SenderJID: "a", Timestamp: 9000, ContentType: "text"},
+	}); err != nil {
+		t.Fatalf("insert group msgs: %v", err)
+	}
+	// A DM misclassified as a group.
+	b.UpsertConversation("789@s.whatsapp.net", "Bob", true, "dm1", 5000)
+	if err := b.InsertMessages([]*MessageRow{
+		{ID: "dm1", ConversationJID: "789@s.whatsapp.net", SenderJID: "789@s.whatsapp.net", Timestamp: 5000, ContentType: "text"},
+	}); err != nil {
+		t.Fatalf("insert dm msg: %v", err)
+	}
+
+	b.RepairConversationMetadata()
+
+	// Group: reclassified, preview points at the newest message (not the tail).
+	var ig int
+	var lts int64
+	var lmid string
+	b.msgDB.QueryRow(`SELECT is_group, last_timestamp, last_message_id FROM conversations WHERE jid='123-456@g.us'`).Scan(&ig, &lts, &lmid)
+	if ig != 1 {
+		t.Errorf("group is_group = %d, want 1", ig)
+	}
+	if lts != 9000 || lmid != "new1" {
+		t.Errorf("group preview = (%d,%q), want (9000,new1)", lts, lmid)
+	}
+	// DM: reclassified to non-group.
+	var dmIg int
+	b.msgDB.QueryRow(`SELECT is_group FROM conversations WHERE jid='789@s.whatsapp.net'`).Scan(&dmIg)
+	if dmIg != 0 {
+		t.Errorf("dm is_group = %d, want 0", dmIg)
+	}
+}
+
 // participantNames reads the participants table into a jid→display_name map.
 func participantNames(t *testing.T, b *Bridge, groupJID string) map[string]string {
 	t.Helper()

@@ -87,6 +87,23 @@ func (b *Bridge) InitMessageDB(ctx context.Context) error {
 	return nil
 }
 
+// RepairConversationMetadata fixes existing conversation rows whose is_group or
+// preview drifted from the source of truth. Runs on connect; idempotent.
+//   - is_group from the JID server (g.us → group, s.whatsapp.net → DM), undoing
+//     any old misclassification the sticky upsert had made permanent.
+//   - last_timestamp / last_message_id from the newest actual message, undoing
+//     history sync having pinned the preview to an older (or skipped) message.
+func (b *Bridge) RepairConversationMetadata() {
+	b.msgDB.Exec(`UPDATE conversations SET is_group = 1 WHERE jid LIKE '%@g.us' AND is_group <> 1`)
+	b.msgDB.Exec(`UPDATE conversations SET is_group = 0 WHERE jid LIKE '%@s.whatsapp.net' AND is_group <> 0`)
+	b.msgDB.Exec(`
+		UPDATE conversations SET
+			last_timestamp  = (SELECT MAX(timestamp) FROM messages WHERE conversation_jid = conversations.jid),
+			last_message_id = (SELECT id FROM messages WHERE conversation_jid = conversations.jid ORDER BY timestamp DESC, _rowid_ DESC LIMIT 1)
+		WHERE EXISTS (SELECT 1 FROM messages WHERE conversation_jid = conversations.jid)
+	`)
+}
+
 // UpsertConversation creates or updates a conversation record.
 func (b *Bridge) UpsertConversation(jid, name string, isGroup bool, lastMsgID string, lastTS int64) {
 	isGroupInt := 0
@@ -99,7 +116,10 @@ func (b *Bridge) UpsertConversation(jid, name string, isGroup bool, lastMsgID st
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(jid) DO UPDATE SET
 			name = COALESCE(NULLIF(excluded.name, ''), conversations.name),
-			is_group = CASE WHEN excluded.is_group = 1 THEN 1 ELSE conversations.is_group END,
+			-- is_group is now classified authoritatively (by JID server) at every
+			-- call site, so let it overwrite. The old sticky-on-true made any
+			-- earlier misclassification permanent.
+			is_group = excluded.is_group,
 			last_message_id = CASE WHEN excluded.last_timestamp > conversations.last_timestamp THEN excluded.last_message_id ELSE conversations.last_message_id END,
 			last_timestamp = MAX(excluded.last_timestamp, conversations.last_timestamp),
 			updated_at = excluded.updated_at

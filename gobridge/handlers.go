@@ -75,6 +75,7 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 			time.Sleep(60 * time.Second)
 			b.MergeLIDConversations()
 			b.CanonicalizeSenderJIDs()
+			b.RepairConversationMetadata()
 			b.BackfillContactNames()
 			b.BackfillParticipantNames()
 		}()
@@ -86,6 +87,7 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 		go func() {
 			b.MergeLIDConversations()
 			b.CanonicalizeSenderJIDs()
+			b.RepairConversationMetadata()
 			b.BackfillContactNames()
 			b.BackfillParticipantNames()
 		}()
@@ -332,16 +334,14 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 		jid := b.resolveLIDString(rawJID)
 
 		name := conv.GetName()
-		// Detect groups by the JID server (g.us). The history payload's
-		// participant list is frequently empty, which previously misclassified
-		// groups as individual chats — and that skipped the participant-name
-		// backfill below, so historical senders rendered as bare numbers.
+		// Detect groups solely by the JID server (g.us) — the authoritative
+		// signal. The old participant-count heuristic fallback misfired both
+		// ways (an empty participant list misclassified groups as DMs; a DM
+		// payload that happened to carry a participant misclassified it as a
+		// group), and a wrong is_group used to be sticky forever.
 		isGroup := false
 		if parsedConvJID, perr := types.ParseJID(jid); perr == nil {
 			isGroup = parsedConvJID.Server == types.GroupServer
-		}
-		if !isGroup {
-			isGroup = conv.GetIsDefaultSubgroup() || (len(conv.GetParticipant()) > 0)
 		}
 
 		msgs := conv.GetMessages()
@@ -469,16 +469,17 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 			}
 		}
 
-		// Upsert conversation after processing messages
+		// Upsert conversation after processing messages. Derive the preview
+		// (last message + timestamp) from the newest message we actually
+		// INSERTED, not the raw payload tail — WhatsApp's history array isn't
+		// guaranteed newest-last, and the tail may have been skipped (retention/
+		// nil), so using it pinned the conversation to an older message's date.
 		lastTS := int64(0)
 		lastMsgID := ""
-		if len(msgs) > 0 {
-			last := msgs[len(msgs)-1].GetMessage()
-			if last != nil {
-				lastTS = int64(last.GetMessageTimestamp())
-				if last.GetKey() != nil {
-					lastMsgID = last.GetKey().GetID()
-				}
+		for _, r := range pending {
+			if r.Timestamp >= lastTS {
+				lastTS = r.Timestamp
+				lastMsgID = r.ID
 			}
 		}
 		b.UpsertConversation(jid, name, isGroup, lastMsgID, lastTS)
