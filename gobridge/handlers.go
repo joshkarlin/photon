@@ -197,12 +197,15 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 		// network fetch per group per hour, not per message)
 		name = b.groupName(evt.Info.Chat)
 
-		// Store sender as participant with their display name
+		// Store sender as participant with their display name. Prefer the push
+		// name, then the address-book contact name — but never the phone number.
+		// A number written here is overwritten by the live push name later, but
+		// the reverse (ResolveGroupParticipants) used to clobber good names with
+		// numbers; keeping only real names in the table avoids that entirely and
+		// lets the UI fall back to the number on its own when nothing is known.
 		senderDisplayName := evt.Info.PushName
-		if senderDisplayName == "" && evt.Info.Sender.Server == types.HiddenUserServer {
-			if pn, err := b.client.Store.LIDs.GetPNForLID(context.Background(), evt.Info.Sender); err == nil && !pn.IsEmpty() {
-				senderDisplayName = "+" + pn.User
-			}
+		if senderDisplayName == "" {
+			senderDisplayName, _ = bestContactName(b.lookupContact(b.resolveLIDJID(evt.Info.Sender), evt.Info.Sender), "")
 		}
 		if senderDisplayName != "" {
 			b.UpsertParticipant(chatJID, senderJID, senderDisplayName, "member")
@@ -747,6 +750,15 @@ func (b *Bridge) lookupContact(resolved, original types.JID) types.ContactInfo {
 // store was populated — render names without re-pairing. Cheap and idempotent,
 // so it's safe to call on every group open.
 func (b *Bridge) ResolveGroupParticipants(groupJID string) {
+	// Purge number-placeholder names an earlier build wrote (display_name that
+	// is a bare "+<digits>"), which shadowed real push/contact names. Removing
+	// them lets the real name repopulate below or via a future live message; the
+	// UI falls back to the number on its own when a participant has no row.
+	b.msgDB.Exec(
+		`DELETE FROM participants WHERE conversation_jid = ? AND display_name GLOB '+[0-9]*' AND display_name NOT GLOB '*[A-Za-z]*'`,
+		groupJID,
+	)
+
 	rows, err := b.msgDB.Query(
 		`SELECT DISTINCT sender_jid FROM messages WHERE conversation_jid = ? AND is_from_me = 0`,
 		groupJID,
@@ -772,10 +784,11 @@ func (b *Bridge) ResolveGroupParticipants(groupJID string) {
 		}
 		resolved := b.resolveLIDJID(parsed)
 		name, _ := bestContactName(b.lookupContact(resolved, parsed), "")
-		// LID that resolved to a phone but has no contact name → show the number.
-		if name == "" && resolved.Server == types.DefaultUserServer && resolved != parsed {
-			name = "+" + resolved.User
-		}
+		// Only write real names. Never fall back to the phone number: this runs
+		// on every group open and overwrites existing rows, so a number fallback
+		// would clobber a good push name the live handler captured (members not
+		// in the address book have no contact-store name). When there's no real
+		// name, leave the row alone — the UI already falls back to the number.
 		if name != "" {
 			if upErr := b.UpsertParticipant(groupJID, sjid, name, "member"); upErr == nil {
 				updated = true
