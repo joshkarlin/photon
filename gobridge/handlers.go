@@ -56,7 +56,9 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 		go func() {
 			time.Sleep(60 * time.Second)
 			b.MergeLIDConversations()
+			b.CanonicalizeSenderJIDs()
 			b.BackfillContactNames()
+			b.BackfillParticipantNames()
 		}()
 	case *events.AppStateSyncComplete:
 		// Contact names and LID mappings arrive via app state sync — run the
@@ -65,7 +67,9 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 		b.log.Infof("App state sync complete: %s", v.Name)
 		go func() {
 			b.MergeLIDConversations()
+			b.CanonicalizeSenderJIDs()
 			b.BackfillContactNames()
+			b.BackfillParticipantNames()
 		}()
 	case *events.Disconnected:
 		b.log.Infof("Disconnected from WhatsApp")
@@ -586,6 +590,69 @@ func (b *Bridge) MergeLIDConversations() {
 	if merged > 0 {
 		b.log.Infof("Merged %d LID conversations into phone-based rows", merged)
 		b.BroadcastEvent("conversation_updated", struct{}{})
+	}
+}
+
+// CanonicalizeSenderJIDs re-keys message, reaction, and participant sender JIDs
+// from @lid to the resolved phone JID once the LID→PN mapping is known. This is
+// the sender-side counterpart to MergeLIDConversations, which only re-keys
+// conversation_jid — group chats live under @g.us, so a member stored under an
+// @lid sender (history sync, older builds) was never reconciled and split from
+// their phone-keyed live messages. Idempotent; runs in the same backfill cycle.
+func (b *Bridge) CanonicalizeSenderJIDs() {
+	rows, err := b.msgDB.Query(`SELECT DISTINCT sender_jid FROM messages WHERE sender_jid LIKE '%@lid'`)
+	if err != nil {
+		return
+	}
+	var lids []string
+	for rows.Next() {
+		var s string
+		if rows.Scan(&s) == nil && s != "" {
+			lids = append(lids, s)
+		}
+	}
+	rows.Close()
+
+	changed := 0
+	for _, lid := range lids {
+		pn := b.resolveLIDString(lid)
+		if pn == lid {
+			continue // mapping not known yet — retry on the next sync patch
+		}
+		// messages.sender_jid isn't unique, so a plain update is safe; the
+		// PK-bearing tables use UPDATE OR IGNORE + delete to fold duplicates.
+		b.msgDB.Exec(`UPDATE messages SET sender_jid = ? WHERE sender_jid = ?`, pn, lid)
+		b.msgDB.Exec(`UPDATE OR IGNORE reactions SET sender_jid = ? WHERE sender_jid = ?`, pn, lid)
+		b.msgDB.Exec(`DELETE FROM reactions WHERE sender_jid = ?`, lid)
+		b.msgDB.Exec(`UPDATE OR IGNORE participants SET jid = ? WHERE jid = ?`, pn, lid)
+		b.msgDB.Exec(`DELETE FROM participants WHERE jid = ?`, lid)
+		changed++
+	}
+	if changed > 0 {
+		b.log.Infof("Canonicalized %d LID sender(s) to phone JIDs", changed)
+		b.BroadcastEvent("conversation_updated", struct{}{})
+	}
+}
+
+// BackfillParticipantNames names group participants from whatsmeow's contact
+// store — the group-chat counterpart to BackfillContactNames (DM conversation
+// names). Runs on the same triggers so initial sync, live messages, and
+// everyday app-state patches all converge group sender names the same way.
+func (b *Bridge) BackfillParticipantNames() {
+	rows, err := b.msgDB.Query(`SELECT jid FROM conversations WHERE is_group = 1`)
+	if err != nil {
+		return
+	}
+	var groups []string
+	for rows.Next() {
+		var j string
+		if rows.Scan(&j) == nil && j != "" {
+			groups = append(groups, j)
+		}
+	}
+	rows.Close()
+	for _, g := range groups {
+		b.ResolveGroupParticipants(g)
 	}
 }
 
