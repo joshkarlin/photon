@@ -65,6 +65,31 @@ class SignalMessageDatabaseTest {
     }
 
     /**
+     * Reconnect-time GroupV2 refresh must also pick up named groups with an
+     * empty participants table, because those member ACIs are the session-ping
+     * targets for group-only contacts.
+     */
+    @Test
+    fun getGroupsNeedingMetadataRefresh_selectsBlankOrParticipantlessGroups() {
+        val mk = ByteArray(32) { 2 }
+        db.upsertConversation(jid = "meta-blank", name = null, isGroup = true)
+        db.updateGroupMeta("meta-blank", mk, 1)
+        db.upsertConversation(jid = "meta-no-participants", name = "Known title", isGroup = true)
+        db.updateGroupMeta("meta-no-participants", mk, 1)
+        db.upsertConversation(jid = "meta-ready", name = "Ready", isGroup = true)
+        db.updateGroupMeta("meta-ready", mk, 1)
+        db.upsertParticipant("meta-ready", "meta-member", "Member", "member")
+        db.upsertConversation(jid = "meta-keyless", name = null, isGroup = true)
+
+        val refreshable = db.getGroupsNeedingMetadataRefresh()
+            .map { it.first }
+            .filter { it.startsWith("meta-") }
+            .toSet()
+
+        assertEquals(setOf("meta-blank", "meta-no-participants"), refreshable)
+    }
+
+    /**
      * An incoming reaction is stored under the suffix-less "{author}_{ts}"
      * prefix; it must attach to the full message id "{author}_{ts}_{rand}" so it
      * actually renders. (Previously joined on the full id and never matched.)
@@ -103,5 +128,36 @@ class SignalMessageDatabaseTest {
         val msg = db.getMessages("aci").first { it.id == fullId }
         assertEquals("", msg.textBody)
         assertEquals("deleted", msg.status)
+    }
+
+    /**
+     * Session pings must target group-only members too. Otherwise Photon can
+     * send into a GroupV2 conversation but never receive other members'
+     * messages because their clients have not established a session with this
+     * linked device.
+     */
+    @Test
+    fun getSessionPingTargetAcis_includesDmConversationsAndGroupParticipants() {
+        val dmAci = "ping-dm-aci"
+        val groupJid = "ping-group"
+        val groupMemberA = "ping-group-member-a"
+        val groupMemberB = "ping-group-member-b"
+
+        db.upsertConversation(jid = dmAci, name = "Alice", isGroup = false)
+        db.insertMessage(
+            id = "${dmAci}_1700_msg", conversationJid = dmAci,
+            senderJid = dmAci, timestamp = 1700,
+            contentType = "text", textBody = "hi",
+        )
+        db.upsertConversation(jid = "ping-empty-dm", name = "No Messages", isGroup = false)
+        db.upsertConversation(jid = groupJid, name = "Group", isGroup = true)
+        db.upsertParticipant(groupJid, groupMemberA, "Member A", "member")
+        db.upsertParticipant(groupJid, groupMemberB, null, "member")
+
+        val targets = db.getSessionPingTargetAcis()
+            .filter { it.startsWith("ping-") }
+            .toSet()
+
+        assertEquals(setOf(dmAci, groupMemberA, groupMemberB), targets)
     }
 }

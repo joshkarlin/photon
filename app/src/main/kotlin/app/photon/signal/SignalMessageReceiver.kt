@@ -73,6 +73,7 @@ class SignalMessageReceiver(
     @Volatile private var groupManager: SignalGroupV2Manager? = null
     @Volatile private var contactsSyncRequested = false
     @Volatile private var activeContactsPinged = false
+    @Volatile private var activeContactsPingInFlight = false
 
     fun start() {
         if (running) return
@@ -265,40 +266,36 @@ class SignalMessageReceiver(
             }
         }
 
-        // Repair group titles that are blank/null (e.g. wiped by the old
-        // reresolve bug, which nulled groups since they have no contact row).
-        // Set a non-base64 placeholder immediately so the UI never shows the raw
-        // group id, then re-fetch the real title from group state.
+        // Repair/refetch GroupV2 metadata after reconnect. Blank titles need
+        // the old name-wipe repair; empty participant tables need a refetch so
+        // group-only members can be session-primed below.
         scope.launch {
             try {
-                val blanks = messageDb.getGroupsWithBlankNameAndMasterKey()
-                if (blanks.isNotEmpty()) {
-                    Log.i(TAG, "Repairing ${blanks.size} blank group name(s)")
-                    blanks.forEach { (jid, masterKey) ->
-                        messageDb.upsertConversation(jid = jid, name = PLACEHOLDER_GROUP_NAME, isGroup = true)
+                val groups = messageDb.getGroupsNeedingMetadataRefresh()
+                if (groups.isNotEmpty()) {
+                    Log.i(TAG, "Refreshing metadata for ${groups.size} Signal group(s)")
+                    groups.forEach { (jid, masterKey) ->
+                        val currentName = messageDb.getConversation(jid)?.name
+                        if (currentName.isNullOrBlank()) {
+                            messageDb.upsertConversation(jid = jid, name = PLACEHOLDER_GROUP_NAME, isGroup = true)
+                        }
                         resolveGroupMetadata(jid, masterKey)
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Group name repair failed: ${e.message}")
+                Log.w(TAG, "Group metadata refresh failed: ${e.message}")
             }
         }
 
-        // Send a NullMessage to each contact we already have message history
-        // with. Without this, those contacts' apps don't know our deviceId=3
-        // exists and won't include us in their encrypted recipient list, so
-        // their messages never reach Photon. Once per contact (persisted in
-        // SharedPreferences), with a 7-day refresh so sessions don't go stale.
+        // Send a NullMessage to each active Signal ACI we know about. Without
+        // this, those contacts' apps don't know our linked deviceId exists and
+        // won't include us in their encrypted recipient list, so their messages
+        // never reach Photon. DM conversations cover direct contacts; GroupV2
+        // participants cover group-only members. Once per contact (persisted
+        // in SharedPreferences), with a 7-day refresh so sessions don't go stale.
         if (!activeContactsPinged) {
             activeContactsPinged = true
-            scope.launch {
-                try {
-                    delay(8000)   // let contacts sync ingest first
-                    pingActiveContacts()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Active contact pinging failed: ${e.message}")
-                }
-            }
+            scheduleActiveContactPing(8000) // let contacts sync ingest first
         }
 
         // Upload one-time pre-keys if they haven't been uploaded yet
@@ -312,12 +309,20 @@ class SignalMessageReceiver(
 
             val countResult = keysApi.getAvailablePreKeyCounts(ServiceIdType.ACI)
             val counts = countResult.successOrThrow()
-            Log.i(TAG, "Server pre-key counts: ec=${counts.ecCount}, kyber=${counts.kyberCount}")
+            Log.i(
+                TAG,
+                "Server ACI pre-key counts: ec=${counts.ecCount}, kyber=${counts.kyberCount} " +
+                    "(refill threshold=10)",
+            )
 
             if (counts.ecCount >= 10 && counts.kyberCount >= 10) {
                 Log.i(TAG, "Server has enough pre-keys")
                 return
             }
+            Log.w(
+                TAG,
+                "Server ACI pre-key counts low; uploading fresh signed, EC, and Kyber keys",
+            )
 
             val identityKeyPair = protocolStore.identityKeyPair
 
@@ -1024,11 +1029,11 @@ class SignalMessageReceiver(
     }
 
     /**
-     * Sends a Signal NullMessage to each ACI we've ever exchanged messages
-     * with (sync transcripts count). The recipient processes the NullMessage
-     * silently — no notification, no chat entry — but it forces their app to
-     * notice our deviceId and add us to their encrypted-recipient list. Their
-     * subsequent messages then reach Photon.
+     * Sends a Signal NullMessage to each active ACI we know about (DM
+     * conversations plus GroupV2 participants). The recipient processes the
+     * NullMessage silently — no notification, no chat entry — but it forces
+     * their app to notice our deviceId and add us to their encrypted-recipient
+     * list. Their subsequent messages then reach Photon.
      *
      * Tracked per-ACI in SharedPreferences so we ping each contact at most
      * once per refresh window (currently 7 days).
@@ -1042,20 +1047,60 @@ class SignalMessageReceiver(
         val prefs = context.getSharedPreferences("signal_ping_state", android.content.Context.MODE_PRIVATE)
         val refreshCutoff = System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000
 
-        val targets = messageDb.getJidsWithMessages()
+        val candidates = messageDb.getSessionPingTargetAcis()
             .filter { it.lowercase() != myAci }
-            .filter { prefs.getLong(it, 0L) < refreshCutoff }
+            .distinct()
+        val targets = candidates.filter { prefs.getLong(it, 0L) < refreshCutoff }
 
-        if (targets.isEmpty()) return
-        Log.i(TAG, "Pinging ${targets.size} active Signal contacts to establish deviceId=${credentials.deviceId} sessions")
+        if (targets.isEmpty()) {
+            Log.d(
+                TAG,
+                "No Signal session pings due (candidates=${candidates.size}, deviceId=${credentials.deviceId})",
+            )
+            return
+        }
+        Log.i(
+            TAG,
+            "Pinging ${targets.size}/${candidates.size} active Signal contacts " +
+                "to establish deviceId=${credentials.deviceId} sessions",
+        )
         for (jid in targets) {
             val ok = sender.sendSessionPing(jid)
-            if (ok) prefs.edit().putLong(jid, System.currentTimeMillis()).apply()
+            if (ok) {
+                prefs.edit().putLong(jid, System.currentTimeMillis()).apply()
+                Log.i(TAG, "Session ping succeeded for ${jid.take(8)}…")
+            } else {
+                Log.w(TAG, "Session ping failed for ${jid.take(8)}…")
+            }
             // Stagger so we don't burst the server. 800ms between pings is
             // generous; with ~10 active contacts, total wall time ~8s.
             delay(800)
         }
         Log.i(TAG, "Active-contact pinging complete")
+    }
+
+    private fun scheduleActiveContactPing(delayMs: Long = 0L) {
+        val shouldStart = synchronized(this) {
+            if (activeContactsPingInFlight) {
+                false
+            } else {
+                activeContactsPingInFlight = true
+                true
+            }
+        }
+        if (!shouldStart) return
+        scope.launch {
+            try {
+                if (delayMs > 0) delay(delayMs)
+                pingActiveContacts()
+            } catch (e: Exception) {
+                Log.w(TAG, "Active contact pinging failed: ${e.message}")
+            } finally {
+                synchronized(this@SignalMessageReceiver) {
+                    activeContactsPingInFlight = false
+                }
+            }
+        }
     }
 
     private fun ingestDeviceContact(
@@ -1147,6 +1192,7 @@ class SignalMessageReceiver(
             messageDb.upsertParticipant(conversationJid, aciString, name, "member")
         }
         Log.i(TAG, "Resolved group ${conversationJid.take(12)}…: $title (${acis.size} members)")
+        scheduleActiveContactPing()
     }
 
     private fun maybeFetchProfile(aci: String) {

@@ -614,6 +614,38 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     /**
+     * Groups whose server metadata should be refreshed after reconnect: either
+     * the title is blank or the member table is empty. The latter matters for
+     * linked-device session priming, because group-only contacts are discovered
+     * through GroupV2 member state before they can be NullMessage-pinged.
+     */
+    fun getGroupsNeedingMetadataRefresh(): List<Pair<String, ByteArray>> {
+        val out = mutableListOf<Pair<String, ByteArray>>()
+        readableDatabase.rawQuery(
+            """
+            SELECT c.jid, c.master_key
+              FROM conversations c
+              WHERE c.is_group = 1
+                AND c.master_key IS NOT NULL
+                AND (
+                    c.name IS NULL OR c.name = ''
+                    OR NOT EXISTS (
+                        SELECT 1 FROM participants p WHERE p.conversation_jid = c.jid
+                    )
+                )
+            """,
+            null,
+        ).use { c ->
+            while (c.moveToNext()) {
+                val jid = c.getString(0)
+                val mk = if (c.isNull(1)) null else c.getBlob(1)
+                if (mk != null && mk.size == 32) out.add(jid to mk)
+            }
+        }
+        return out
+    }
+
+    /**
      * Repair last_timestamp on every conversation whose row is desynced from
      * the messages table — sets it to MAX(messages.timestamp) where the
      * conversation has any messages stored. Idempotent; safe to run on every
@@ -648,6 +680,41 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
               FROM messages m
               LEFT JOIN conversations c ON c.jid = m.conversation_jid
               WHERE COALESCE(c.is_group, 0) = 0
+            """,
+            null,
+        ).use { c ->
+            val out = mutableListOf<String>()
+            while (c.moveToNext()) out.add(c.getString(0))
+            out
+        }
+    }
+
+    /**
+     * ACIs that should receive a silent NullMessage after connect so their
+     * clients learn this linked deviceId and include Photon in future
+     * encrypted recipient lists.
+     *
+     * DM conversation JIDs cover contacts we've exchanged direct messages
+     * with. GroupV2 participant rows cover group-only contacts; without this
+     * branch, Photon could send into a group but never receive other members'
+     * messages because their clients had no session for this linked device.
+     */
+    fun getSessionPingTargetAcis(): List<String> {
+        return readableDatabase.rawQuery(
+            """
+            SELECT DISTINCT jid FROM (
+                SELECT m.conversation_jid AS jid
+                  FROM messages m
+                  LEFT JOIN conversations c ON c.jid = m.conversation_jid
+                  WHERE COALESCE(c.is_group, 0) = 0
+                UNION
+                SELECT p.jid AS jid
+                  FROM participants p
+                  INNER JOIN conversations c ON c.jid = p.conversation_jid
+                  WHERE COALESCE(c.is_group, 0) = 1
+            )
+            WHERE jid IS NOT NULL AND jid != ''
+            ORDER BY jid
             """,
             null,
         ).use { c ->
