@@ -58,7 +58,7 @@ private sealed class InputState {
 @Composable
 fun MessageInputBar(
     onSendText: (String) -> Unit,
-    onSendAudio: (String) -> Unit,
+    onSendAudio: ((String) -> Unit)? = null,
     onSendMedia: ((String, String) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
@@ -234,8 +234,9 @@ fun MessageInputBar(
                     ) {
                         Text("SEND", fontSize = 13.sp, letterSpacing = 2.sp, color = Color.White)
                     }
-                } else {
-                    // Voice note
+                } else if (onSendAudio != null) {
+                    // Voice note — only when the platform can send audio (SMS
+                    // can't, so the mic is hidden rather than a dead control).
                     Box(
                         modifier = Modifier
                             .height(48.dp)
@@ -314,7 +315,7 @@ fun MessageInputBar(
                             val path = recordingPath
                             val file = path?.let { File(it) }
                             if (path != null && file != null && file.exists() && file.length() > 0) {
-                                onSendAudio(path)
+                                onSendAudio?.invoke(path)
                             }
                             state = InputState.Default
                         }

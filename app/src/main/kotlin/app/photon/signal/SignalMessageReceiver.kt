@@ -583,10 +583,12 @@ class SignalMessageReceiver(
             return
         }
 
-        // Handle deletes
+        // Handle deletes (remote delete-for-everyone). Key by the
+        // "{author}_{timestampMs}" prefix — the stored id has a "_{rand}" suffix
+        // the delete proto doesn't carry, so an exact-id match never matched.
         if (data.delete != null) {
             val targetTs = data.delete!!.targetSentTimestamp ?: return
-            messageDb.updateMessageStatus("${senderAci}_$targetTs", "deleted")
+            messageDb.markDeletedByPrefix("${senderAci}_$targetTs")
             return
         }
 

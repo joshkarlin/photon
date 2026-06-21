@@ -193,15 +193,19 @@ func (b *Bridge) handleSendReaction(ctx context.Context, raw json.RawMessage) (j
 		return nil, err
 	}
 
-	targetJID, err := types.ParseJID(p.JID)
+	parsedJID, err := types.ParseJID(p.JID)
 	if err != nil {
 		return nil, err
 	}
-
-	senderJID, err := types.ParseJID(p.SenderJID)
+	parsedSender, err := types.ParseJID(p.SenderJID)
 	if err != nil {
 		return nil, err
 	}
+	// Resolve LID → phone so the reaction row keys on the same sender_jid the
+	// live handler stores (handleMessage), otherwise a group reaction lands
+	// under a different key and never folds with the canonical row.
+	targetJID := b.resolveLIDJID(parsedJID)
+	senderJID := b.resolveLIDJID(parsedSender)
 
 	reactionMsg := b.client.BuildReaction(targetJID, senderJID, p.MessageID, p.Emoji)
 	_, err = b.client.SendMessage(ctx, targetJID, reactionMsg)
@@ -209,7 +213,7 @@ func (b *Bridge) handleSendReaction(ctx context.Context, raw json.RawMessage) (j
 		return nil, err
 	}
 
-	b.UpsertReaction(p.MessageID, p.SenderJID, p.Emoji, 0)
+	b.UpsertReaction(p.MessageID, senderJID.String(), p.Emoji, 0)
 	return mustMarshal(struct{}{}), nil
 }
 
@@ -232,8 +236,11 @@ func (b *Bridge) handleMarkRead(ctx context.Context, raw json.RawMessage) (json.
 	// read-receipt (blue ticks to the sender) goes through. Coupling the two
 	// meant any MarkRead failure (offline, LID-chat quirks) left the badge
 	// stuck. The receipt is still best-effort below.
-	b.ResetUnread(p.JID)
-	err := b.MarkRead(ctx, p.JID, p.MessageIDs)
+	// Resolve LID → phone so the badge clears on the same conversation row the
+	// message/receipt handlers write (handleReceipt resolves for this reason).
+	jid := b.resolveLIDString(p.JID)
+	b.ResetUnread(jid)
+	err := b.MarkRead(ctx, jid, p.MessageIDs)
 	return mustMarshal(struct{}{}), err
 }
 
@@ -243,10 +250,13 @@ func (b *Bridge) handleEditMessage(ctx context.Context, raw json.RawMessage) (js
 		return nil, err
 	}
 
-	targetJID, err := types.ParseJID(p.JID)
+	parsedJID, err := types.ParseJID(p.JID)
 	if err != nil {
 		return nil, err
 	}
+	// Resolve LID → phone to match every other send path; the conversation row
+	// is keyed by the resolved JID.
+	targetJID := b.resolveLIDJID(parsedJID)
 
 	editMsg := b.client.BuildEdit(targetJID, p.MessageID, &waE2E.Message{
 		Conversation: &p.NewText,
@@ -257,6 +267,13 @@ func (b *Bridge) handleEditMessage(ctx context.Context, raw json.RawMessage) (js
 	}
 
 	b.UpdateMessageEdit(p.MessageID, p.NewText, 1)
+	// Tell connected UIs to refresh, mirroring the live edit path which
+	// broadcasts message_updated (ws request responses don't flow through the
+	// event stream).
+	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
+		ConversationJID: targetJID.String(),
+		MessageID:       p.MessageID,
+	})
 	return mustMarshal(struct{}{}), nil
 }
 

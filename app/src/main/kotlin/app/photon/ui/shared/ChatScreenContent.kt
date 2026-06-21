@@ -56,7 +56,7 @@ fun ChatScreenContent(
     isGroup: Boolean,
     participantNames: Map<String, String> = emptyMap(),
     onSendText: (text: String, replyToId: String?) -> Unit,
-    onSendAudio: (path: String, replyToId: String?) -> Unit = { _, _ -> },
+    onSendAudio: ((path: String, replyToId: String?) -> Unit)? = null,
     onSendMedia: ((path: String, mime: String, replyToId: String?) -> Unit)? = null,
     onBack: () -> Unit,
     onMediaTap: ((Message) -> Unit)? = null,
@@ -218,9 +218,11 @@ fun ChatScreenContent(
                 onSendText(text, replyingTo?.id)
                 replyingTo = null
             },
-            onSendAudio = { path ->
-                onSendAudio(path, replyingTo?.id)
-                replyingTo = null
+            onSendAudio = onSendAudio?.let { handler ->
+                { path ->
+                    handler(path, replyingTo?.id)
+                    replyingTo = null
+                }
             },
             onSendMedia = onSendMedia?.let { handler ->
                 { path, mime ->

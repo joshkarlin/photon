@@ -311,6 +311,23 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         notifyChanged()
     }
 
+    /**
+     * Mark a message deleted-for-everyone by its "{author}_{timestampMs}"
+     * prefix. Incoming remote-deletes only know author + timestamp, not the
+     * "_{rand}" suffix on the stored id, so an exact-id match never hit. Blanks
+     * the body/media so the shared UI renders it as "[ deleted ]", matching the
+     * WhatsApp revoke behaviour.
+     */
+    fun markDeletedByPrefix(prefix: String) {
+        writableDatabase.execSQL(
+            "UPDATE messages SET text_body = '', content_type = 'text', media_url = NULL, status = 'deleted' " +
+                "WHERE id >= ? AND id < ?",
+            arrayOf("${prefix}_", "${prefix}_￿"),
+        )
+        writableDatabase.execSQL("DELETE FROM reactions WHERE message_id = ?", arrayOf(prefix))
+        notifyChanged()
+    }
+
     /** Remove a message and its reactions from the local DB. */
     fun deleteMessage(id: String) {
         writableDatabase.execSQL("DELETE FROM messages WHERE id = ?", arrayOf(id))
@@ -652,15 +669,26 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
 
     fun getReactions(messageIds: List<String>): Map<String, List<Reaction>> {
         if (messageIds.isEmpty()) return emptyMap()
-        val placeholders = messageIds.joinToString(",") { "?" }
+        // Reactions are stored under the suffix-less "{author}_{timestampMs}"
+        // prefix, while message ids carry an extra "_{rand}". Query by prefix and
+        // map results back onto the full ids the caller indexes by, so incoming
+        // reactions actually attach to their message.
+        val prefixToIds = messageIds.groupBy { it.substringBeforeLast("_") }
+        val prefixes = prefixToIds.keys.toList()
+        val placeholders = prefixes.joinToString(",") { "?" }
         return readableDatabase.rawQuery(
             "SELECT * FROM reactions WHERE message_id IN ($placeholders)",
-            messageIds.toTypedArray(),
+            prefixes.toTypedArray(),
         ).use { c ->
-            val result = mutableMapOf<String, MutableList<Reaction>>()
+            val byPrefix = mutableMapOf<String, MutableList<Reaction>>()
             while (c.moveToNext()) {
                 val r = c.toReaction()
-                result.getOrPut(r.messageId) { mutableListOf() }.add(r)
+                byPrefix.getOrPut(r.messageId) { mutableListOf() }.add(r)
+            }
+            val result = mutableMapOf<String, List<Reaction>>()
+            for ((prefix, ids) in prefixToIds) {
+                val rs = byPrefix[prefix] ?: continue
+                for (id in ids) result[id] = rs
             }
             result
         }

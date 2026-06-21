@@ -50,9 +50,9 @@ fun SignalChatScreen(jid: String, onContact: (phone: String, name: String) -> Un
             NotificationHelper.cancelForConversation(context, jid)
             scope.launch { repo.markRead(jid, messages.filter { !it.isFromMe }.map { it.id }) }
         },
-        onReact = { messageId, senderJid, emoji ->
-            scope.launch { try { repo.sendReaction(jid, messageId, senderJid, emoji) } catch (_: Exception) {} }
-        },
+        // onReact intentionally omitted: Signal reaction-send isn't implemented
+        // yet (SignalRepository.sendReaction is a no-op), so leaving it null hides
+        // the reaction picker instead of presenting a dead control.
         onRetry = { messageId ->
             scope.launch { try { repo.retryMessage(messageId) } catch (_: Exception) {} }
         },
