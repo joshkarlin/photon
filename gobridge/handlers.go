@@ -830,13 +830,19 @@ func (b *Bridge) ResolveGroupParticipants(groupJID string) {
 // and ships the mentioned JIDs in contextInfo; official clients substitute the
 // name on display. Resolution uses the contact store (address-book name, then
 // observed push name); unresolvable mentions are left as the number.
-func (b *Bridge) resolveMentions(msg *waE2E.Message, text string) string {
+func (b *Bridge) resolveMentions(msg *waE2E.Message, convJID, text string) string {
 	ctx := getContextInfo(msg)
 	if ctx == nil {
 		return text
 	}
 	return applyMentions(text, ctx.GetMentionedJID(), func(jid types.JID) string {
 		resolved := b.resolveLIDJID(jid)
+		// Same precedence the sender labels use: the per-conversation participant
+		// name first (so a mention reads identically to that person's label),
+		// then the contact store (address book → observed push name).
+		if name := b.ParticipantName(convJID, resolved.String()); name != "" {
+			return name
+		}
 		name, _ := bestContactName(b.lookupContact(resolved, jid), "")
 		return name
 	})
@@ -868,7 +874,7 @@ func applyMentions(text string, mentionedJIDs []string, nameFor func(types.JID) 
 // later media download), reply context, and media mime type.
 func (b *Bridge) buildMessageRow(msg *waE2E.Message, id, convJID, senderJID string, ts int64, isFromMe bool, status string) *MessageRow {
 	contentType, textBody := classifyMessage(msg)
-	textBody = b.resolveMentions(msg, textBody)
+	textBody = b.resolveMentions(msg, convJID, textBody)
 	rawProto, _ := proto.Marshal(msg)
 
 	var replyToID sql.NullString

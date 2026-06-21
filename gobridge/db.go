@@ -310,6 +310,18 @@ func (b *Bridge) UpsertParticipant(convJID, jid, displayName, role string) error
 	return err
 }
 
+// ParticipantName returns a participant's stored display name in a conversation
+// (the value that drives the per-message sender label), or "" if absent/blank.
+// Reused by mention resolution so a mention reads identically to the label.
+func (b *Bridge) ParticipantName(convJID, jid string) string {
+	var name string
+	b.msgDB.QueryRow(
+		`SELECT COALESCE(display_name, '') FROM participants WHERE conversation_jid = ? AND jid = ?`,
+		convJID, jid,
+	).Scan(&name)
+	return name
+}
+
 // purgeNumberPlaceholders removes participant rows whose display_name is a bare
 // "+<digits>" phone number — placeholders an earlier build wrote when no real
 // name was known, which then shadowed real push/contact names. The GLOB matches
