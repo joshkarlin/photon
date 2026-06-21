@@ -45,6 +45,26 @@ class SignalMessageDatabaseTest {
     }
 
     /**
+     * The blank-group-name repair must target only groups that are actually
+     * blank AND have a master key to re-fetch with — never named groups, never
+     * keyless ones. (Restores titles wiped by the old reresolve bug.)
+     */
+    @Test
+    fun getGroupsWithBlankNameAndMasterKey_selectsOnlyRepairableGroups() {
+        val mk = ByteArray(32) { 1 }
+        db.upsertConversation(jid = "blankGroup", name = null, isGroup = true)
+        db.updateGroupMeta("blankGroup", mk, 5)
+        db.upsertConversation(jid = "namedGroup", name = "Frothers Utd", isGroup = true)
+        db.updateGroupMeta("namedGroup", mk, 5)
+        db.upsertConversation(jid = "keylessGroup", name = null, isGroup = true)
+
+        val repairable = db.getGroupsWithBlankNameAndMasterKey()
+
+        assertEquals(listOf("blankGroup"), repairable.map { it.first })
+        assertEquals(32, repairable.single().second.size)
+    }
+
+    /**
      * An incoming reaction is stored under the suffix-less "{author}_{ts}"
      * prefix; it must attach to the full message id "{author}_{ts}_{rand}" so it
      * actually renders. (Previously joined on the full id and never matched.)

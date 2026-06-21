@@ -592,6 +592,28 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     /**
+     * Groups whose display name is blank/null but for which we hold a master
+     * key — i.e. the title was never resolved or was wiped (the old reresolve
+     * bug). Returned with the master key so the caller can re-fetch the real
+     * title from group state. Without this, the UI shows the base64 group id.
+     */
+    fun getGroupsWithBlankNameAndMasterKey(): List<Pair<String, ByteArray>> {
+        val out = mutableListOf<Pair<String, ByteArray>>()
+        readableDatabase.rawQuery(
+            "SELECT jid, master_key FROM conversations " +
+                "WHERE is_group = 1 AND (name IS NULL OR name = '') AND master_key IS NOT NULL",
+            null,
+        ).use { c ->
+            while (c.moveToNext()) {
+                val jid = c.getString(0)
+                val mk = if (c.isNull(1)) null else c.getBlob(1)
+                if (mk != null && mk.size == 32) out.add(jid to mk)
+            }
+        }
+        return out
+    }
+
+    /**
      * Repair last_timestamp on every conversation whose row is desynced from
      * the messages table — sets it to MAX(messages.timestamp) where the
      * conversation has any messages stored. Idempotent; safe to run on every

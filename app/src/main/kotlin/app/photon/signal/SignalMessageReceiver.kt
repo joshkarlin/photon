@@ -265,6 +265,25 @@ class SignalMessageReceiver(
             }
         }
 
+        // Repair group titles that are blank/null (e.g. wiped by the old
+        // reresolve bug, which nulled groups since they have no contact row).
+        // Set a non-base64 placeholder immediately so the UI never shows the raw
+        // group id, then re-fetch the real title from group state.
+        scope.launch {
+            try {
+                val blanks = messageDb.getGroupsWithBlankNameAndMasterKey()
+                if (blanks.isNotEmpty()) {
+                    Log.i(TAG, "Repairing ${blanks.size} blank group name(s)")
+                    blanks.forEach { (jid, masterKey) ->
+                        messageDb.upsertConversation(jid = jid, name = PLACEHOLDER_GROUP_NAME, isGroup = true)
+                        resolveGroupMetadata(jid, masterKey)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Group name repair failed: ${e.message}")
+            }
+        }
+
         // Send a NullMessage to each contact we already have message history
         // with. Without this, those contacts' apps don't know our deviceId=3
         // exists and won't include us in their encrypted recipient list, so

@@ -27,7 +27,10 @@ fun SignalChatScreen(jid: String, onContact: (phone: String, name: String) -> Un
     val convs by repo.conversations.collectAsState()
     val conversation = convs?.firstOrNull { it.jid == jid } ?: remember(jid) { repo.getConversation(jid) }
     val isGroup = conversation?.isGroup ?: false
-    val title = conversation?.name?.takeIf { it.isNotBlank() } ?: jid.take(8) + "..."
+    // Never fall back to the raw base64 group id; a blank group title shows a
+    // readable placeholder until the real title is re-fetched.
+    val title = conversation?.name?.takeIf { it.isNotBlank() }
+        ?: if (isGroup) "Signal group" else jid.take(8) + "..."
     var viewingMedia by remember { mutableStateOf<Message?>(null) }
     // Participant names are written by the receiver as group messages come
     // in. Re-read on every conversation update so a new sender's name shows
