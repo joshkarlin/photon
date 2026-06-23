@@ -4,6 +4,7 @@ import android.util.Log
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.store.PhotonProtocolStore
 import org.signal.core.models.ServiceId
+import org.signal.libsignal.protocol.message.DecryptionErrorMessage
 import org.whispersystems.signalservice.api.SignalServiceAccountDataStore
 import org.whispersystems.signalservice.api.SignalServiceDataStore
 import org.whispersystems.signalservice.api.SignalServiceMessageSender
@@ -571,6 +572,54 @@ class SignalMessageSender(
             true
         } catch (e: Exception) {
             Log.w(TAG, "sendSessionPing failed for $aci: ${e.javaClass.simpleName}: ${e.message}")
+            invalidate()
+            false
+        }
+    }
+
+    /**
+     * Ask the sender to retry a message we could not decrypt. This is
+     * especially important for group sender-key messages: if Photon missed
+     * or previously discarded the sender-key distribution, the next group
+     * ciphertext will fail until the sender is told which local device
+     * needs a resend.
+     */
+    fun sendRetryReceiptForDecryptionFailure(
+        senderServiceId: String,
+        senderDeviceId: Int,
+        groupId: ByteArray?,
+        originalContent: ByteArray,
+        originalType: Int,
+        originalTimestamp: Long,
+    ): Boolean {
+        return try {
+            val serviceId = ServiceId.parseOrNull(senderServiceId)
+                ?: throw IllegalArgumentException("Invalid sender service id: $senderServiceId")
+            val error = DecryptionErrorMessage.forOriginalMessage(
+                originalContent,
+                originalType,
+                originalTimestamp,
+                credentials.deviceId,
+            )
+            getOrCreateSender().sendRetryReceipt(
+                SignalServiceAddress(serviceId),
+                null,
+                Optional.ofNullable(groupId),
+                error,
+            )
+            Log.i(
+                TAG,
+                "Sent retry receipt to ${senderServiceId.take(8)}… " +
+                    "senderDevice=$senderDeviceId localDevice=${credentials.deviceId} " +
+                    "type=$originalType group=${groupId != null}",
+            )
+            true
+        } catch (e: Exception) {
+            Log.w(
+                TAG,
+                "sendRetryReceipt failed for ${senderServiceId.take(8)}…: " +
+                    "${e.javaClass.simpleName}: ${e.message}",
+            )
             invalidate()
             false
         }

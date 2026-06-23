@@ -18,11 +18,18 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import org.signal.core.models.ServiceId
+import org.signal.libsignal.metadata.ProtocolDuplicateMessageException
+import org.signal.libsignal.metadata.ProtocolException
 import org.signal.libsignal.metadata.certificate.CertificateValidator
+import org.signal.libsignal.protocol.SignalProtocolAddress
 import org.signal.libsignal.protocol.ecc.ECPublicKey
+import org.signal.libsignal.protocol.groups.GroupSessionBuilder
+import org.signal.libsignal.protocol.message.CiphertextMessage
+import org.signal.libsignal.protocol.message.SenderKeyDistributionMessage
 import org.whispersystems.signalservice.api.SignalServiceMessageReceiver
 import org.whispersystems.signalservice.api.crypto.AttachmentCipherInputStream
 import org.whispersystems.signalservice.api.crypto.EnvelopeMetadata
+import org.whispersystems.signalservice.api.crypto.SignalGroupSessionBuilder
 import org.whispersystems.signalservice.api.crypto.SignalServiceCipher
 import org.whispersystems.signalservice.api.messages.EnvelopeResponse
 import org.whispersystems.signalservice.api.messages.multidevice.DeviceContactsInputStream
@@ -31,6 +38,7 @@ import org.whispersystems.signalservice.api.util.AttachmentPointerUtil
 import org.whispersystems.signalservice.api.websocket.SignalWebSocket
 import org.whispersystems.signalservice.internal.push.AttachmentPointer
 import org.whispersystems.signalservice.internal.push.DataMessage
+import org.whispersystems.signalservice.internal.push.Envelope
 import org.whispersystems.signalservice.internal.push.SyncMessage
 import java.io.File
 import java.util.UUID
@@ -62,6 +70,10 @@ class SignalMessageReceiver(
     private val config = SignalConfig.createConfiguration()
     private val contactResolver = AndroidContactResolver(context)
     private val sessionLock = SignalConfig.newSessionLock()
+    private val senderKeySessionBuilder = SignalGroupSessionBuilder(
+        sessionLock,
+        GroupSessionBuilder(protocolStore),
+    )
 
     private val _state = MutableStateFlow("disconnected")
     val state: StateFlow<String> = _state
@@ -509,19 +521,38 @@ class SignalMessageReceiver(
                 "hasData=${content.dataMessage != null}, " +
                 "hasSync=${content.syncMessage != null}, " +
                 "hasReceipt=${content.receiptMessage != null}, " +
-                "hasTyping=${content.typingMessage != null}")
+                "hasTyping=${content.typingMessage != null}, " +
+                "hasSenderKeyDistribution=${content.senderKeyDistributionMessage != null}")
+
+            content.senderKeyDistributionMessage?.let {
+                processSenderKeyDistribution(it.toByteArray(), metadata)
+            }
 
             when {
                 content.dataMessage != null -> processDataMessage(content.dataMessage!!, metadata)
                 content.syncMessage != null -> processSyncMessage(content.syncMessage!!, metadata)
                 content.receiptMessage != null -> processReceipt(content.receiptMessage!!, metadata)
                 content.typingMessage != null -> {} // ignore
+                content.senderKeyDistributionMessage != null -> {} // already stored above
                 else -> Log.d(TAG, "Unhandled content type")
             }
 
             ws.sendAck(envelopeResponse)
         } catch (e: org.signal.libsignal.metadata.SelfSendException) {
             Log.d(TAG, "Self-send exception (normal for sync), acking")
+            ws.sendAck(envelopeResponse)
+        } catch (e: ProtocolDuplicateMessageException) {
+            Log.d(TAG, "Duplicate message, acking")
+            ws.sendAck(envelopeResponse)
+        } catch (e: ProtocolException) {
+            val env = envelopeResponse.envelope
+            Log.w(
+                TAG,
+                "Protocol decrypt failed (type=${env.type}, sender=${e.sender}, " +
+                    "senderDevice=${e.senderDevice}, clientTs=${env.clientTimestamp}): " +
+                    "${e.javaClass.simpleName}: ${e.message}",
+            )
+            maybeSendRetryReceipt(e, envelopeResponse)
             ws.sendAck(envelopeResponse)
         } catch (e: org.signal.libsignal.protocol.DuplicateMessageException) {
             Log.d(TAG, "Duplicate message, acking")
@@ -538,6 +569,86 @@ class SignalMessageReceiver(
             )
             try { ws.sendAck(envelopeResponse) } catch (_: Exception) {}
         }
+    }
+
+    private fun processSenderKeyDistribution(serialized: ByteArray, metadata: EnvelopeMetadata) {
+        if (serialized.isEmpty()) {
+            Log.w(TAG, "Ignoring empty sender-key distribution from ${metadata.sourceServiceId}")
+            return
+        }
+        try {
+            val distribution = SenderKeyDistributionMessage(serialized)
+            val senderAddress = SignalProtocolAddress(
+                metadata.sourceServiceId.toString(),
+                metadata.sourceDeviceId,
+            )
+            senderKeySessionBuilder.process(senderAddress, distribution)
+            Log.i(
+                TAG,
+                "Stored sender-key distribution from ${metadata.sourceServiceId.toString().take(8)}… " +
+                    "device=${metadata.sourceDeviceId} distribution=${distribution.distributionId}",
+            )
+        } catch (e: Exception) {
+            Log.w(
+                TAG,
+                "Failed to store sender-key distribution from ${metadata.sourceServiceId}: " +
+                    "${e.javaClass.simpleName}: ${e.message}",
+            )
+        }
+    }
+
+    private fun maybeSendRetryReceipt(error: ProtocolException, envelopeResponse: EnvelopeResponse) {
+        if (!shouldSendRetryReceipt(error)) return
+
+        val env = envelopeResponse.envelope
+        val unidentified = error.unidentifiedSenderMessageContent.orElse(null)
+        val originalContent = unidentified?.content ?: env.content?.toByteArray()
+        if (originalContent == null || originalContent.isEmpty()) {
+            Log.w(TAG, "Skipping retry receipt: no original ciphertext for ${error.sender}")
+            return
+        }
+
+        val originalType = unidentified?.type ?: ciphertextTypeForEnvelope(env.type)
+        if (originalType == null) {
+            Log.w(TAG, "Skipping retry receipt: unsupported envelope type ${env.type}")
+            return
+        }
+
+        val sender = error.sender.takeIf { it.isNotBlank() } ?: env.sourceServiceId
+        if (sender.isNullOrBlank()) {
+            Log.w(TAG, "Skipping retry receipt: missing sender")
+            return
+        }
+
+        val timestamp = env.clientTimestamp ?: env.serverTimestamp ?: System.currentTimeMillis()
+        val groupId = unidentified?.groupId?.orElse(null) ?: error.groupId.orElse(null)
+        val sent = app.photon.service.PhotonService._signalSender?.sendRetryReceiptForDecryptionFailure(
+            senderServiceId = sender,
+            senderDeviceId = error.senderDevice,
+            groupId = groupId,
+            originalContent = originalContent,
+            originalType = originalType,
+            originalTimestamp = timestamp,
+        ) ?: false
+        if (!sent) {
+            Log.w(TAG, "Retry receipt not sent for failed decrypt from ${sender.take(8)}…")
+        }
+    }
+
+    private fun shouldSendRetryReceipt(error: ProtocolException): Boolean = when (error) {
+        is org.signal.libsignal.metadata.ProtocolNoSessionException,
+        is org.signal.libsignal.metadata.ProtocolInvalidMessageException,
+        is org.signal.libsignal.metadata.ProtocolInvalidKeyIdException,
+        is org.signal.libsignal.metadata.ProtocolInvalidKeyException,
+        is org.signal.libsignal.metadata.ProtocolInvalidVersionException -> true
+        else -> false
+    }
+
+    private fun ciphertextTypeForEnvelope(type: Envelope.Type?): Int? = when (type) {
+        Envelope.Type.DOUBLE_RATCHET -> CiphertextMessage.WHISPER_TYPE
+        Envelope.Type.PREKEY_MESSAGE -> CiphertextMessage.PREKEY_TYPE
+        Envelope.Type.PLAINTEXT_CONTENT -> CiphertextMessage.PLAINTEXT_CONTENT_TYPE
+        else -> null
     }
 
     /**
