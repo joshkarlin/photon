@@ -251,7 +251,7 @@ func (b *Bridge) markMessageFailed(jid, id string) {
 // correctly relative to messages that arrived during the send.
 func (b *Bridge) markMessageSent(jid, id string, ts int64) {
 	b.UpdateMessageStatusAndTimestamp(id, "sent", ts)
-	b.UpsertConversation(jid, "", false, id, ts)
+	b.UpsertConversation(jid, "", strings.HasSuffix(jid, "@"+types.GroupServer), id, ts)
 	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
 		ConversationJID: jid, MessageID: id,
 	})
@@ -323,7 +323,7 @@ func (b *Bridge) SendTextMessage(ctx context.Context, jid string, text string, r
 		IsFromMe:        true,
 		Status:          "sending",
 	})
-	b.UpsertConversation(jid, "", false, id, ts)
+	b.UpsertConversation(jid, "", targetJID.Server == types.GroupServer, id, ts)
 	b.BroadcastEvent("new_message", NewMessageEvent{
 		ConversationJID: jid, MessageID: id, TextBody: text,
 		ContentType: "text", IsFromMe: true,

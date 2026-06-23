@@ -116,10 +116,12 @@ func (b *Bridge) UpsertConversation(jid, name string, isGroup bool, lastMsgID st
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(jid) DO UPDATE SET
 			name = COALESCE(NULLIF(excluded.name, ''), conversations.name),
-			-- is_group is now classified authoritatively (by JID server) at every
-			-- call site, so let it overwrite. The old sticky-on-true made any
-			-- earlier misclassification permanent.
-			is_group = excluded.is_group,
+			-- Only a row carrying a name is an authoritative classification (the
+			-- incoming/history/merge paths). A nameless upsert is just a preview
+			-- bump from the send/confirm path, which must never reclassify — it
+			-- once flipped a group to is_group=0 and switched the chat to DM view.
+			-- RepairConversationMetadata fixes any stale classification by JID.
+			is_group = CASE WHEN NULLIF(excluded.name, '') IS NULL THEN conversations.is_group ELSE excluded.is_group END,
 			last_message_id = CASE WHEN excluded.last_timestamp > conversations.last_timestamp THEN excluded.last_message_id ELSE conversations.last_message_id END,
 			last_timestamp = MAX(excluded.last_timestamp, conversations.last_timestamp),
 			updated_at = excluded.updated_at

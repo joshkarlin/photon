@@ -116,7 +116,7 @@ func (b *Bridge) UploadAndSend(jid, filePath, mimeType, caption, replyToID strin
 		IsFromMe:        true,
 		Status:          "sending",
 	})
-	b.UpsertConversation(jid, "", false, id, ts)
+	b.UpsertConversation(jid, "", targetJID.Server == types.GroupServer, id, ts)
 	b.BroadcastEvent("new_message", NewMessageEvent{
 		ConversationJID: jid, MessageID: id, TextBody: caption,
 		ContentType: contentType, IsFromMe: true,

@@ -219,6 +219,23 @@ func TestUpsertConversation_isGroupOverwrites(t *testing.T) {
 	}
 }
 
+func TestUpsertConversation_namelessBumpKeepsIsGroup(t *testing.T) {
+	b := newTestBridge(t)
+	// A group, correctly classified by an incoming/history upsert (carries a name).
+	b.UpsertConversation("123-456@g.us", "Frothers Utd", true, "m1", 1000)
+
+	// Sending into the group bumps the preview with a nameless upsert. This must
+	// NOT reclassify the group as a DM — the bug switched the chat to DM view the
+	// instant the user sent a message.
+	b.UpsertConversation("123-456@g.us", "", false, "m2", 2000)
+
+	var isGroup int
+	b.msgDB.QueryRow(`SELECT is_group FROM conversations WHERE jid='123-456@g.us'`).Scan(&isGroup)
+	if isGroup != 1 {
+		t.Errorf("is_group = %d, want 1 (nameless preview bump must not reclassify)", isGroup)
+	}
+}
+
 func TestRepairConversationMetadata(t *testing.T) {
 	b := newTestBridge(t)
 	// A group misclassified as a DM, with a stale-old preview timestamp set from
