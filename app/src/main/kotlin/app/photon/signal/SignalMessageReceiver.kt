@@ -94,6 +94,12 @@ class SignalMessageReceiver(
         scope.launch {
             try { messageDb.repairConversationTimestamps() }
             catch (e: Exception) { Log.w(TAG, "Timestamp repair failed: ${e.message}") }
+            // Clean up duplicate rows a pre-dedup build stored when a Signal
+            // message was redelivered (one group message landed 36 times).
+            try {
+                val removed = messageDb.deleteDuplicateMessages()
+                if (removed > 0) Log.i(TAG, "Removed $removed duplicate message rows")
+            } catch (e: Exception) { Log.w(TAG, "Duplicate cleanup failed: ${e.message}") }
             // One-shot migration: clear primary-device-sourced names and
             // re-resolve every conversation title from this device's local
             // contacts. Idempotent past first run via the prefs flag.
@@ -754,8 +760,15 @@ class SignalMessageReceiver(
             senderAci
         }
 
-        // Unique message ID: use sender + timestamp + random suffix for collision resistance
-        val messageId = "${senderAci}_${timestamp}_${UUID.randomUUID().toString().take(8)}"
+        // Stable identity of a Signal message is (author, sentTimestamp); the
+        // "_{rand}" suffix only makes the local PK unique. The same message can
+        // be delivered more than once — the sender resends after our retry
+        // receipt / sender-key redistribution, and the server can redeliver an
+        // un-acked envelope — so dedupe on the stable prefix before inserting.
+        // Without this each redelivery minted a fresh random id and stored a
+        // duplicate row (one group message arrived 36 times).
+        val messagePrefix = "${senderAci}_${timestamp}"
+        val messageId = "${messagePrefix}_${UUID.randomUUID().toString().take(8)}"
 
         // Seed group metadata BEFORE the body-vs-sticker early-return below.
         // Many in-group messages have no body or sticker (sender-key
@@ -822,6 +835,14 @@ class SignalMessageReceiver(
             }
         } else {
             messageDb.upsertConversation(jid = conversationJid, name = senderName, isGroup = false)
+        }
+
+        // Drop redeliveries: if we already stored this (author, timestamp),
+        // skip the insert and all of its side effects (unread bump, notify) so
+        // a resent message doesn't appear N times or inflate the unread count.
+        if (messageDb.findMessageByPrefix(messagePrefix) != null) {
+            Log.d(TAG, "Skipping duplicate incoming message $messagePrefix")
+            return
         }
 
         messageDb.insertMessage(
@@ -906,7 +927,12 @@ class SignalMessageReceiver(
             val data = sent.message!!
             val timestamp = data.timestamp ?: System.currentTimeMillis()
             val myAci = credentials.aciString ?: return
-            val messageId = "${myAci}_${timestamp}_${UUID.randomUUID().toString().take(8)}"
+            // Same (author, timestamp) dedupe as incoming data messages: a sent
+            // transcript can be redelivered, and the random suffix would
+            // otherwise store a duplicate of our own outgoing message.
+            val messagePrefix = "${myAci}_${timestamp}"
+            val messageId = "${messagePrefix}_${UUID.randomUUID().toString().take(8)}"
+            val alreadyStored = messageDb.findMessageByPrefix(messagePrefix) != null
 
             // Group case: route into the group conversation regardless of
             // destinationServiceId (which is unset for group sends from the
@@ -922,7 +948,7 @@ class SignalMessageReceiver(
 
                     val body = data.body
                     val attachment = data.attachments.firstOrNull()
-                    if (body != null || attachment != null) {
+                    if ((body != null || attachment != null) && !alreadyStored) {
                         messageDb.insertMessage(
                             id = messageId,
                             conversationJid = convJid,
@@ -970,7 +996,7 @@ class SignalMessageReceiver(
 
             val body = data.body
             val attachment = data.attachments.firstOrNull()
-            if (body != null || attachment != null) {
+            if ((body != null || attachment != null) && !alreadyStored) {
                 // Capture destination phone and profile key so profile fetch can find names.
                 sent.destinationE164?.let { messageDb.updateContactPhone(destinationAci, it) }
                 val syncProfileKey = data.profileKey?.toByteArray()

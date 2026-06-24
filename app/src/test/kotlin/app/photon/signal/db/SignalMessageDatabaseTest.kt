@@ -149,6 +149,38 @@ class SignalMessageDatabaseTest {
     }
 
     /**
+     * A Signal message redelivered N times (sender resends after our retry
+     * receipt; server redelivers un-acked envelopes) must collapse to one row.
+     * Rows share the stable "{author}_{timestampMs}" prefix and differ only by
+     * the random suffix, so the cleanup keys on that prefix. Distinct messages
+     * (different timestamp) are preserved.
+     */
+    @Test
+    fun deleteDuplicateMessages_collapsesSamePrefixKeepsDistinct() {
+        db.upsertConversation(jid = "grp", name = "Group", isGroup = true)
+        // Same (author, timestamp) delivered three times — three random suffixes.
+        listOf("abc", "def", "ghi").forEach { rand ->
+            db.insertMessage(
+                id = "aci_1700_$rand", conversationJid = "grp", senderJid = "aci",
+                timestamp = 1700, contentType = "text", textBody = "hello",
+            )
+        }
+        // A genuinely different message (different timestamp) must survive.
+        db.insertMessage(
+            id = "aci_1800_xyz", conversationJid = "grp", senderJid = "aci",
+            timestamp = 1800, contentType = "text", textBody = "world",
+        )
+
+        val removed = db.deleteDuplicateMessages()
+
+        assertEquals(2, removed)
+        val msgs = db.getMessages("grp")
+        assertEquals(2, msgs.size)
+        // getMessages orders newest-first (timestamp DESC).
+        assertEquals(listOf("world", "hello"), msgs.map { it.textBody })
+    }
+
+    /**
      * Session pings must target group-only members too. Otherwise Photon can
      * send into a GroupV2 conversation but never receive other members'
      * messages because their clients have not established a session with this

@@ -331,6 +331,37 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         notifyChanged()
     }
 
+    /**
+     * Collapse duplicate rows sharing the same "{author}_{timestampMs}" id
+     * prefix, keeping the earliest-inserted (lowest rowid). (author, sent
+     * timestamp) uniquely identifies a Signal message, so any extra rows are
+     * redeliveries a pre-dedup build stored — one group message arrived 36
+     * times. Returns the number of rows removed.
+     */
+    fun deleteDuplicateMessages(): Int {
+        val seen = HashSet<String>()
+        val toDelete = ArrayList<String>()
+        readableDatabase.rawQuery("SELECT id FROM messages ORDER BY rowid", null).use { c ->
+            val idIdx = c.getColumnIndexOrThrow("id")
+            while (c.moveToNext()) {
+                val id = c.getString(idIdx)
+                if (!seen.add(MessageKeys.prefixOf(id))) toDelete.add(id)
+            }
+        }
+        if (toDelete.isEmpty()) return 0
+        writableDatabase.beginTransaction()
+        try {
+            for (id in toDelete) {
+                writableDatabase.execSQL("DELETE FROM messages WHERE id = ?", arrayOf(id))
+            }
+            writableDatabase.setTransactionSuccessful()
+        } finally {
+            writableDatabase.endTransaction()
+        }
+        notifyChanged()
+        return toDelete.size
+    }
+
     /** Remove a message and its reactions from the local DB. */
     fun deleteMessage(id: String) {
         writableDatabase.execSQL("DELETE FROM messages WHERE id = ?", arrayOf(id))
