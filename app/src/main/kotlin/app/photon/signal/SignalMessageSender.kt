@@ -595,11 +595,17 @@ class SignalMessageSender(
         return try {
             val serviceId = ServiceId.parseOrNull(senderServiceId)
                 ?: throw IllegalArgumentException("Invalid sender service id: $senderServiceId")
+            // The device id here is originalSenderDeviceId — the remote member's
+            // device that sent the message we failed to decrypt, NOT our own
+            // device. The sender keys its Message Send Log lookup on (its own
+            // sending device id + timestamp); passing our linked-device id makes
+            // that lookup miss, so it never re-distributes the sender key and the
+            // retry silently no-ops.
             val error = DecryptionErrorMessage.forOriginalMessage(
                 originalContent,
                 originalType,
                 originalTimestamp,
-                credentials.deviceId,
+                senderDeviceId,
             )
             getOrCreateSender().sendRetryReceipt(
                 SignalServiceAddress(serviceId),
