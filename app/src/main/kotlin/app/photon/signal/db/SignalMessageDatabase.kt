@@ -811,6 +811,63 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         notifyChanged()
     }
 
+    /**
+     * Apply a read sync from another linked device to the matching incoming
+     * message. SyncMessage.read carries the author + timestamp, while local
+     * message ids add a random suffix. Return the affected conversation JIDs
+     * so the caller can clear only the relevant notifications.
+     */
+    fun markIncomingReadByPrefix(prefix: String): List<String> {
+        val lowerBound = "${prefix}_"
+        val upperBound = "${prefix}_\uFFFF"
+        val affected = linkedMapOf<String, Int>()
+        val db = writableDatabase
+
+        db.beginTransaction()
+        try {
+            db.rawQuery(
+                """
+                SELECT conversation_jid, COUNT(*)
+                  FROM messages
+                 WHERE id >= ? AND id < ?
+                   AND is_from_me = 0
+                   AND status != 'read'
+                 GROUP BY conversation_jid
+                """,
+                arrayOf(lowerBound, upperBound),
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    affected[cursor.getString(0)] = cursor.getInt(1)
+                }
+            }
+
+            if (affected.isNotEmpty()) {
+                db.execSQL(
+                    """
+                    UPDATE messages
+                       SET status = 'read'
+                     WHERE id >= ? AND id < ?
+                       AND is_from_me = 0
+                       AND status != 'read'
+                    """,
+                    arrayOf(lowerBound, upperBound),
+                )
+                for ((jid, count) in affected) {
+                    db.execSQL(
+                        "UPDATE conversations SET unread_count = MAX(0, unread_count - ?) WHERE jid = ?",
+                        arrayOf<Any?>(count, jid),
+                    )
+                }
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+
+        if (affected.isNotEmpty()) notifyChanged()
+        return affected.keys.toList()
+    }
+
     fun getReactions(messageIds: List<String>): Map<String, List<Reaction>> {
         if (messageIds.isEmpty()) return emptyMap()
         // Reactions are stored under the suffix-less "{author}_{timestampMs}"

@@ -1042,16 +1042,18 @@ class SignalMessageReceiver(
             Log.d(TAG, "Stored sync sent message to $destinationAci")
         }
 
-        // Read receipts from primary — mark conversations as read AND clear our
-        // local notification so the banner disappears as soon as the user reads
-        // the message elsewhere, not only when they open the chat in Photon.
+        // Read receipts from primary — mark the matching messages as read AND
+        // clear their local notifications so the banner disappears as soon as
+        // the user reads elsewhere, not only when they open the chat in Photon.
         val reads = sync.read
         if (!reads.isNullOrEmpty()) {
             for (read in reads) {
                 val senderAci = read.senderAci
                 if (senderAci != null) {
-                    messageDb.resetUnread(senderAci)
-                    app.photon.service.NotificationHelper.cancelForConversation(context, senderAci)
+                    val conversations = messageDb.markIncomingReadByPrefix("${senderAci}_${read.timestamp}")
+                    conversations.forEach { conversationJid ->
+                        app.photon.service.NotificationHelper.cancelForConversation(context, conversationJid)
+                    }
                 }
             }
         }

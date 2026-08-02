@@ -148,6 +148,71 @@ class SignalMessageDatabaseTest {
         assertEquals("deleted", msg.status)
     }
 
+    @Test
+    fun markIncomingReadByPrefix_marksOnlyMatchingDmMessageAndDecrementsUnread() {
+        val aci = "read-dm-aci"
+        db.upsertConversation(jid = aci, name = "Alice", isGroup = false)
+        db.insertMessage(
+            id = "${aci}_1700_abc", conversationJid = aci, senderJid = aci,
+            timestamp = 1700, contentType = "text", textBody = "first",
+        )
+        db.insertMessage(
+            id = "${aci}_1800_def", conversationJid = aci, senderJid = aci,
+            timestamp = 1800, contentType = "text", textBody = "second",
+        )
+        db.incrementUnread(aci)
+        db.incrementUnread(aci)
+
+        val affected = db.markIncomingReadByPrefix("${aci}_1700")
+
+        assertEquals(listOf(aci), affected)
+        assertEquals("read", db.getMessage("${aci}_1700_abc")?.status)
+        assertEquals("received", db.getMessage("${aci}_1800_def")?.status)
+        assertEquals(1, db.getConversation(aci)?.unreadCount)
+    }
+
+    @Test
+    fun markIncomingReadByPrefix_resolvesGroupConversationAndIsIdempotent() {
+        val group = "read-group"
+        val author = "read-group-author"
+        db.upsertConversation(jid = group, name = "Group", isGroup = true)
+        db.insertMessage(
+            id = "${author}_1700_abc", conversationJid = group, senderJid = author,
+            timestamp = 1700, contentType = "text", textBody = "first",
+        )
+        db.insertMessage(
+            id = "${author}_1800_def", conversationJid = group, senderJid = author,
+            timestamp = 1800, contentType = "text", textBody = "second",
+        )
+        db.incrementUnread(group)
+        db.incrementUnread(group)
+
+        val first = db.markIncomingReadByPrefix("${author}_1700")
+        val duplicate = db.markIncomingReadByPrefix("${author}_1700")
+
+        assertEquals(listOf(group), first)
+        assertEquals(emptyList(), duplicate)
+        assertEquals("read", db.getMessage("${author}_1700_abc")?.status)
+        assertEquals("received", db.getMessage("${author}_1800_def")?.status)
+        assertEquals(1, db.getConversation(group)?.unreadCount)
+    }
+
+    @Test
+    fun markIncomingReadByPrefix_doesNotChangeOutgoingMessage() {
+        val aci = "read-outgoing-aci"
+        db.upsertConversation(jid = aci, name = "Alice", isGroup = false)
+        db.insertMessage(
+            id = "${aci}_1700_abc", conversationJid = aci, senderJid = "me",
+            timestamp = 1700, contentType = "text", textBody = "sent",
+            isFromMe = true, status = "sent",
+        )
+
+        val affected = db.markIncomingReadByPrefix("${aci}_1700")
+
+        assertEquals(emptyList(), affected)
+        assertEquals("sent", db.getMessage("${aci}_1700_abc")?.status)
+    }
+
     /**
      * A Signal message redelivered N times (sender resends after our retry
      * receipt; server redelivers un-acked envelopes) must collapse to one row.
