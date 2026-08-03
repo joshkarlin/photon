@@ -202,6 +202,65 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     /**
+     * Mark all incoming messages in a conversation read and clear its unread
+     * count. A primary-device sent transcript is evidence that the user has
+     * seen that conversation, even when the corresponding sync.read arrives
+     * late or is not delivered to this linked device.
+     *
+     * Outgoing rows are intentionally untouched: their status is used for
+     * delivery/read state and they are not part of the unread calculation.
+     */
+    fun markConversationRead(jid: String): Int {
+        val db = writableDatabase
+        var incomingChanged = 0
+        var unreadCount = 0
+
+        db.beginTransaction()
+        try {
+            db.rawQuery(
+                "SELECT unread_count FROM conversations WHERE jid = ?",
+                arrayOf(jid),
+            ).use { cursor ->
+                if (cursor.moveToFirst()) unreadCount = cursor.getInt(0)
+            }
+            db.rawQuery(
+                """
+                SELECT COUNT(*)
+                  FROM messages
+                 WHERE conversation_jid = ?
+                   AND is_from_me = 0
+                   AND status != 'read'
+                """.trimIndent(),
+                arrayOf(jid),
+            ).use { cursor ->
+                if (cursor.moveToFirst()) incomingChanged = cursor.getInt(0)
+            }
+            if (incomingChanged > 0) {
+                db.execSQL(
+                    """
+                    UPDATE messages
+                       SET status = 'read'
+                     WHERE conversation_jid = ?
+                       AND is_from_me = 0
+                       AND status != 'read'
+                    """.trimIndent(),
+                    arrayOf(jid),
+                )
+            }
+            db.execSQL(
+                "UPDATE conversations SET unread_count = 0 WHERE jid = ?",
+                arrayOf(jid),
+            )
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+
+        if (incomingChanged > 0 || unreadCount > 0) notifyChanged()
+        return incomingChanged
+    }
+
+    /**
      * Persist the GroupV2 metadata on a conversation row. We need the
      * master_key to (re)fetch group state from the server; the revision
      * lets us skip refetches when nothing has changed since we last looked.

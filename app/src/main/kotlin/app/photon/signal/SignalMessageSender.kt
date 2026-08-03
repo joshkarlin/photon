@@ -43,7 +43,57 @@ class SignalMessageSender(
 
     // Lazily initialized, reused across sends
     @Volatile private var sender: SignalServiceMessageSender? = null
-    @Volatile private var authWs: SignalWebSocket.AuthenticatedWebSocket? = null
+    // Signal permits one authenticated chat WebSocket per linked device. The
+    // receiver owns the long-lived sockets when it is running; creating a
+    // second authenticated socket here causes the receiver socket to be
+    // closed by the service, which looks like a receive failure.
+    @Volatile private var receiverAuthWs: SignalWebSocket.AuthenticatedWebSocket? = null
+    @Volatile private var receiverUnauthWs: SignalWebSocket.UnauthenticatedWebSocket? = null
+    private var ownedAuthWs: SignalWebSocket.AuthenticatedWebSocket? = null
+    private var ownedUnauthWs: SignalWebSocket.UnauthenticatedWebSocket? = null
+
+    /**
+     * Reuse the receiver's sockets for sends, sync requests, and key APIs.
+     * This keeps one authenticated connection per linked device. The receiver
+     * remains responsible for connecting and disconnecting these instances.
+     */
+    fun attachReceiverWebSockets(
+        authWs: SignalWebSocket.AuthenticatedWebSocket,
+        unauthWs: SignalWebSocket.UnauthenticatedWebSocket,
+    ) {
+        var oldOwnedAuth: SignalWebSocket.AuthenticatedWebSocket? = null
+        var oldOwnedUnauth: SignalWebSocket.UnauthenticatedWebSocket? = null
+        synchronized(this) {
+            if (receiverAuthWs === authWs && receiverUnauthWs === unauthWs) return
+            oldOwnedAuth = ownedAuthWs
+            oldOwnedUnauth = ownedUnauthWs
+            ownedAuthWs = null
+            ownedUnauthWs = null
+            sender = null
+            receiverAuthWs = authWs
+            receiverUnauthWs = unauthWs
+        }
+        // These are only sockets created by this sender. Never disconnect the
+        // receiver-owned sockets during an attachment or an invalidation.
+        try { oldOwnedAuth?.disconnect() } catch (_: Exception) {}
+        try { oldOwnedUnauth?.disconnect() } catch (_: Exception) {}
+        Log.i(TAG, "Attached sender to receiver-owned Signal WebSockets")
+    }
+
+    /** Clear only the receiver socket pair being stopped or replaced. */
+    fun detachReceiverWebSockets(
+        authWs: SignalWebSocket.AuthenticatedWebSocket?,
+        unauthWs: SignalWebSocket.UnauthenticatedWebSocket?,
+    ) {
+        if (authWs == null && unauthWs == null) return
+        synchronized(this) {
+            if (receiverAuthWs === authWs || receiverUnauthWs === unauthWs) {
+                receiverAuthWs = null
+                receiverUnauthWs = null
+                sender = null
+            }
+        }
+    }
 
     private fun getOrCreateSender(): SignalServiceMessageSender {
         sender?.let { return it }
@@ -53,13 +103,21 @@ class SignalMessageSender(
 
             val pushSocket = PushServiceSocket(config, credentials, SignalConfig.USER_AGENT, false)
 
-            val wsFactory = SignalConfig.webSocketFactory(config, "photon-send", credentials)
-            val unauthFactory = SignalConfig.webSocketFactory(config, "photon-send-unauth", null)
-
-            val aws = SignalWebSocket.AuthenticatedWebSocket(wsFactory, { true }, SignalConfig.sleepTimer, 30_000L)
-            val uws = SignalWebSocket.UnauthenticatedWebSocket(unauthFactory, { true }, SignalConfig.sleepTimer, 30_000L)
-            aws.connect()
-            authWs = aws
+            val aws = receiverAuthWs ?: run {
+                val wsFactory = SignalConfig.webSocketFactory(config, "photon-send", credentials)
+                SignalWebSocket.AuthenticatedWebSocket(
+                    wsFactory, { true }, SignalConfig.sleepTimer, 30_000L,
+                ).also {
+                    it.connect()
+                    ownedAuthWs = it
+                }
+            }
+            val uws = receiverUnauthWs ?: run {
+                val unauthFactory = SignalConfig.webSocketFactory(config, "photon-send-unauth", null)
+                SignalWebSocket.UnauthenticatedWebSocket(
+                    unauthFactory, { true }, SignalConfig.sleepTimer, 30_000L,
+                ).also { ownedUnauthWs = it }
+            }
 
             val dataStore = object : SignalServiceDataStore {
                 override fun get(serviceId: ServiceId): SignalServiceAccountDataStore = protocolStore
@@ -729,11 +787,17 @@ class SignalMessageSender(
     }
 
     fun invalidate() {
+        var oldOwnedAuth: SignalWebSocket.AuthenticatedWebSocket? = null
+        var oldOwnedUnauth: SignalWebSocket.UnauthenticatedWebSocket? = null
         synchronized(this) {
-            try { authWs?.disconnect() } catch (_: Exception) {}
-            authWs = null
+            oldOwnedAuth = ownedAuthWs
+            oldOwnedUnauth = ownedUnauthWs
+            ownedAuthWs = null
+            ownedUnauthWs = null
             sender = null
         }
+        try { oldOwnedAuth?.disconnect() } catch (_: Exception) {}
+        try { oldOwnedUnauth?.disconnect() } catch (_: Exception) {}
     }
 
     fun shutdown() {

@@ -213,6 +213,31 @@ class SignalMessageDatabaseTest {
         assertEquals("sent", db.getMessage("${aci}_1700_abc")?.status)
     }
 
+    @Test
+    fun markConversationRead_clearsIncomingUnreadButPreservesOutgoingStatus() {
+        val aci = "transcript-read-aci"
+        db.upsertConversation(jid = aci, name = "Alice", isGroup = false)
+        db.insertMessage(
+            id = "${aci}_1700_in", conversationJid = aci, senderJid = aci,
+            timestamp = 1700, contentType = "text", textBody = "incoming",
+        )
+        db.insertMessage(
+            id = "${aci}_1800_out", conversationJid = aci, senderJid = "me",
+            timestamp = 1800, contentType = "text", textBody = "outgoing",
+            isFromMe = true, status = "delivered",
+        )
+        db.incrementUnread(aci)
+
+        val changed = db.markConversationRead(aci)
+        val duplicate = db.markConversationRead(aci)
+
+        assertEquals(1, changed)
+        assertEquals(0, duplicate)
+        assertEquals("read", db.getMessage("${aci}_1700_in")?.status)
+        assertEquals("delivered", db.getMessage("${aci}_1800_out")?.status)
+        assertEquals(0, db.getConversation(aci)?.unreadCount)
+    }
+
     /**
      * A Signal message redelivered N times (sender resends after our retry
      * receipt; server redelivers un-acked envelopes) must collapse to one row.

@@ -142,8 +142,11 @@ class SignalMessageReceiver(
 
     fun stop() {
         running = false
-        try { webSocket?.disconnect() } catch (_: Exception) {}
-        try { unauthWebSocket?.disconnect() } catch (_: Exception) {}
+        val authWs = webSocket
+        val unauthWs = unauthWebSocket
+        app.photon.service.PhotonService._signalSender?.detachReceiverWebSockets(authWs, unauthWs)
+        try { authWs?.disconnect() } catch (_: Exception) {}
+        try { unauthWs?.disconnect() } catch (_: Exception) {}
         webSocket = null
         unauthWebSocket = null
         profileFetcher = null
@@ -205,6 +208,11 @@ class SignalMessageReceiver(
         unauthWs.connect()
         unauthWs.registerKeepAliveToken("PhotonReceiverUnauth")
         unauthWebSocket = unauthWs
+
+        // Sending sync messages through a second authenticated WebSocket can
+        // cause Signal to close this receiver socket. Share the receiver pair
+        // so reads and sends are multiplexed over one linked-device session.
+        app.photon.service.PhotonService._signalSender?.attachReceiverWebSockets(ws, unauthWs)
 
         // Used by the contacts sync to download the encrypted blob from CDN.
         val ps = PushServiceSocket(config, credentials, SignalConfig.USER_AGENT, false)
@@ -966,6 +974,8 @@ class SignalMessageReceiver(
                         messageDb.updateConversationLastMessage(convJid, messageId, timestamp / 1000)
                         Log.d(TAG, "Stored sync sent message into group ${convJid.take(12)}…")
                     }
+                    messageDb.markConversationRead(convJid)
+                    app.photon.service.NotificationHelper.cancelForConversation(context, convJid)
                     return
                 }
                 Log.w(TAG, "Sync sent has groupV2 but groupManager unavailable; falling through")
@@ -1039,6 +1049,12 @@ class SignalMessageReceiver(
                 )
                 messageDb.updateConversationLastMessage(destinationAci, messageId, timestamp / 1000)
             }
+            // A sent transcript means the user has seen this thread on the
+            // primary. Some primary/device combinations send sync.sent without
+            // the corresponding sync.read, so clear any stale local incoming
+            // unread state as a conservative fallback.
+            messageDb.markConversationRead(destinationAci)
+            app.photon.service.NotificationHelper.cancelForConversation(context, destinationAci)
             Log.d(TAG, "Stored sync sent message to $destinationAci")
         }
 
