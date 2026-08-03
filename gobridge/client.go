@@ -20,9 +20,9 @@ import (
 
 // RetentionConfig controls how long messages and media are kept.
 type RetentionConfig struct {
-	MaxMessages  int   // Max messages per conversation (0 = unlimited)
-	MaxDays      int   // Max age in days (0 = unlimited)
-	MediaTTLMins int   // Minutes before temp media files are deleted
+	MaxMessages  int // Max messages per conversation (0 = unlimited)
+	MaxDays      int // Max age in days (0 = unlimited)
+	MediaTTLMins int // Minutes before temp media files are deleted
 }
 
 // cachedGroupName is a groupNames cache entry; see Bridge.groupName.
@@ -42,6 +42,14 @@ type Bridge struct {
 	conns     []*websocket.Conn
 	retention RetentionConfig
 
+	connectionStateMu sync.RWMutex
+	connectionState   string
+	connectionReason  string
+	reconnectMu       sync.Mutex
+	reconnectNext     time.Time
+	reconnectDelay    time.Duration
+	reconnectPaused   bool
+
 	groupNameMu sync.Mutex
 	groupNames  map[string]cachedGroupName
 }
@@ -49,11 +57,12 @@ type Bridge struct {
 // NewBridge creates a new Bridge instance.
 func NewBridge(client *whatsmeow.Client, msgDB *sql.DB, dataDir string, log waLog.Logger) *Bridge {
 	return &Bridge{
-		client:     client,
-		msgDB:      msgDB,
-		dataDir:    dataDir,
-		log:        log,
-		groupNames: make(map[string]cachedGroupName),
+		client:          client,
+		msgDB:           msgDB,
+		dataDir:         dataDir,
+		log:             log,
+		connectionState: "disconnected",
+		groupNames:      make(map[string]cachedGroupName),
 		retention: RetentionConfig{
 			MaxMessages:  50,
 			MaxDays:      7,

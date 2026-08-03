@@ -4,12 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
-	"time"
+	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
-	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"google.golang.org/protobuf/proto"
+	"strings"
+	"time"
 )
 
 // resolveLIDJID resolves an @lid JID to its phone-based JID when the mapping
@@ -67,7 +67,7 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 		b.handleHistorySync(v)
 	case *events.Connected:
 		b.log.Infof("Connected to WhatsApp")
-		b.BroadcastEvent("connection_state", ConnectionStateEvent{State: "connected"})
+		b.markConnectionConnected()
 		b.client.SendPresence(context.Background(), types.PresenceAvailable)
 		// Fallback reconcile: AppStateSyncComplete normally triggers the
 		// merge+backfill, but if the event never fires (already-synced
@@ -94,10 +94,26 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 		}()
 	case *events.Disconnected:
 		b.log.Infof("Disconnected from WhatsApp")
-		b.BroadcastEvent("connection_state", ConnectionStateEvent{State: "disconnected"})
+		state, _ := b.currentConnectionState()
+		if state != "logged_out" {
+			b.setConnectionState("connecting", "WhatsApp socket disconnected; reconnecting")
+		}
 	case *events.LoggedOut:
-		b.log.Infof("Logged out: %v", v.Reason)
-		b.BroadcastEvent("connection_state", ConnectionStateEvent{State: "logged_out"})
+		reason := v.PermanentDisconnectDescription()
+		b.log.Infof("Logged out: %s", reason)
+		b.pauseReconnect(reason)
+		b.setConnectionState("logged_out", reason)
+	case *events.KeepAliveTimeout:
+		b.log.Warnf("WhatsApp keepalive timeout (errors=%d)", v.ErrorCount)
+		b.setConnectionState("connecting", fmt.Sprintf("WhatsApp keepalive timeout (%d)", v.ErrorCount))
+	case *events.KeepAliveRestored:
+		b.log.Infof("WhatsApp keepalive restored")
+		b.markConnectionConnected()
+	case events.PermanentDisconnect:
+		reason := v.PermanentDisconnectDescription()
+		b.log.Errorf("WhatsApp connection requires attention: %s", reason)
+		b.pauseReconnect(reason)
+		b.setConnectionState("disconnected", reason)
 	case *events.PairSuccess:
 		b.log.Infof("Pair success: %s on %s", v.ID, v.Platform)
 		b.BroadcastEvent("pair_success", PairSuccessEvent{

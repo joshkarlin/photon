@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -102,6 +103,15 @@ class WsClient(private val port: Int = 8765) {
         webSocket?.send(msg) ?: throw IllegalStateException("WebSocket not connected")
 
         return withTimeout(30_000) { deferred.await() }
+    }
+
+    /** Ask the Go bridge to repair the WhatsApp socket/session connection. */
+    suspend fun reconnectWhatsApp(): WsEvent {
+        if (!_isConnected.value) {
+            connect()
+            withTimeout(5_000) { isConnected.first { it } }
+        }
+        return request("reconnect")
     }
 
     // Convenience methods for common requests

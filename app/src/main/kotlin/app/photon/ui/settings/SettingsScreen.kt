@@ -135,8 +135,7 @@ private fun WhatsAppPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
             SettingsRow("REFRESH CONNECTION", onClick = {
                 scope.launch {
                     try {
-                        ws?.disconnect()
-                        ws?.connect()
+                        ws?.reconnectWhatsApp()
                     } catch (_: Exception) {}
                 }
             })

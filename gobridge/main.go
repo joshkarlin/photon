@@ -120,6 +120,10 @@ func main() {
 
 	// Create whatsmeow client
 	client := whatsmeow.NewClient(device, waLog.Stdout("Client", *logLevel, true))
+	// A stored session can need a few attempts after a long offline period or
+	// a transient primary-device/network outage. Let whatsmeow retry an initial
+	// connection in the background instead of returning a terminal failure.
+	client.InitialAutoReconnect = true
 
 	// Create bridge
 	bridge := NewBridge(client, msgDB, *dataDir, logger)
@@ -135,6 +139,7 @@ func main() {
 
 	// Start periodic pruning of old messages and temp media
 	bridge.StartPruning(ctx)
+	bridge.StartConnectionWatchdog(ctx)
 
 	// Start WebSocket server
 	mux := http.NewServeMux()
@@ -153,12 +158,14 @@ func main() {
 	// Connect to WhatsApp if already paired
 	if client.Store.ID != nil {
 		logger.Infof("Existing session found, connecting...")
+		bridge.setConnectionState("connecting", "starting WhatsApp connection")
 		if err := client.Connect(); err != nil {
 			logger.Errorf("Failed to connect: %v", err)
+			bridge.setConnectionState("connecting", fmt.Sprintf("initial connection failed; retrying: %v", err))
 		}
 	} else {
 		logger.Infof("No session found, waiting for pairing request...")
-		bridge.BroadcastEvent("connection_state", map[string]interface{}{"state": "logged_out"})
+		bridge.setConnectionState("logged_out", "no paired WhatsApp session")
 	}
 
 	// Wait for shutdown signal

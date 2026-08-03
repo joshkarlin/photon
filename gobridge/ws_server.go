@@ -26,16 +26,10 @@ func (b *Bridge) RegisterWSHandler(mux *http.ServeMux) {
 		b.log.Infof("WebSocket client connected")
 
 		// Send current connection state
-		state := "disconnected"
-		if b.client.IsConnected() {
-			state = "connected"
-		}
-		if b.client.Store.ID == nil {
-			state = "logged_out"
-		}
+		state, reason := b.currentConnectionState()
 		b.sendToConn(conn, WsMessage{
 			Type:    "connection_state",
-			Payload: mustMarshal(ConnectionStateEvent{State: state}),
+			Payload: mustMarshal(ConnectionStateEvent{State: state, Reason: reason}),
 		})
 
 		defer func() {
@@ -114,6 +108,8 @@ func (b *Bridge) handleRequest(ctx context.Context, msg WsMessage) WsMessage {
 		payload, err = b.handleSetRetention(ctx, msg.Payload)
 	case "resolve_participants":
 		payload, err = b.handleResolveParticipants(msg.Payload)
+	case "reconnect":
+		payload, err = b.handleReconnect()
 	default:
 		err = fmt.Errorf("unknown request type: %s", msg.Type)
 	}

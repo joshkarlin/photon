@@ -56,9 +56,9 @@ type RetryMessagePayload struct {
 }
 
 type DeleteMessagePayload struct {
-	JID          string `json:"jid"`
-	MessageID    string `json:"message_id"`
-	ForEveryone  bool   `json:"for_everyone"`
+	JID         string `json:"jid"`
+	MessageID   string `json:"message_id"`
+	ForEveryone bool   `json:"for_everyone"`
 }
 
 type ResolveParticipantsPayload struct {
@@ -92,7 +92,8 @@ type DownloadMediaResponse struct {
 }
 
 type ConnectionStateEvent struct {
-	State string `json:"state"` // "connecting", "connected", "disconnected", "logged_out"
+	State  string `json:"state"` // "connecting", "connected", "disconnected", "logged_out"
+	Reason string `json:"reason,omitempty"`
 }
 
 type QrCodeEvent struct {
