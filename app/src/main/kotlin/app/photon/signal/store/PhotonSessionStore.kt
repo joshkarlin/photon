@@ -34,11 +34,13 @@ class PhotonSessionStore(private val db: SignalProtocolDatabase) : SessionStore 
 
     override fun getSubDeviceSessions(name: String): MutableList<Int> {
         return db.readableDatabase.rawQuery(
-            "SELECT device_id FROM sessions WHERE address = ? AND device_id != 1",
+            "SELECT device_id, record FROM sessions WHERE address = ? AND device_id != 1",
             arrayOf(name),
         ).use { c ->
             val list = mutableListOf<Int>()
-            while (c.moveToNext()) list.add(c.getInt(0))
+            while (c.moveToNext()) {
+                if (SessionRecord(c.getBlob(1)).hasSenderChain()) list.add(c.getInt(0))
+            }
             list
         }
     }
@@ -58,9 +60,9 @@ class PhotonSessionStore(private val db: SignalProtocolDatabase) : SessionStore 
 
     override fun containsSession(address: SignalProtocolAddress): Boolean {
         return db.readableDatabase.rawQuery(
-            "SELECT 1 FROM sessions WHERE address = ? AND device_id = ?",
+            "SELECT record FROM sessions WHERE address = ? AND device_id = ?",
             arrayOf(address.name, address.deviceId.toString()),
-        ).use { it.moveToFirst() }
+        ).use { c -> c.moveToFirst() && SessionRecord(c.getBlob(0)).hasSenderChain() }
     }
 
     override fun deleteSession(address: SignalProtocolAddress) {
