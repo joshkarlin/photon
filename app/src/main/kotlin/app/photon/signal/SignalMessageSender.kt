@@ -29,6 +29,7 @@ import org.whispersystems.signalservice.internal.push.PushServiceSocket
 import org.whispersystems.signalservice.internal.util.JsonUtil
 import java.io.File
 import java.io.FileInputStream
+import java.io.IOException
 import java.util.Optional
 import java.util.UUID
 import java.util.concurrent.Executors
@@ -49,6 +50,13 @@ internal fun parseSignalAttachmentUploadForm(response: String): AttachmentUpload
         name to (value.textValue() ?: error("Invalid attachment header: $name"))
     }
     return AttachmentUploadForm(cdn, key, headers, location)
+}
+
+internal fun signalReactionFor(messageId: String, emoji: String): SignalServiceDataMessage.Reaction? {
+    if (emoji.isBlank()) return null
+    val (author, timestamp) = MessageKeys.parse(messageId) ?: return null
+    val authorAci = ServiceId.ACI.parseOrNull(author) ?: return null
+    return SignalServiceDataMessage.Reaction(emoji, false, authorAci, timestamp)
 }
 
 class SignalMessageSender(
@@ -327,6 +335,34 @@ class SignalMessageSender(
         return stream.use { sender.uploadAttachment(it) }
     }
 
+    fun sendReaction(conversationJid: String, messageId: String, emoji: String): Boolean {
+        val row = messageDb.getMessage(messageId)
+        val reaction = signalReactionFor(messageId, emoji)
+        val myAci = credentials.aciString
+        if (row == null || row.conversationJid != conversationJid ||
+            row.status == "failed" || row.status == "sending" || reaction == null || myAci == null
+        ) return false
+
+        val aci = ServiceId.ACI.parseOrNull(conversationJid)
+        val groupMeta = if (aci == null) messageDb.getGroupMeta(conversationJid) else null
+        if (aci == null && groupMeta == null) return false
+
+        val timestamp = System.currentTimeMillis()
+        return try {
+            if (aci != null) {
+                sendDmInternal(aci, conversationJid, null, timestamp, null, reaction = reaction)
+            } else {
+                sendGroupInternal(conversationJid, groupMeta!!, null, timestamp, null, reaction = reaction)
+            }
+            messageDb.upsertReaction(MessageKeys.prefixOf(messageId), myAci, emoji, timestamp)
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Reaction send failed for $messageId", e)
+            invalidate()
+            false
+        }
+    }
+
     /**
      * One-to-one DataMessage send. Attaches the recipient's E.164 to the
      * address when known — Desktop / older clients index by (ACI ∪ E.164)
@@ -341,6 +377,7 @@ class SignalMessageSender(
         replyPrefix: String?,
         attachments: List<SignalServiceAttachment> = emptyList(),
         remoteDeleteTarget: Long? = null,
+        reaction: SignalServiceDataMessage.Reaction? = null,
     ) {
         val recipientPhone = messageDb.getContact(conversationJid)?.phone
         val recipientAddress = if (recipientPhone != null) {
@@ -349,7 +386,9 @@ class SignalMessageSender(
 
         val builder = SignalServiceDataMessage.newBuilder()
             .withTimestamp(timestamp)
-        if (remoteDeleteTarget != null) {
+        if (reaction != null) {
+            builder.withReaction(reaction)
+        } else if (remoteDeleteTarget != null) {
             builder.withRemoteDelete(SignalServiceDataMessage.RemoteDelete(remoteDeleteTarget))
         } else {
             val quote = replyPrefix?.let { buildQuote(it) }
@@ -360,7 +399,7 @@ class SignalMessageSender(
         val message = builder.build()
 
         val sender = getOrCreateSender()
-        sender.sendDataMessage(
+        val result = sender.sendDataMessage(
             recipientAddress,
             null,
             ContentHint.RESENDABLE,
@@ -368,6 +407,7 @@ class SignalMessageSender(
             SignalServiceMessageSender.IndividualSendEvents.EMPTY,
             false, false,
         )
+        if (reaction != null && !result.isSuccess) throw IOException("Signal reaction send failed")
 
         // Sync transcript best-effort: the recipient already got the
         // message above. If the sync fails, our linked devices won't see
@@ -409,6 +449,7 @@ class SignalMessageSender(
         replyPrefix: String?,
         attachments: List<SignalServiceAttachment> = emptyList(),
         remoteDeleteTarget: Long? = null,
+        reaction: SignalServiceDataMessage.Reaction? = null,
     ) {
         val myAci = credentials.aci
             ?: throw IllegalStateException("No local ACI available")
@@ -465,7 +506,9 @@ class SignalMessageSender(
         val builder = SignalServiceDataMessage.newBuilder()
             .withTimestamp(timestamp)
             .asGroupMessage(groupContext)
-        if (remoteDeleteTarget != null) {
+        if (reaction != null) {
+            builder.withReaction(reaction)
+        } else if (remoteDeleteTarget != null) {
             builder.withRemoteDelete(SignalServiceDataMessage.RemoteDelete(remoteDeleteTarget))
         } else {
             val quote = replyPrefix?.let { buildQuote(it) }

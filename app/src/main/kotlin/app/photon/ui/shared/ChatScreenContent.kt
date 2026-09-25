@@ -261,7 +261,7 @@ private fun MessageActions(
     onDelete: (forEveryone: Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val emojis = listOf("❤️", "👍", "😂", "😮", "😢", "🙏")
+    val emojis = listOf("❤️", "👍", "😂", "😮", "😢", "🙏", "🤙")
     // "Delete for everyone" only makes sense for our own messages the server
     // has acknowledged — there's a sent message out there to revoke. Anything
     // else (incoming, or our own failed/sending rows) is a local-only removal.
@@ -285,15 +285,22 @@ private fun MessageActions(
                 .padding(horizontal = 20.dp, vertical = 16.dp),
         ) {
             if (canReact) {
-                Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                    emojis.forEach { emoji ->
-                        Text(
-                            text = emoji,
-                            fontSize = 28.sp,
-                            modifier = Modifier
-                                .clickable { onPick(emoji) }
-                                .padding(8.dp),
-                        )
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    emojis.chunked(4).forEach { row ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            row.forEach { emoji ->
+                                Text(
+                                    text = emoji,
+                                    fontSize = 28.sp,
+                                    modifier = Modifier
+                                        .clickable { onPick(emoji) }
+                                        .padding(8.dp),
+                                )
+                            }
+                        }
                     }
                 }
             }

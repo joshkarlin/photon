@@ -56,8 +56,10 @@ class SignalRepository(
         }
     }
 
-    suspend fun sendReaction(jid: String, messageId: String, senderJid: String, emoji: String) {
-        // TODO
+    suspend fun sendReaction(jid: String, messageId: String, emoji: String) {
+        withContext(Dispatchers.IO) {
+            sender?.sendReaction(jid, messageId, emoji)
+        }
     }
 
     suspend fun markRead(jid: String, messageIds: List<String>) {
