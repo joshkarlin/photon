@@ -3,6 +3,7 @@ package app.photon.signal
 import android.util.Log
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.store.PhotonProtocolStore
+import com.fasterxml.jackson.databind.JsonNode
 import org.signal.core.models.ServiceId
 import org.signal.libsignal.protocol.message.DecryptionErrorMessage
 import org.whispersystems.signalservice.api.SignalServiceAccountDataStore
@@ -22,8 +23,10 @@ import org.whispersystems.signalservice.api.messages.multidevice.SentTranscriptM
 import org.whispersystems.signalservice.api.messages.multidevice.SignalServiceSyncMessage
 import org.whispersystems.signalservice.api.push.SignalServiceAddress
 import org.whispersystems.signalservice.api.websocket.SignalWebSocket
-import org.whispersystems.signalservice.internal.push.PushServiceSocket
 import org.whispersystems.signalservice.internal.crypto.PaddingInputStream
+import org.whispersystems.signalservice.internal.push.AttachmentUploadForm
+import org.whispersystems.signalservice.internal.push.PushServiceSocket
+import org.whispersystems.signalservice.internal.util.JsonUtil
 import java.io.File
 import java.io.FileInputStream
 import java.util.Optional
@@ -32,6 +35,21 @@ import java.util.concurrent.Executors
 
 internal fun signalAttachmentUploadLength(fileLength: Long): Long =
     AttachmentCipherStreamUtil.getCiphertextLength(PaddingInputStream.getPaddedSize(fileLength))
+
+internal fun parseSignalAttachmentUploadForm(response: String): AttachmentUploadForm {
+    val json = JsonUtil.fromJson(response, JsonNode::class.java)
+    val cdn = json.get("cdn")?.intValue() ?: error("Missing attachment CDN")
+    require(cdn == 2 || cdn == 3) { "Unsupported attachment CDN: $cdn" }
+    val key = json.get("key")?.textValue() ?: error("Missing attachment key")
+    val location = json.get("signedUploadLocation")?.textValue()
+        ?: error("Missing attachment upload location")
+    val headersNode = json.get("headers") ?: error("Missing attachment headers")
+    require(headersNode.isObject) { "Invalid attachment headers" }
+    val headers = headersNode.properties().associate { (name, value) ->
+        name to (value.textValue() ?: error("Invalid attachment header: $name"))
+    }
+    return AttachmentUploadForm(cdn, key, headers, location)
+}
 
 class SignalMessageSender(
     private val credentials: SignalCredentials,
@@ -290,7 +308,13 @@ class SignalMessageSender(
      */
     private fun uploadAttachment(file: File, mimeType: String, voiceNote: Boolean): SignalServiceAttachmentPointer {
         val sender = getOrCreateSender()
-        val uploadSpec = sender.getResumableUploadSpec(signalAttachmentUploadLength(file.length()))
+        val pushSocket = PushServiceSocket(config, credentials, SignalConfig.USER_AGENT, false)
+        val uploadLength = signalAttachmentUploadLength(file.length())
+        val response = pushSocket.serviceRequest(
+            "/v4/attachments/form/upload?uploadLength=$uploadLength", "GET", null,
+        ) ?: error("Empty attachment upload form")
+        val form = parseSignalAttachmentUploadForm(response)
+        val uploadSpec = pushSocket.getResumableUploadSpec(form)
         val stream = SignalServiceAttachment.newStreamBuilder()
             .withStream(FileInputStream(file))
             .withContentType(mimeType)

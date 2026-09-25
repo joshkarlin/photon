@@ -178,10 +178,10 @@ object SignalConfig {
  * endpoints it doesn't expose (pre-key upload fallback, linked-device
  * DELETE on logout) without forking it.
  */
-fun PushServiceSocket.serviceRequest(path: String, method: String, body: String) {
+fun PushServiceSocket.serviceRequest(path: String, method: String, body: String?): String? {
     val m = javaClass.getDeclaredMethod(
         "makeServiceRequest", String::class.java, String::class.java, String::class.java,
     )
     m.isAccessible = true
-    m.invoke(this, path, method, body)
+    return m.invoke(this, path, method, body) as String?
 }
