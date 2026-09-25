@@ -9,6 +9,7 @@ import org.whispersystems.signalservice.api.SignalServiceAccountDataStore
 import org.whispersystems.signalservice.api.SignalServiceDataStore
 import org.whispersystems.signalservice.api.SignalServiceMessageSender
 import org.whispersystems.signalservice.api.attachment.AttachmentApi
+import org.whispersystems.signalservice.api.crypto.AttachmentCipherStreamUtil
 import org.whispersystems.signalservice.api.crypto.ContentHint
 import org.whispersystems.signalservice.api.keys.KeysApi
 import org.whispersystems.signalservice.api.message.MessageApi
@@ -22,11 +23,15 @@ import org.whispersystems.signalservice.api.messages.multidevice.SignalServiceSy
 import org.whispersystems.signalservice.api.push.SignalServiceAddress
 import org.whispersystems.signalservice.api.websocket.SignalWebSocket
 import org.whispersystems.signalservice.internal.push.PushServiceSocket
+import org.whispersystems.signalservice.internal.crypto.PaddingInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.util.Optional
 import java.util.UUID
 import java.util.concurrent.Executors
+
+internal fun signalAttachmentUploadLength(fileLength: Long): Long =
+    AttachmentCipherStreamUtil.getCiphertextLength(PaddingInputStream.getPaddedSize(fileLength))
 
 class SignalMessageSender(
     private val credentials: SignalCredentials,
@@ -285,6 +290,7 @@ class SignalMessageSender(
      */
     private fun uploadAttachment(file: File, mimeType: String, voiceNote: Boolean): SignalServiceAttachmentPointer {
         val sender = getOrCreateSender()
+        val uploadSpec = sender.getResumableUploadSpec(signalAttachmentUploadLength(file.length()))
         val stream = SignalServiceAttachment.newStreamBuilder()
             .withStream(FileInputStream(file))
             .withContentType(mimeType)
@@ -292,6 +298,7 @@ class SignalMessageSender(
             .withFileName(file.name)
             .withVoiceNote(voiceNote)
             .withUploadTimestamp(System.currentTimeMillis())
+            .withResumableUploadSpec(uploadSpec)
             .build()
         return stream.use { sender.uploadAttachment(it) }
     }
