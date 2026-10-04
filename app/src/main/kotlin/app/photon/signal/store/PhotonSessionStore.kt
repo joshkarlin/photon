@@ -76,4 +76,25 @@ class PhotonSessionStore(private val db: SignalProtocolDatabase) : SessionStore 
     override fun deleteAllSessions(name: String) {
         db.writableDatabase.delete("sessions", "address = ?", arrayOf(name))
     }
+
+    fun archiveSession(address: SignalProtocolAddress) {
+        val record = loadSession(address)
+        record.archiveCurrentState()
+        storeSession(address, record)
+    }
+
+    fun archiveSessions(name: String, exceptDeviceId: Int? = null) {
+        val addresses = db.readableDatabase.rawQuery(
+            "SELECT device_id FROM sessions WHERE address = ?",
+            arrayOf(name),
+        ).use { c ->
+            buildList {
+                while (c.moveToNext()) {
+                    val deviceId = c.getInt(0)
+                    if (deviceId != exceptDeviceId) add(SignalProtocolAddress(name, deviceId))
+                }
+            }
+        }
+        addresses.forEach(::archiveSession)
+    }
 }

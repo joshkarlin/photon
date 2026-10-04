@@ -66,6 +66,7 @@ fun ChatScreenContent(
     onDelete: ((message: Message, forEveryone: Boolean) -> Unit)? = null,
     onTitleClick: (() -> Unit)? = null,
     supportsReply: Boolean = true,
+    headerContent: (@Composable () -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
@@ -111,6 +112,8 @@ fun ChatScreenContent(
             onTitleClick = onTitleClick,
         )
         HorizontalDivider(color = Color(0xFF1A1A1A))
+
+        headerContent?.invoke()
 
         // Messages
         LazyColumn(

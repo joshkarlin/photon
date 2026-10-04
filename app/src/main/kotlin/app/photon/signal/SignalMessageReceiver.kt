@@ -926,6 +926,17 @@ class SignalMessageReceiver(
             sync.padding?.let { if (it.size > 0) add("padding[${it.size}B]") }
         }
         Log.i(TAG, "Sync message kinds: ${if (kinds.isEmpty()) "<none>" else kinds.joinToString(",")}")
+        sync.verified?.let { verified ->
+            try {
+                val applied = applySignalVerificationSync(
+                    protocolStore.identityStore, verified,
+                    metadata.sourceServiceId.toString(), credentials.aciString,
+                )
+                Log.i(TAG, "Verification sync handled=$applied")
+            } catch (e: Exception) {
+                Log.w(TAG, "Invalid verification sync", e)
+            }
+        }
         // Sent messages from our primary device
         val sent = sync.sent
         if (sent != null) {

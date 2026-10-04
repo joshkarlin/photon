@@ -44,6 +44,14 @@ fun SignalChatScreen(jid: String, onContact: (phone: String, name: String) -> Un
         messagesFlow = repo.messages(jid),
         isGroup = isGroup,
         participantNames = participantNames,
+        headerContent = {
+            repo.sender?.identityStore?.let { store ->
+                SignalIdentityNotice(
+                    store = store,
+                    contacts = if (isGroup) participantNames else mapOf(jid to title),
+                )
+            }
+        },
         onSendText = { msg, replyToId -> scope.launch { repo.sendMessage(jid, msg, replyToId) } },
         onSendAudio = { path, replyToId -> scope.launch { repo.sendMedia(jid, path, "audio/ogg", null, replyToId) } },
         onSendMedia = { path, mime, replyToId -> scope.launch { repo.sendMedia(jid, path, mime, null, replyToId) } },

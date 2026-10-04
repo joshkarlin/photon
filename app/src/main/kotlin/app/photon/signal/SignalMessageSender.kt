@@ -70,6 +70,7 @@ class SignalMessageSender(
 
     private val config = SignalConfig.createConfiguration()
     private val sessionLock = SignalConfig.newSessionLock()
+    val identityStore get() = protocolStore.identityStore
     private val executor = Executors.newCachedThreadPool()
 
     // Lazily initialized, reused across sends
@@ -399,15 +400,23 @@ class SignalMessageSender(
         val message = builder.build()
 
         val sender = getOrCreateSender()
-        val result = sender.sendDataMessage(
-            recipientAddress,
-            null,
-            ContentHint.RESENDABLE,
-            message,
-            SignalServiceMessageSender.IndividualSendEvents.EMPTY,
-            false, false,
-        )
-        if (reaction != null && !result.isSuccess) throw IOException("Signal reaction send failed")
+        val result = try {
+            sender.sendDataMessage(
+                recipientAddress,
+                null,
+                ContentHint.RESENDABLE,
+                message,
+                SignalServiceMessageSender.IndividualSendEvents.EMPTY,
+                false, false,
+            )
+        } catch (e: org.whispersystems.signalservice.api.crypto.UntrustedIdentityException) {
+            identityStore.recordSendIdentityFailure(aci.toString(), e.identityKey)
+            throw e
+        }
+        result.identityFailure?.let {
+            identityStore.recordSendIdentityFailure(aci.toString(), it.identityKey)
+        }
+        if (!result.isSuccess) throw IOException("Signal send failed; check safety number if it changed")
 
         // Sync transcript best-effort: the recipient already got the
         // message above. If the sync fails, our linked devices won't see
@@ -538,6 +547,11 @@ class SignalMessageSender(
         // silently rolled into a generic "failed" status. The wire send
         // returns a list; an entry being non-success doesn't itself throw.
         val successes = results.count { it.isSuccess }
+        for (result in results) {
+            result.identityFailure?.let {
+                identityStore.recordSendIdentityFailure(result.address.serviceId.toString(), it.identityKey)
+            }
+        }
         val failures = results.size - successes
         if (failures > 0) {
             val reasons = results.filter { !it.isSuccess }.joinToString { r ->
@@ -699,11 +713,16 @@ class SignalMessageSender(
                 ?: throw IllegalArgumentException("Invalid ACI: $aci")
             val address = SignalServiceAddress(parsedAci)
             val sender = getOrCreateSender()
-            sender.sendNullMessage(address, null)
+            val result = sender.sendNullMessage(address, null)
+            result.identityFailure?.let { identityStore.recordSendIdentityFailure(aci, it.identityKey) }
+            if (!result.isSuccess) return false
             Log.i(TAG, "Sent session ping to $aci")
             true
         } catch (e: Exception) {
             Log.w(TAG, "sendSessionPing failed for $aci: ${e.javaClass.simpleName}: ${e.message}")
+            if (e is org.whispersystems.signalservice.api.crypto.UntrustedIdentityException) {
+                identityStore.recordSendIdentityFailure(aci, e.identityKey)
+            }
             invalidate()
             false
         }

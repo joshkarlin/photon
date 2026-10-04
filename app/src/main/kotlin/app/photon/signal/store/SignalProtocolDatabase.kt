@@ -6,7 +6,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 
 class SignalProtocolDatabase(context: Context) : SQLiteOpenHelper(
-    context, "signal_protocol.db", null, 1,
+    context, "signal_protocol.db", null, 2,
 ) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""
@@ -15,6 +15,8 @@ class SignalProtocolDatabase(context: Context) : SQLiteOpenHelper(
                 identity_key BLOB NOT NULL,
                 trust_level INTEGER NOT NULL DEFAULT 0,
                 timestamp INTEGER NOT NULL DEFAULT 0,
+                change_pending INTEGER NOT NULL DEFAULT 0,
+                approved INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (address)
             )
         """)
@@ -63,7 +65,12 @@ class SignalProtocolDatabase(context: Context) : SQLiteOpenHelper(
         """)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE identities ADD COLUMN change_pending INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE identities ADD COLUMN approved INTEGER NOT NULL DEFAULT 1")
+        }
+    }
 
     // Local state helpers
 

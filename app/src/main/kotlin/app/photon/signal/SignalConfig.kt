@@ -99,18 +99,16 @@ object SignalConfig {
         override fun sleep(millis: Long) = Thread.sleep(millis)
     }
 
-    /**
-     * A fresh ReentrantLock-backed SignalSessionLock. Sender and receiver
-     * each keep their own instance (as they always have) — this only
-     * removes the duplicated anonymous-object boilerplate.
-     */
-    fun newSessionLock(): SignalSessionLock = object : SignalSessionLock {
+    // Identity replacement and session writes must be serialized across send/receive.
+    private val sessionLock: SignalSessionLock = object : SignalSessionLock {
         private val lock = ReentrantLock()
         override fun acquire(): SignalSessionLock.Lock {
             lock.lock()
             return SignalSessionLock.Lock { lock.unlock() }
         }
     }
+
+    fun newSessionLock(): SignalSessionLock = sessionLock
 
     /**
      * WebSocketFactory for an OkHttp connection to Signal. Authenticated

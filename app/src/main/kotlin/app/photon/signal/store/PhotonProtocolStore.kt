@@ -21,9 +21,11 @@ import org.whispersystems.signalservice.api.push.DistributionId
 class PhotonProtocolStore(
     db: SignalProtocolDatabase,
     private val kyberStore: PhotonKyberPreKeyStore = PhotonKyberPreKeyStore(db),
+    val identityStore: PhotonIdentityKeyStore = PhotonIdentityKeyStore(db),
+    private val sessionStore: PhotonSessionStore = PhotonSessionStore(db),
 ) : SignalServiceAccountDataStore,
-    IdentityKeyStore by PhotonIdentityKeyStore(db),
-    SessionStore by PhotonSessionStore(db),
+    IdentityKeyStore by identityStore,
+    SessionStore by sessionStore,
     PreKeyStore by PhotonPreKeyStore(db),
     SignedPreKeyStore by PhotonSignedPreKeyStore(db),
     KyberPreKeyStore by kyberStore,
@@ -38,8 +40,7 @@ class PhotonProtocolStore(
 
     // SignalServiceSessionStore extras
     override fun archiveSession(address: SignalProtocolAddress) {
-        // Archive = delete for our simple implementation
-        deleteSession(address)
+        sessionStore.archiveSession(address)
     }
 
     override fun getAllAddressesWithActiveSessions(addressNames: MutableList<String>): MutableMap<SignalProtocolAddress, SessionRecord> {
