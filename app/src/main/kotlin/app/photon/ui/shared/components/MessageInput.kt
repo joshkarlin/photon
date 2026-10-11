@@ -7,20 +7,15 @@ import android.media.MediaRecorder
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.size
-import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -34,17 +29,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.res.painterResource
 import androidx.core.content.ContextCompat
-import app.photon.R
+import app.photon.ui.theme.PhotonColors
+import app.photon.ui.theme.lightTextStyle
+import com.thelightphone.sdk.ui.LightIcon
+import com.thelightphone.sdk.ui.LightIconConfiguration
+import com.thelightphone.sdk.ui.LightIcons
+import com.thelightphone.sdk.ui.LightText
+import com.thelightphone.sdk.ui.LightTextVariant
+import com.thelightphone.sdk.ui.LightThemeTokens
+import com.thelightphone.sdk.ui.gridUnitsAsDp
+import com.thelightphone.sdk.ui.lightClickable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -162,28 +161,25 @@ fun MessageInputBar(
         onDispose { recorder?.release() }
     }
 
-    HorizontalDivider(color = Color(0xFF1A1A1A))
+    val barModifier = modifier
+        .fillMaxWidth()
+        .height(INPUT_BAR_HEIGHT.gridUnitsAsDp())
+        .padding(horizontal = 1f.gridUnitsAsDp())
+    val iconSpacing = Arrangement.spacedBy(1f.gridUnitsAsDp())
+    val textStyle = lightTextStyle(LightTextVariant.Paragraph)
+    val contentColor = LightThemeTokens.colors.content
 
     when (state) {
         is InputState.Default -> {
             Row(
-                modifier = modifier
-                    .fillMaxWidth()
-                    .background(Color.Black)
-                    .height(48.dp)
-                    .padding(horizontal = 12.dp),
+                modifier = barModifier,
+                horizontalArrangement = iconSpacing,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 // Attach media
                 if (onSendMedia != null) {
-                    Box(
-                        modifier = Modifier
-                            .height(48.dp)
-                            .clickable { mediaPickerLauncher.launch(arrayOf("image/*", "video/*")) }
-                            .padding(end = 12.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text("+", fontSize = 18.sp, color = Color(0xFF666666))
+                    InputIcon(LightIcons.ADD, "Attach") {
+                        mediaPickerLauncher.launch(arrayOf("image/*", "video/*"))
                     }
                 }
 
@@ -191,8 +187,8 @@ fun MessageInputBar(
                 BasicTextField(
                     value = text,
                     onValueChange = { text = it },
-                    textStyle = TextStyle(color = Color.White, fontSize = 15.sp),
-                    cursorBrush = SolidColor(Color.White),
+                    textStyle = textStyle.copy(color = contentColor),
+                    cursorBrush = SolidColor(contentColor),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = {
                         if (text.isNotBlank()) {
@@ -206,10 +202,10 @@ fun MessageInputBar(
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             if (text.isEmpty()) {
-                                Text(
-                                    "Message",
-                                    fontSize = 15.sp,
-                                    color = Color(0xFF444444),
+                                LightText(
+                                    text = "Message",
+                                    variant = LightTextVariant.Paragraph,
+                                    color = PhotonColors.Faint,
                                 )
                             }
                             inner()
@@ -221,109 +217,74 @@ fun MessageInputBar(
                 )
 
                 if (text.isNotBlank()) {
-                    // Send text
-                    Box(
-                        modifier = Modifier
-                            .height(48.dp)
-                            .clickable {
-                                onSendText(text.trim())
-                                text = ""
-                            }
-                            .padding(start = 12.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text("SEND", fontSize = 13.sp, letterSpacing = 2.sp, color = Color.White)
+                    InputIcon(LightIcons.SEND, "Send") {
+                        onSendText(text.trim())
+                        text = ""
                     }
                 } else if (onSendAudio != null) {
                     // Voice note — only when the platform can send audio (SMS
                     // can't, so the mic is hidden rather than a dead control).
-                    Box(
-                        modifier = Modifier
-                            .height(48.dp)
-                            .clickable { doRecord() }
-                            .padding(start = 12.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_mic),
-                            contentDescription = "Voice note",
-                            tint = Color(0xFF666666),
-                            modifier = Modifier.size(18.dp),
-                        )
-                    }
+                    InputIcon(LightIcons.MICROPHONE, "Voice note") { doRecord() }
                 }
 
                 // Keyboard toggle
-                Box(
-                    modifier = Modifier
-                        .height(48.dp)
-                        .clickable {
-                            if (keyboardVisible) {
-                                keyboardController?.hide()
-                                keyboardVisible = false
-                            } else {
-                                focusRequester.requestFocus()
-                                keyboardController?.show()
-                                keyboardVisible = true
-                            }
+                LightText(
+                    text = "⌨",
+                    variant = LightTextVariant.Paragraph,
+                    lighten = true,
+                    modifier = Modifier.lightClickable {
+                        if (keyboardVisible) {
+                            keyboardController?.hide()
+                            keyboardVisible = false
+                        } else {
+                            focusRequester.requestFocus()
+                            keyboardController?.show()
+                            keyboardVisible = true
                         }
-                        .padding(start = 16.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("⌨", fontSize = 16.sp, color = Color(0xFF666666))
-                }
+                    },
+                )
             }
         }
 
         is InputState.Recording -> {
             Row(
-                modifier = modifier
-                    .fillMaxWidth()
-                    .background(Color.Black)
-                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                modifier = barModifier,
+                horizontalArrangement = iconSpacing,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("●", fontSize = 14.sp, color = Color(0xFFCC4444))
-                Text(
-                    text = " ${recordingSeconds / 60}:%02d".format(recordingSeconds % 60),
-                    fontSize = 14.sp,
-                    color = Color.White,
-                    modifier = Modifier.weight(1f).padding(start = 4.dp),
+                LightText(
+                    text = "● ${recordingSeconds / 60}:%02d".format(recordingSeconds % 60),
+                    variant = LightTextVariant.Paragraph,
+                    modifier = Modifier.weight(1f),
                 )
-                // Cancel
-                Text(
-                    text = "✕",
-                    fontSize = 16.sp,
-                    color = Color(0xFF666666),
-                    modifier = Modifier
-                        .clickable {
-                            stopRecorder()
-                            recordingPath?.let { File(it).delete() }
-                            state = InputState.Default
-                        }
-                        .padding(horizontal = 8.dp),
-                )
-                // Send
-                Text(
-                    text = "SEND",
-                    fontSize = 13.sp,
-                    letterSpacing = 2.sp,
-                    color = Color.White,
-                    modifier = Modifier
-                        .clickable {
-                            stopRecorder()
-                            val path = recordingPath
-                            val file = path?.let { File(it) }
-                            if (path != null && file != null && file.exists() && file.length() > 0) {
-                                onSendAudio?.invoke(path)
-                            }
-                            state = InputState.Default
-                        }
-                        .padding(horizontal = 8.dp),
-                )
+                InputIcon(LightIcons.CLOSE, "Cancel recording") {
+                    stopRecorder()
+                    recordingPath?.let { File(it).delete() }
+                    state = InputState.Default
+                }
+                InputIcon(LightIcons.SEND, "Send voice note") {
+                    stopRecorder()
+                    val path = recordingPath
+                    val file = path?.let { File(it) }
+                    if (path != null && file != null && file.exists() && file.length() > 0) {
+                        onSendAudio?.invoke(path)
+                    }
+                    state = InputState.Default
+                }
             }
         }
     }
+}
+
+private const val INPUT_BAR_HEIGHT = 3.5f
+
+@Composable
+private fun InputIcon(icon: LightIconConfiguration, description: String, onClick: () -> Unit) {
+    LightIcon(
+        icon = icon,
+        contentDescription = description,
+        modifier = Modifier.lightClickable(onClick = onClick),
+    )
 }
 
 // ─── Audio recording ─────────────────────────────────────────────

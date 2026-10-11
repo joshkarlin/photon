@@ -12,11 +12,11 @@ fun SignalChatListScreen(onChat: (String) -> Unit, onSwitch: () -> Unit, onSetti
     val conversations by repo.conversations.collectAsState()
 
     ChatListContent(
-        title = "SIGNAL",
+        title = "Signal",
         onTitleClick = onSwitch,
         onSettings = onSettings,
         conversations = conversations,
         onChat = onChat,
-        emptyMessage = "NO MESSAGES YET",
+        emptyMessage = "No messages yet",
     )
 }

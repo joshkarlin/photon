@@ -51,7 +51,7 @@ fun AllChatsScreen(
     }
 
     ChatListContent(
-        title = "ALL CHATS",
+        title = "All Chats",
         onTitleClick = onSwitch,
         onSettings = onSettings,
         conversations = allChats?.map { it.conversation },

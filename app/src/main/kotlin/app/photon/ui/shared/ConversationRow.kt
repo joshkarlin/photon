@@ -1,27 +1,26 @@
 package app.photon.ui.shared
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.painter.Painter
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import app.photon.data.model.Conversation
+import app.photon.ui.theme.PhotonGrid
+import com.thelightphone.sdk.ui.LightText
+import com.thelightphone.sdk.ui.LightTextVariant
+import com.thelightphone.sdk.ui.LightThemeTokens
+import com.thelightphone.sdk.ui.gridUnitsAsDp
+import com.thelightphone.sdk.ui.lightClickable
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -33,6 +32,13 @@ private val hourMinuteFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
 private val weekdayFormat = SimpleDateFormat("EEE", Locale.getDefault())
 private val dayMonthFormat = SimpleDateFormat("dd/MM", Locale.getDefault())
 
+/**
+ * One conversation in a chat list: name, last-activity time and an unread
+ * count. Fixed height ([PhotonGrid.LIST_ROW_HEIGHT]) so the list can use the
+ * SDK's uniform-row scroll bar.
+ *
+ * @param icon platform icon, shown in All Chats
+ */
 @Composable
 fun ConversationRow(
     conv: Conversation,
@@ -42,54 +48,56 @@ fun ConversationRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 22.dp),
+            .height(PhotonGrid.LIST_ROW_HEIGHT.gridUnitsAsDp())
+            .lightClickable(onClick = onClick),
+        horizontalArrangement = Arrangement.spacedBy(0.75f.gridUnitsAsDp()),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (icon != null) {
             Icon(
                 painter = icon,
                 contentDescription = null,
-                tint = Color(0xFF444444),
-                modifier = Modifier.size(18.dp),
+                tint = LightThemeTokens.colors.contentSecondary,
+                modifier = Modifier.size(1.5f.gridUnitsAsDp()),
             )
-            Spacer(Modifier.width(14.dp))
         }
 
-        Text(
+        LightText(
             text = conv.name?.takeIf { it.isNotBlank() } ?: conv.jid,
-            fontSize = 18.sp,
-            letterSpacing = 1.sp,
-            color = Color.White,
+            variant = LightTextVariant.Copy,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
 
-        Text(
+        LightText(
             text = formatTimestamp(conv.lastTimestamp),
-            fontSize = 13.sp,
-            letterSpacing = 1.sp,
-            color = Color(0xFF666666),
-            modifier = Modifier.padding(start = 16.dp),
+            variant = LightTextVariant.Detail,
+            lighten = true,
+            maxLines = 1,
         )
 
         if (conv.unreadCount > 0) {
-            Surface(
-                shape = CircleShape,
-                color = Color.White,
-                modifier = Modifier.padding(start = 12.dp).size(22.dp),
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Text(
-                        text = if (conv.unreadCount > 99) "99+" else conv.unreadCount.toString(),
-                        fontSize = 10.sp,
-                        color = Color.Black,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-            }
+            UnreadBadge(conv.unreadCount)
         }
+    }
+}
+
+/** Unread count, inverted (black on white) so it reads without colour. */
+@Composable
+private fun UnreadBadge(count: Int) {
+    Box(
+        modifier = Modifier
+            .size(1.75f.gridUnitsAsDp())
+            .background(LightThemeTokens.colors.content, CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        LightText(
+            text = if (count > 99) "99+" else count.toString(),
+            variant = LightTextVariant.Superfine,
+            color = LightThemeTokens.colors.background,
+            maxLines = 1,
+        )
     }
 }
 

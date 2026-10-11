@@ -1,44 +1,39 @@
 package app.photon.ui.shared
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
-import app.photon.R
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import app.photon.data.ListScrollSpeed
-import app.photon.data.PhotonPreferences
+import androidx.compose.ui.text.style.TextAlign
 import app.photon.data.model.Conversation
 import app.photon.service.NotificationHelper
-import app.photon.ui.shared.components.PhotonHeader
+import app.photon.ui.shared.components.backButton
+import app.photon.ui.shared.components.settingsButton
+import app.photon.ui.theme.PhotonGrid
+import com.thelightphone.sdk.ui.LightLazyScrollView
+import com.thelightphone.sdk.ui.LightText
+import com.thelightphone.sdk.ui.LightTextVariant
+import com.thelightphone.sdk.ui.LightThemeTokens
+import com.thelightphone.sdk.ui.LightTopBar
+import com.thelightphone.sdk.ui.LightTopBarCenter
+import com.thelightphone.sdk.ui.gridUnitsAsDp
 
 /**
  * Shared chat list screen structure used by WhatsApp, Signal, SMS, and All Chats.
- * Handles header, loading state, empty state, and conversation list.
+ * Handles the top bar, loading state, empty state, and conversation list.
  */
 @Composable
 fun ChatListContent(
@@ -46,7 +41,7 @@ fun ChatListContent(
     conversations: List<Conversation>?,
     onChat: (String) -> Unit,
     onBack: (() -> Unit)? = null,
-    emptyMessage: String = "NO MESSAGES",
+    emptyMessage: String = "No messages",
     emptyContent: @Composable (() -> Unit)? = null,
     icon: @Composable ((Conversation) -> Painter)? = null,
     onTitleClick: (() -> Unit)? = null,
@@ -54,21 +49,8 @@ fun ChatListContent(
 ) {
     val listState = rememberLazyListState()
     val context = LocalContext.current
-    val prefs = remember { PhotonPreferences(context) }
-    val menuScrollSpeed by prefs.menuScrollSpeed
-        .collectAsState(initial = ListScrollSpeed.SLOW)
-    ScrollDialEffect { dir ->
-        val step = dir.toInt() * menuScrollSpeed.items
-        val target = (listState.firstVisibleItemIndex + step).coerceAtLeast(0)
-        listState.scrollToItem(target)
-    }
+    ListScrollDialEffect(listState)
 
-    // When a new message promotes a different chat to the top of the list, keep
-    // the user pinned to the top *only* if they were already parked there — so
-    // the newly-promoted chat is visible rather than scrolled off above. If they
-    // had scrolled down, the keyed LazyColumn preserves their position instead.
-    // Processed in a single collector so the reorder frame (top changes and the
-    // at-top reading flips together) reads the pre-reorder at-top intent.
     // Clear notifications left behind for chats that are no longer unread
     // (read on another device, deleted, or posted by a previous process).
     LaunchedEffect(conversations) {
@@ -77,6 +59,12 @@ fun ChatListContent(
         }
     }
 
+    // When a new message promotes a different chat to the top of the list, keep
+    // the user pinned to the top *only* if they were already parked there — so
+    // the newly-promoted chat is visible rather than scrolled off above. If they
+    // had scrolled down, the keyed LazyColumn preserves their position instead.
+    // Processed in a single collector so the reorder frame (top changes and the
+    // at-top reading flips together) reads the pre-reorder at-top intent.
     val convState = rememberUpdatedState(conversations)
     LaunchedEffect(Unit) {
         var wasAtTop = true
@@ -97,29 +85,48 @@ fun ChatListContent(
         }
     }
 
+    ChatListLayout(
+        title = title,
+        conversations = conversations,
+        onChat = onChat,
+        listState = listState,
+        onBack = onBack,
+        emptyMessage = emptyMessage,
+        emptyContent = emptyContent,
+        icon = icon,
+        onTitleClick = onTitleClick,
+        onSettings = onSettings,
+    )
+}
+
+/** The chat list without its effects, so previews can render it. */
+@Composable
+internal fun ChatListLayout(
+    title: String,
+    conversations: List<Conversation>?,
+    onChat: (String) -> Unit,
+    listState: LazyListState = rememberLazyListState(),
+    onBack: (() -> Unit)? = null,
+    emptyMessage: String = "No messages",
+    emptyContent: @Composable (() -> Unit)? = null,
+    icon: @Composable ((Conversation) -> Painter)? = null,
+    onTitleClick: (() -> Unit)? = null,
+    onSettings: (() -> Unit)? = null,
+) {
     Column(
-        modifier = Modifier.fillMaxSize().background(Color.Black),
+        modifier = Modifier
+            .fillMaxSize()
+            .background(LightThemeTokens.colors.background),
     ) {
-        // Header — same dimensions as every other screen header.
-        PhotonHeader(
-            title = if (onTitleClick != null) "$title ▾" else title,
-            onBack = onBack,
-            onTitleClick = onTitleClick,
-            trailing = {
-                if (onSettings != null) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_settings),
-                        contentDescription = "Settings",
-                        tint = Color(0xFF666666),
-                        modifier = Modifier.align(Alignment.CenterEnd)
-                            .clickable(onClick = onSettings)
-                            .padding(start = 16.dp)
-                            .size(18.dp),
-                    )
-                }
-            },
+        LightTopBar(
+            leftButton = onBack?.let(::backButton),
+            // The ▾ marks the title as the platform picker.
+            center = LightTopBarCenter.Text(
+                text = if (onTitleClick != null) "$title ▾" else title,
+                onClick = onTitleClick,
+            ),
+            rightButton = onSettings?.let(::settingsButton),
         )
-        HorizontalDivider(color = Color(0xFF1A1A1A))
 
         when {
             // Loading — show nothing
@@ -127,25 +134,37 @@ fun ChatListContent(
 
             // Empty — show custom content or default message
             conversations.isEmpty() -> {
-                Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 20.dp), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = PhotonGrid.MENU_MARGIN.gridUnitsAsDp()),
+                    contentAlignment = Alignment.Center,
+                ) {
                     if (emptyContent != null) {
                         emptyContent()
                     } else {
-                        Text(emptyMessage, fontSize = 18.sp, letterSpacing = 3.sp, color = Color.White)
+                        LightText(emptyMessage, variant = LightTextVariant.Copy, align = TextAlign.Center)
                     }
                 }
             }
 
             // Conversations list
             else -> {
-                LazyColumn(state = listState) {
+                LightLazyScrollView(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = PhotonGrid.MENU_MARGIN.gridUnitsAsDp()),
+                    listState = listState,
+                    uniformItemHeightGridUnits = PhotonGrid.LIST_ROW_HEIGHT,
+                ) {
                     items(conversations, key = { it.jid }) { conv ->
                         ConversationRow(
                             conv = conv,
                             onClick = { onChat(conv.jid) },
                             icon = icon?.invoke(conv),
                         )
-                        HorizontalDivider(color = Color(0xFF111111))
                     }
                 }
             }

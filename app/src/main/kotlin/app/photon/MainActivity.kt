@@ -3,24 +3,32 @@ package app.photon
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.os.Build
+import android.graphics.Color
 import android.os.Bundle
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
-import app.photon.ui.shared.ScrollDialState
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import androidx.navigation.compose.rememberNavController
+import app.photon.data.PhotonPreferences
+import app.photon.data.ScrollDial
 import app.photon.nav.ChatDeepLink
 import app.photon.nav.PhotonNavGraph
 import app.photon.service.PhotonService
+import app.photon.ui.shared.ScrollDialEvent
+import app.photon.ui.shared.ScrollDialState
 import app.photon.ui.theme.PhotonTheme
+import com.thelightphone.sdk.ui.LightThemeTokens
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -30,13 +38,23 @@ class MainActivity : ComponentActivity() {
 
     private val deepLink = mutableStateOf<ChatDeepLink?>(null)
 
+    // Cached so dispatchKeyEvent never waits on DataStore.
+    @Volatile
+    private var scrollDial = ScrollDial.DEFAULT
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // A recreated activity has already handled its launch intent.
         if (savedInstanceState == null) deepLink.value = ChatDeepLink.from(intent)
+        lifecycleScope.launch {
+            PhotonPreferences(this@MainActivity).scrollDial.collect { scrollDial = it }
+        }
         startPhotonService()
         requestPermissionsIfNeeded()
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(Color.BLACK),
+            navigationBarStyle = SystemBarStyle.dark(Color.BLACK),
+        )
         setContent {
             PhotonTheme {
                 val navController = rememberNavController()
@@ -46,6 +64,7 @@ class MainActivity : ComponentActivity() {
                     onDeepLinkHandled = { deepLink.value = null },
                     modifier = Modifier
                         .fillMaxSize()
+                        .background(LightThemeTokens.colors.background)
                         .systemBarsPadding(),
                 )
             }
@@ -59,16 +78,16 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        // LP3 scroll dial: Pixart pat9126ja → WHEEL_CW (318) / WHEEL_CCW (317)
-        if (event.action == KeyEvent.ACTION_DOWN) {
-            when (event.keyCode) {
-                318 -> { ScrollDialState.emit(1f); return true }  // CW = scroll down
-                317 -> { ScrollDialState.emit(-1f); return true } // CCW = scroll up
+        // LP3 scroll dial: Pixart pat9126ja → WHEEL_CW (318) / WHEEL_CCW (317).
+        // With the dial OFF the events fall through to the system, which
+        // LightOS uses for screen brightness.
+        val dial = scrollDial
+        if (dial.consumesDial && (event.keyCode == WHEEL_CW || event.keyCode == WHEEL_CCW)) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                val direction = if (event.keyCode == WHEEL_CW) 1 else -1 // CW = scroll down
+                ScrollDialState.emit(ScrollDialEvent(direction, dial))
             }
-        } else if (event.action == KeyEvent.ACTION_UP) {
-            when (event.keyCode) {
-                317, 318 -> return true
-            }
+            return true
         }
         return super.dispatchKeyEvent(event)
     }
@@ -81,34 +100,23 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestPermissionsIfNeeded() {
-        val needed = mutableListOf<String>()
-
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            needed.add(Manifest.permission.RECORD_AUDIO)
-        }
-        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            needed.add(Manifest.permission.CAMERA)
-        }
-        if (checkSelfPermission(Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED) {
-            needed.add(Manifest.permission.READ_SMS)
-        }
-        if (checkSelfPermission(Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
-            needed.add(Manifest.permission.SEND_SMS)
-        }
-        if (checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
-            needed.add(Manifest.permission.READ_CONTACTS)
-        }
-        if (checkSelfPermission(Manifest.permission.WRITE_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
-            needed.add(Manifest.permission.WRITE_CONTACTS)
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                needed.add(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        }
+        val needed = listOf(
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.CAMERA,
+            Manifest.permission.READ_SMS,
+            Manifest.permission.SEND_SMS,
+            Manifest.permission.READ_CONTACTS,
+            Manifest.permission.WRITE_CONTACTS,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ).filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
 
         if (needed.isNotEmpty()) {
             permissionLauncher.launch(needed.toTypedArray())
         }
+    }
+
+    private companion object {
+        const val WHEEL_CCW = 317
+        const val WHEEL_CW = 318
     }
 }

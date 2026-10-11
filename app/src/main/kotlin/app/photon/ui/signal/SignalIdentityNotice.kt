@@ -1,12 +1,10 @@
 package app.photon.ui.signal
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -17,12 +15,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import app.photon.signal.store.ContactIdentity
 import app.photon.signal.store.IdentityVerification
 import app.photon.signal.store.PhotonIdentityKeyStore
+import app.photon.ui.theme.PhotonGrid
+import com.thelightphone.sdk.ui.LightText
+import com.thelightphone.sdk.ui.LightTextVariant
+import com.thelightphone.sdk.ui.LightThemeTokens
+import com.thelightphone.sdk.ui.gridUnitsAsDp
+import com.thelightphone.sdk.ui.lightClickable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -38,39 +41,44 @@ internal fun SignalIdentityNotice(store: PhotonIdentityKeyStore, contacts: Map<S
 
     changed.firstOrNull()?.let { first ->
         Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = PhotonGrid.CHAT_MARGIN.gridUnitsAsDp()),
+            horizontalArrangement = Arrangement.spacedBy(1f.gridUnitsAsDp()),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             val name = contacts[first.address] ?: "Contact"
-            Text(
+            LightText(
                 text = if (changed.size == 1) "Safety number changed: $name"
                     else "Safety numbers changed: ${changed.size} contacts",
-                color = Color.White,
-                fontSize = 12.sp,
+                variant = LightTextVariant.Detail,
                 modifier = Modifier.weight(1f),
             )
-            TextButton(onClick = { reviewing = first }) {
-                Text("REVIEW", color = Color.White, fontSize = 11.sp)
-            }
+            LightText(
+                text = "REVIEW",
+                variant = LightTextVariant.Detail,
+                modifier = Modifier
+                    .lightClickable { reviewing = first }
+                    .padding(vertical = 0.5f.gridUnitsAsDp()),
+            )
         }
-        HorizontalDivider(color = Color(0xFF1A1A1A))
     }
 
     reviewing?.let { identity ->
         val name = contacts[identity.address] ?: "This contact"
         AlertDialog(
             onDismissRequest = { reviewing = null },
-            containerColor = Color(0xFF0D0D0D),
+            containerColor = LightThemeTokens.colors.background,
             tonalElevation = 0.dp,
-            shape = RoundedCornerShape(4.dp),
-            title = { Text("Safety number changed", color = Color.White, fontSize = 18.sp) },
+            shape = RectangleShape,
+            title = { LightText("Safety number changed", variant = LightTextVariant.Paragraph) },
             text = {
                 val warning = if (identity.verification == IdentityVerification.UNVERIFIED)
                     "Sending is blocked because the previous safety number was verified. " else ""
-                Text(
+                LightText(
                     "$name has a new safety number. ${warning}Check it on your main Signal device. " +
                         "Accepting allows sending and leaves this contact unverified.",
-                    color = Color.White, fontSize = 14.sp,
+                    variant = LightTextVariant.Detail,
                 )
             },
             confirmButton = {
@@ -79,11 +87,11 @@ internal fun SignalIdentityNotice(store: PhotonIdentityKeyStore, contacts: Map<S
                         withContext(Dispatchers.IO) { store.acceptChange(identity) }
                         reviewing = null
                     }
-                }) { Text("ACCEPT CHANGE", color = Color.White, fontSize = 12.sp) }
+                }) { LightText("ACCEPT CHANGE", variant = LightTextVariant.Detail) }
             },
             dismissButton = {
                 TextButton(onClick = { reviewing = null }) {
-                    Text("CANCEL", color = Color(0xFF666666), fontSize = 12.sp)
+                    LightText("CANCEL", variant = LightTextVariant.Detail, lighten = true)
                 }
             },
         )

@@ -5,8 +5,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -15,13 +13,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import app.photon.service.PhotonService
 import app.photon.ui.shared.QrPanel
-import app.photon.ui.shared.components.PhotonHeader
+import app.photon.ui.shared.components.backButton
 import app.photon.ui.shared.generateQrBitmap
+import app.photon.ui.theme.PhotonGrid
+import com.thelightphone.sdk.ui.LightText
+import com.thelightphone.sdk.ui.LightTextVariant
+import com.thelightphone.sdk.ui.LightThemeTokens
+import com.thelightphone.sdk.ui.LightTopBar
+import com.thelightphone.sdk.ui.LightTopBarCenter
+import com.thelightphone.sdk.ui.gridUnitsAsDp
 
 @Composable
 fun SignalPairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
@@ -63,19 +65,19 @@ fun SignalPairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black)
-            .padding(horizontal = 20.dp),
+            .background(LightThemeTokens.colors.background),
     ) {
-        // Header
-        PhotonHeader("LINK SIGNAL", onBack, horizontalPadding = 0.dp)
-        HorizontalDivider(color = Color(0xFF1A1A1A))
+        LightTopBar(leftButton = backButton(onBack), center = LightTopBarCenter.Text("Link Signal"))
 
         // Instructions
-        Text(
+        LightText(
             text = "Signal > Linked Devices > Link New Device",
-            fontSize = 13.sp,
-            color = Color(0xFF666666),
-            modifier = Modifier.padding(vertical = 16.dp),
+            variant = LightTextVariant.Detail,
+            lighten = true,
+            modifier = Modifier.padding(
+                horizontal = PhotonGrid.MENU_MARGIN.gridUnitsAsDp(),
+                vertical = 1f.gridUnitsAsDp(),
+            ),
         )
 
         // QR code
@@ -83,8 +85,7 @@ fun SignalPairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
             bitmap = qrBitmap,
             error = error,
             waitingText = status,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(1f).padding(horizontal = PhotonGrid.MENU_MARGIN.gridUnitsAsDp()),
         )
     }
 }
-

@@ -4,18 +4,11 @@ import android.content.ContentProviderOperation
 import android.net.Uri
 import android.provider.ContactsContract
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -24,15 +17,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import app.photon.ui.shared.components.PhotonHeader
+import app.photon.ui.shared.components.LightInputField
+import app.photon.ui.shared.components.backButton
+import app.photon.ui.theme.PhotonGrid
+import com.thelightphone.sdk.ui.LightBarButton
+import com.thelightphone.sdk.ui.LightBottomBar
+import com.thelightphone.sdk.ui.LightText
+import com.thelightphone.sdk.ui.LightTextVariant
+import com.thelightphone.sdk.ui.LightThemeTokens
+import com.thelightphone.sdk.ui.LightTopBar
+import com.thelightphone.sdk.ui.LightTopBarCenter
+import com.thelightphone.sdk.ui.gridUnitsAsDp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -88,108 +86,91 @@ fun ContactScreen(
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-        // Header
-        PhotonHeader("CONTACT", onBack)
-        HorizontalDivider(color = Color(0xFF1A1A1A))
+    fun save() {
+        saving = true
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                try {
+                    writeContact(
+                        context.contentResolver,
+                        name = nameInput.trim(),
+                        phone = phone,
+                        existingLookupUri = existingLookupUri,
+                    )
+                    true
+                } catch (e: Exception) {
+                    android.util.Log.w("ContactScreen", "Save failed", e)
+                    false
+                }
+            }
+            if (ok) {
+                // Invalidate cached name lookups so the chat list
+                // and titles pick up the new contact immediately
+                // instead of after the next reconnect / refresh.
+                app.photon.service.PhotonService._signalReceiver?.refreshContactNames()
+                app.photon.service.PhotonService._smsRepository?.refreshContactNames()
+            }
+            saving = false
+            status = if (ok) "Saved." else "Save failed — check permissions."
+            if (ok) onBack()
+        }
+    }
 
-        // Phone number (read-only display).
-        Spacer(Modifier.height(28.dp))
-        Text(
-            text = phone,
-            fontSize = 24.sp,
-            color = Color.White,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-        )
-        Spacer(Modifier.height(28.dp))
-        HorizontalDivider(color = Color(0xFF1A1A1A))
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(LightThemeTokens.colors.background),
+    ) {
+        LightTopBar(leftButton = backButton(onBack), center = LightTopBarCenter.Text("Contact"))
 
-        // Name field — editable. Pre-filled with existing name if the number
-        // is already saved, otherwise with whatever display name we knew.
-        Text(
-            text = "NAME",
-            fontSize = 9.sp, letterSpacing = 2.sp, color = Color(0xFF666666),
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
-        )
-        Box(
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp)
-                .padding(bottom = 18.dp),
+                .weight(1f)
+                .padding(horizontal = PhotonGrid.MENU_MARGIN.gridUnitsAsDp()),
+            verticalArrangement = Arrangement.spacedBy(1f.gridUnitsAsDp()),
         ) {
-            BasicTextField(
-                value = nameInput,
-                onValueChange = { nameInput = it; status = null },
-                singleLine = true,
-                textStyle = TextStyle(color = Color.White, fontSize = 18.sp, letterSpacing = 1.sp),
-                cursorBrush = SolidColor(Color.White),
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.Words,
-                    imeAction = ImeAction.Done,
-                ),
-                modifier = Modifier.fillMaxWidth(),
+            // Phone number (read-only display).
+            LightText(
+                text = phone,
+                variant = LightTextVariant.Heading,
+                modifier = Modifier.padding(top = 1f.gridUnitsAsDp()),
             )
-            if (nameInput.isEmpty()) {
-                Text(
-                    "(unsaved)", fontSize = 18.sp, color = Color(0xFF444444),
+
+            // Name field — editable. Pre-filled with existing name if the number
+            // is already saved, otherwise with whatever display name we knew.
+            Column {
+                LightText("NAME", variant = LightTextVariant.Detail, lighten = true)
+                LightInputField(
+                    value = nameInput,
+                    onValueChange = { nameInput = it; status = null },
+                    placeholder = "(unsaved)",
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.Words,
+                        imeAction = ImeAction.Done,
+                    ),
                 )
             }
-        }
-        HorizontalDivider(color = Color(0xFF1A1A1A))
 
-        // Save action.
-        val saveLabel = when {
-            saving -> "SAVING..."
-            existingLookupUri != null -> "UPDATE CONTACT"
-            else -> "SAVE TO CONTACTS"
+            status?.let {
+                LightText(text = it, variant = LightTextVariant.Detail, lighten = true)
+            }
         }
+
+        // Save is the page's primary action; it only appears once there's a
+        // name to save.
         val canSave = !saving && nameInput.isNotBlank()
-        Text(
-            text = saveLabel,
-            fontSize = 18.sp, letterSpacing = 2.sp,
-            color = if (canSave) Color.White else Color(0xFF444444),
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(enabled = canSave) {
-                    saving = true
-                    scope.launch {
-                        val ok = withContext(Dispatchers.IO) {
-                            try {
-                                writeContact(
-                                    context.contentResolver,
-                                    name = nameInput.trim(),
-                                    phone = phone,
-                                    existingLookupUri = existingLookupUri,
-                                )
-                                true
-                            } catch (e: Exception) {
-                                android.util.Log.w("ContactScreen", "Save failed", e)
-                                false
-                            }
-                        }
-                        if (ok) {
-                            // Invalidate cached name lookups so the chat list
-                            // and titles pick up the new contact immediately
-                            // instead of after the next reconnect / refresh.
-                            app.photon.service.PhotonService._signalReceiver?.refreshContactNames()
-                            app.photon.service.PhotonService._smsRepository?.refreshContactNames()
-                        }
-                        saving = false
-                        status = if (ok) "Saved." else "Save failed — check permissions."
-                        if (ok) onBack()
-                    }
-                }
-                .padding(horizontal = 20.dp, vertical = 22.dp),
+        LightBottomBar(
+            items = when {
+                saving -> listOf(LightBarButton.Text(text = "SAVING…", onClick = null))
+                canSave -> listOf(
+                    LightBarButton.Text(
+                        text = if (existingLookupUri != null) "UPDATE CONTACT" else "SAVE TO CONTACTS",
+                        onClick = ::save,
+                    ),
+                )
+                else -> emptyList()
+            },
         )
-        HorizontalDivider(color = Color(0xFF111111))
-
-        status?.let {
-            Text(
-                text = it.uppercase(),
-                fontSize = 11.sp, letterSpacing = 2.sp, color = Color(0xFF666666),
-                modifier = Modifier.fillMaxWidth().padding(20.dp),
-            )
-        }
     }
 }
 
