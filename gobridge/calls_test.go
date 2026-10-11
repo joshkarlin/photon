@@ -253,3 +253,30 @@ func TestWithoutCallRows(t *testing.T) {
 		t.Errorf("WithoutCallRows = %v, want [m1]", got)
 	}
 }
+
+// A chat whose only unread rows are missed calls is marked read like any
+// other, without asking WhatsApp for a receipt on Photon's own call ids.
+func TestMarkRead_callsOnlyChat(t *testing.T) {
+	b := newClientBridge(t)
+	b.HandleEvent(&events.CallOffer{BasicCallMeta: callMeta("c1", caller, caller), Data: voiceOffer()})
+	b.HandleEvent(&events.CallTerminate{BasicCallMeta: callMeta("c1", caller, caller)})
+	if got := unreadCount(t, b, caller.String()); got != 1 {
+		t.Fatalf("unread = %d, want 1 missed call", got)
+	}
+
+	resp, err := b.handleMarkRead(context.Background(), mustMarshal(MarkReadPayload{
+		JID: caller.String(), MessageIDs: []string{callRowID("c1")},
+	}))
+	if err != nil {
+		t.Fatalf("mark_read: %v (no receipt should have been attempted)", err)
+	}
+	if string(resp) != "{}" {
+		t.Errorf("response = %s", resp)
+	}
+	if got := unreadCount(t, b, caller.String()); got != 0 {
+		t.Errorf("unread = %d, want 0", got)
+	}
+	if got := messageStatus(t, b, callRowID("c1")); got != "read" {
+		t.Errorf("call row status = %q, want read", got)
+	}
+}

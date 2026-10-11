@@ -14,15 +14,29 @@ class MarkReadRequestTest {
     )
 
     @Test
-    fun receiptCoversIncomingMessagesOnly() {
-        // Newest first: a missed call, our reply, then two incoming messages.
-        val messages = listOf(msg("call_c1", type = "call"), msg("mine", fromMe = true), msg("m2"), msg("m1"))
+    fun coversIncomingRowsOnly() {
+        // Newest first: our reply, then two incoming messages.
+        val messages = listOf(msg("mine", fromMe = true), msg("m2"), msg("m1"))
         assertEquals("m2" to listOf("m2", "m1"), markReadRequest(messages, lastMarkedReadId = null))
+    }
+
+    @Test
+    fun aMissedCallOnTopIsTheNewestRow() {
+        // The bridge reads through the call and leaves it out of the receipt.
+        val messages = listOf(msg("call_c1", type = "call"), msg("mine", fromMe = true), msg("m1"))
+        assertEquals("call_c1" to listOf("call_c1", "m1"), markReadRequest(messages, lastMarkedReadId = null))
+    }
+
+    @Test
+    fun aChatOfOnlyCallsIsStillMarkedRead() {
+        val messages = listOf(msg("call_c2", type = "call"), msg("call_c1", type = "call"))
+        assertEquals("call_c2", markReadRequest(messages, lastMarkedReadId = null)?.first)
     }
 
     @Test
     fun nothingToSendOnceTheNewestIsMarked() {
         assertNull(markReadRequest(listOf(msg("m2"), msg("m1")), lastMarkedReadId = "m2"))
+        assertNull(markReadRequest(listOf(msg("call_c1", type = "call")), lastMarkedReadId = "call_c1"))
     }
 
     @Test
@@ -37,7 +51,7 @@ class MarkReadRequestTest {
     }
 
     @Test
-    fun onlyCallsOrOwnMessagesSendNothing() {
-        assertNull(markReadRequest(listOf(msg("call_c1", type = "call"), msg("mine", fromMe = true)), null))
+    fun onlyOwnMessagesSendNothing() {
+        assertNull(markReadRequest(listOf(msg("mine", fromMe = true)), null))
     }
 }
