@@ -86,6 +86,7 @@ fun SignalMessageDatabase.getGroupMeta(jid: String): GroupMeta? {
     }
 }
 
+/** Every conversation row, including those [getConversationsWithContacts] doesn't list. */
 fun SignalMessageDatabase.getConversations(): List<Conversation> {
     return readableDatabase.rawQuery(
         "SELECT * FROM conversations ORDER BY last_timestamp DESC", null,
@@ -101,9 +102,19 @@ private const val CONVERSATION_WITH_CONTACT =
 private fun android.database.Cursor.conversationWithContact(): Pair<Conversation, Contact?> =
     toConversation() to nameSources(getColumnIndexOrThrow("ct_jid"))
 
-/** The conversation list, each with its name sources, newest first. */
+/**
+ * The conversation list, each with its name sources, newest first. Only
+ * conversations with a message (call rows included) are listed, as on
+ * WhatsApp: rows also exist for groups whose messages have all aged out
+ * (they keep the master key and members) and, from older builds, for
+ * contacts that never wrote.
+ */
 fun SignalMessageDatabase.getConversationsWithContacts(): List<Pair<Conversation, Contact?>> =
-    readableDatabase.rawQuery("$CONVERSATION_WITH_CONTACT ORDER BY c.last_timestamp DESC", null).use { c ->
+    readableDatabase.rawQuery(
+        "$CONVERSATION_WITH_CONTACT WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_jid = c.jid) " +
+            "ORDER BY c.last_timestamp DESC",
+        null,
+    ).use { c ->
         buildList { while (c.moveToNext()) add(c.conversationWithContact()) }
     }
 

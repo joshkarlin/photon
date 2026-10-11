@@ -10,6 +10,7 @@ import app.photon.signal.db.getConversationsWithContacts
 import app.photon.signal.db.getGroupPeople
 import app.photon.signal.db.insertMessage
 import app.photon.signal.db.updateContactPhone
+import app.photon.signal.db.upsertCallRow
 import app.photon.signal.db.updateContactProfileName
 import app.photon.signal.db.upsertConversation
 import app.photon.signal.db.upsertParticipant
@@ -143,6 +144,17 @@ class SignalNamesTest {
         val resolved = db.getConversationsWithContacts().associate { (c, contact) -> c.jid to names.title(c, contact) }
 
         assertEquals(mapOf(mum to "Mum", group to "Climbing"), resolved)
+    }
+
+    /** Rows with no message (old contact-sync and profile-fetch ghosts) aren't listed; a call counts. */
+    @Test
+    fun onlyConversationsWithAMessageOrCallAreListed() {
+        db.upsertConversation(jid = mum, name = null, isGroup = false)
+        db.upsertConversation(jid = bob, name = null, isGroup = false)
+        db.upsertConversation(jid = group, name = "Climbing", isGroup = true)
+        db.upsertCallRow("call_${bob}_1", bob, bob, 5, "Missed voice call", unread = true)
+
+        assertEquals(listOf(bob), db.getConversationsWithContacts().map { it.first.jid })
     }
 
     /** Members, plus anyone who wrote without being stored as one. */
