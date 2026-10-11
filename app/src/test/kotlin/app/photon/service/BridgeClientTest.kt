@@ -27,17 +27,17 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-/** WsClient against a fake bridge on a pair of pipes. */
+/** BridgeClient against a fake bridge on a pair of pipes. */
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [34])
-class WsClientTest {
-    private lateinit var client: WsClient
+class BridgeClientTest {
+    private lateinit var client: BridgeClient
     private lateinit var bridgeOut: BufferedWriter      // what the "bridge" prints
     private lateinit var bridgeIn: java.io.BufferedReader // what the client sent
 
     @Before
     fun setUp() {
-        client = WsClient(GoBridge(ApplicationProvider.getApplicationContext()))
+        client = BridgeClient(GoBridge(ApplicationProvider.getApplicationContext()))
         val toClient = Pipe.open()
         val toBridge = Pipe.open()
         bridgeOut = Channels.newOutputStream(toClient.sink()).bufferedWriter()

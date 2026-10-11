@@ -11,7 +11,7 @@ import (
 )
 
 // handleRequest runs one request from Kotlin and builds its response.
-func (b *Bridge) handleRequest(ctx context.Context, msg WsMessage) WsMessage {
+func (b *Bridge) handleRequest(ctx context.Context, msg Envelope) Envelope {
 	var payload json.RawMessage
 	var err error
 
@@ -52,7 +52,7 @@ func (b *Bridge) handleRequest(ctx context.Context, msg WsMessage) WsMessage {
 		err = fmt.Errorf("unknown request type: %s", msg.Type)
 	}
 
-	resp := WsMessage{
+	resp := Envelope{
 		ID:   msg.ID,
 		Type: msg.Type + "_response",
 	}
@@ -209,7 +209,7 @@ func (b *Bridge) handleEditMessage(ctx context.Context, raw json.RawMessage) (js
 
 	b.UpdateMessageEdit(p.MessageID, targetJID.String(), p.NewText, &author{isMe: true})
 	// Tell connected UIs to refresh, mirroring the live edit path which
-	// broadcasts message_updated (ws request responses don't flow through the
+	// broadcasts message_updated (request responses don't flow through the
 	// event stream).
 	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
 		ConversationJID: targetJID.String(),

@@ -42,13 +42,13 @@ fun ChatListScreen(onChat: (String) -> Unit, onSwitch: () -> Unit, onSettings: (
 
 @Composable
 private fun WhatsAppSyncStatus() {
-    val ws = PhotonService._wsClient
-    val waState = ws?.whatsappState?.collectAsState()?.value ?: "disconnected"
+    val bridge = PhotonService._bridgeClient
+    val waState = bridge?.whatsappState?.collectAsState()?.value ?: "disconnected"
     var syncProgress by remember { mutableStateOf("") }
     var syncDone by remember { mutableStateOf(false) }
 
-    LaunchedEffect(ws) {
-        ws?.events?.collect { evt ->
+    LaunchedEffect(bridge) {
+        bridge?.events?.collect { evt ->
             when (evt.type) {
                 "history_sync_progress" -> {
                     val done = evt.int("conversations_done") ?: 0
@@ -71,7 +71,7 @@ private fun WhatsAppSyncStatus() {
                     syncDone -> "No messages yet"
                     waState == "connected" -> "Syncing"
                     waState == "connecting" -> "Connecting"
-                    PhotonService._wsClient?.isConnected?.value == true -> "Pairing"
+                    PhotonService._bridgeClient?.isConnected?.value == true -> "Pairing"
                     else -> "Connecting"
                 },
                 variant = LightTextVariant.Copy,

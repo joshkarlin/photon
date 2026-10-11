@@ -10,7 +10,7 @@ import kotlin.concurrent.thread
 
 /**
  * Owns the WhatsApp bridge process. Its stdin/stdout carry the line protocol
- * (see [WsClient]); its stderr is forwarded to logcat.
+ * (see [BridgeClient]); its stderr is forwarded to logcat.
  */
 class GoBridge(private val context: Context) {
     @Volatile private var process: Process? = null

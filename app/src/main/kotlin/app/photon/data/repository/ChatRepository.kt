@@ -3,8 +3,8 @@ package app.photon.data.repository
 import app.photon.data.db.PhotonDatabase
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
-import app.photon.data.model.WsEvent
-import app.photon.service.WsClient
+import app.photon.data.model.BridgeEvent
+import app.photon.service.BridgeClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -28,19 +28,19 @@ private val REFRESH_EVENTS = setOf(
 
 class ChatRepository(
     private val db: PhotonDatabase,
-    private val ws: WsClient,
+    private val bridge: BridgeClient,
     scope: CoroutineScope,
 ) {
     // Self-nudge after our own request-based mutations (markRead, reactions):
     // not every bridge request handler broadcasts an event, and the request's
-    // response doesn't flow through ws.events.
+    // response doesn't flow through bridge.events.
     private val localChanges = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
     private val changes: Flow<Unit> = merge(
-        ws.events.filter { it.type in REFRESH_EVENTS }.map { },
-        // Events emitted while the bridge socket was down are gone — re-query
+        bridge.events.filter { it.type in REFRESH_EVENTS }.map { },
+        // Events emitted while the bridge was down are gone — re-query
         // on every reconnect.
-        ws.isConnected.drop(1).filter { it }.map { },
+        bridge.isConnected.drop(1).filter { it }.map { },
         localChanges,
     )
 
@@ -77,34 +77,34 @@ class ChatRepository(
         localChanges.tryEmit(Unit)
     }
 
-    suspend fun sendMessage(jid: String, text: String, replyToId: String? = null): WsEvent {
-        return ws.sendMessage(jid, text, replyToId).also { nudge() }
+    suspend fun sendMessage(jid: String, text: String, replyToId: String? = null): BridgeEvent {
+        return bridge.sendMessage(jid, text, replyToId).also { nudge() }
     }
 
-    suspend fun retryMessage(messageId: String): WsEvent {
-        return ws.retryMessage(messageId).also { nudge() }
+    suspend fun retryMessage(messageId: String): BridgeEvent {
+        return bridge.retryMessage(messageId).also { nudge() }
     }
 
-    suspend fun deleteMessage(jid: String, messageId: String, forEveryone: Boolean): WsEvent {
-        return ws.deleteMessage(jid, messageId, forEveryone).also { nudge() }
+    suspend fun deleteMessage(jid: String, messageId: String, forEveryone: Boolean): BridgeEvent {
+        return bridge.deleteMessage(jid, messageId, forEveryone).also { nudge() }
     }
 
-    suspend fun sendMedia(jid: String, filePath: String, mimeType: String, caption: String?, replyToId: String?): WsEvent {
-        return ws.sendMedia(jid, filePath, mimeType, caption, replyToId).also { nudge() }
+    suspend fun sendMedia(jid: String, filePath: String, mimeType: String, caption: String?, replyToId: String?): BridgeEvent {
+        return bridge.sendMedia(jid, filePath, mimeType, caption, replyToId).also { nudge() }
     }
 
-    suspend fun sendReaction(jid: String, messageId: String, senderJid: String, emoji: String): WsEvent {
-        return ws.sendReaction(jid, messageId, senderJid, emoji).also { nudge() }
+    suspend fun sendReaction(jid: String, messageId: String, senderJid: String, emoji: String): BridgeEvent {
+        return bridge.sendReaction(jid, messageId, senderJid, emoji).also { nudge() }
     }
 
-    suspend fun markRead(jid: String, messageIds: List<String>): WsEvent {
-        return ws.markRead(jid, messageIds).also { nudge() }
+    suspend fun markRead(jid: String, messageIds: List<String>): BridgeEvent {
+        return bridge.markRead(jid, messageIds).also { nudge() }
     }
 
     // Backfill group participant display names from the contact store. The
     // bridge broadcasts conversation_updated when anything changes, which
     // refreshes the conversations flow (and thus participant names) on its own.
-    suspend fun resolveParticipants(jid: String): WsEvent {
-        return ws.resolveParticipants(jid)
+    suspend fun resolveParticipants(jid: String): BridgeEvent {
+        return bridge.resolveParticipants(jid)
     }
 }

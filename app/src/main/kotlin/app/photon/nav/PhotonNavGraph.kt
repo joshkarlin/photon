@@ -75,7 +75,7 @@ fun PhotonNavGraph(
                         PlatformPick.ALL -> Routes.ALL_CHATS
                         PlatformPick.SMS -> Routes.SMS_CHATS
                         PlatformPick.WHATSAPP -> {
-                            val state = PhotonService._wsClient?.whatsappState?.value
+                            val state = PhotonService._bridgeClient?.whatsappState?.value
                             if (state == "connected") Routes.WHATSAPP_CHATS else Routes.WHATSAPP_PAIRING
                         }
                         PlatformPick.SIGNAL -> Routes.SIGNAL

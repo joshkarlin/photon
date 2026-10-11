@@ -30,7 +30,7 @@ import app.photon.signal.SignalRepository
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.store.SignalProtocolDatabase
 import app.photon.signal.store.PhotonProtocolStore
-import app.photon.data.model.WsEvent
+import app.photon.data.model.BridgeEvent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,7 +48,7 @@ class PhotonService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var goBridge: GoBridge
-    private lateinit var wsClient: WsClient
+    private lateinit var bridgeClient: BridgeClient
     private lateinit var chatRepository: ChatRepository
     private var bridgeJob: Job? = null
 
@@ -57,13 +57,13 @@ class PhotonService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification("Running"))
 
         goBridge = GoBridge(this)
-        wsClient = WsClient(goBridge)
+        bridgeClient = BridgeClient(goBridge)
         val database = PhotonDatabase(this)
-        chatRepository = ChatRepository(database, wsClient, scope)
+        chatRepository = ChatRepository(database, bridgeClient, scope)
 
         // Expose as singletons for UI access
         _goBridge = goBridge
-        _wsClient = wsClient
+        _bridgeClient = bridgeClient
         _chatRepository = chatRepository
         _database = database
 
@@ -114,13 +114,13 @@ class PhotonService : Service() {
         }
 
         // Subscribed before the bridge starts, so no notification is missed.
-        val whatsappEvents = wsClient.subscribeLossless(WHATSAPP_SERVICE_EVENTS)
+        val whatsappEvents = bridgeClient.subscribeLossless(WHATSAPP_SERVICE_EVENTS)
 
         // Start the Go bridge and keep it running
         bridgeJob = scope.launch {
             try {
                 try {
-                    wsClient.connect()
+                    bridgeClient.connect()
                 } catch (e: Exception) {
                     Log.e("PhotonService", "Failed to start Go bridge", e)
                 }
@@ -162,17 +162,17 @@ class PhotonService : Service() {
     private suspend fun superviseBridge() {
         val backoff = RestartBackoff()
         while (true) {
-            wsClient.isConnected.first { !it }
+            bridgeClient.isConnected.first { !it }
             val wait = backoff.next()
             Log.w("PhotonService", "WhatsApp bridge not running; restarting in ${wait}ms")
             delay(wait)
             try {
-                wsClient.connect()
+                bridgeClient.connect()
             } catch (e: Exception) {
                 Log.e("PhotonService", "Failed to restart Go bridge", e)
             }
             // A bridge that stays up for a while has recovered.
-            if (withTimeoutOrNull(BRIDGE_STABLE_MS) { wsClient.isConnected.first { !it } } == null) {
+            if (withTimeoutOrNull(BRIDGE_STABLE_MS) { bridgeClient.isConnected.first { !it } } == null) {
                 backoff.reset()
             }
         }
@@ -188,9 +188,9 @@ class PhotonService : Service() {
         super.onDestroy()
         bridgeJob?.cancel()
         // Stopping waits for the bridge to exit; keep that off the main thread.
-        val client = wsClient
+        val client = bridgeClient
         thread(name = "gobridge-stop") { client.disconnect() }
-        _wsClient = null
+        _bridgeClient = null
         _chatRepository = null
         _database = null
         _signalReceiver?.stop()
@@ -204,7 +204,7 @@ class PhotonService : Service() {
         _signalProtocolDb = null
     }
 
-    private suspend fun listenForWhatsAppMessages(events: ReceiveChannel<WsEvent>) {
+    private suspend fun listenForWhatsAppMessages(events: ReceiveChannel<BridgeEvent>) {
         events.consumeEach { evt ->
             try {
                 handleWhatsAppEvent(evt)
@@ -218,7 +218,7 @@ class PhotonService : Service() {
         }
     }
 
-    private fun handleWhatsAppEvent(evt: WsEvent) {
+    private fun handleWhatsAppEvent(evt: BridgeEvent) {
         when (evt.type) {
             "new_message" -> {
                 if (evt.boolean("is_from_me") == true) return
@@ -277,7 +277,7 @@ class PhotonService : Service() {
         }
     }
 
-    private fun callerName(evt: WsEvent, convJid: String): String =
+    private fun callerName(evt: BridgeEvent, convJid: String): String =
         evt.string("caller_name")?.takeIf { it.isNotBlank() } ?: convJid.substringBefore("@")
 
     /**
@@ -302,7 +302,7 @@ class PhotonService : Service() {
 
     private fun updateNotification() {
         val parts = mutableListOf<String>()
-        val waState = _wsClient?.whatsappState?.value
+        val waState = _bridgeClient?.whatsappState?.value
         if (waState == "connected") parts.add("WA \u2713") else parts.add("WA \u2717")
         val sigState = _signalReceiver?.state?.value
         if (sigState == "connected") parts.add("Signal \u2713") else if (_signalCredentials?.isRegistered() == true) parts.add("Signal \u2717")
@@ -366,7 +366,7 @@ class PhotonService : Service() {
             get() = _smsRepoState.value
             set(value) { _smsRepoState.value = value }
 
-        var _wsClient: WsClient? = null
+        var _bridgeClient: BridgeClient? = null
             private set
         var _database: PhotonDatabase? = null
             private set
@@ -429,8 +429,8 @@ class PhotonService : Service() {
             }
             // whileStopped keeps the supervisor from restarting the bridge
             // mid-wipe.
-            val ws = _wsClient
-            if (ws == null) wipe() else ws.whileStopped { wipe() }
+            val bridge = _bridgeClient
+            if (bridge == null) wipe() else bridge.whileStopped { wipe() }
         }
 
         /**
@@ -453,6 +453,6 @@ class PhotonService : Service() {
             java.io.File(context.filesDir, "signal_media").deleteRecursively()
         }
 
-        val wsClient: WsClient get() = _wsClient!!
+        val bridgeClient: BridgeClient get() = _bridgeClient!!
     }
 }

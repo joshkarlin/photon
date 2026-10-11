@@ -75,7 +75,7 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
         }
     }
 
-    val waState = PhotonService._wsClient?.whatsappState?.collectAsState()?.value
+    val waState = PhotonService._bridgeClient?.whatsappState?.collectAsState()?.value
     LaunchedEffect(waState) {
         if (waState == "connected") markRead()
     }
@@ -142,7 +142,7 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
             mediaMime = media.mediaMime,
             existingPath = media.mediaUrl,
             onDownloadMedia = { id ->
-                val resp = PhotonService.wsClient.downloadMedia(id)
+                val resp = PhotonService.bridgeClient.downloadMedia(id)
                 // Surface the bridge's actual error (e.g. expired CDN media)
                 // instead of letting the strict success-deserializer throw an
                 // opaque JSON parse error that hides the real cause.

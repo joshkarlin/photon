@@ -45,7 +45,7 @@ type Bridge struct {
 	out *lineWriter
 	// emit delivers one outbound event envelope to Kotlin. NewBridge wires it
 	// to the transport; tests swap in a recorder.
-	emit func(WsMessage)
+	emit func(Envelope)
 
 	connectionStateMu sync.RWMutex
 	connectionState   string
@@ -221,7 +221,7 @@ func (b *Bridge) BroadcastEvent(eventType string, payload interface{}) {
 	}
 
 	if b.emit != nil {
-		b.emit(WsMessage{Type: eventType, Payload: payloadBytes})
+		b.emit(Envelope{Type: eventType, Payload: payloadBytes})
 	}
 }
 

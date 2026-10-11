@@ -1,8 +1,8 @@
 package app.photon.service
 
 import android.util.Log
-import app.photon.data.model.WsEvent
-import app.photon.data.model.WsRequest
+import app.photon.data.model.BridgeEvent
+import app.photon.data.model.BridgeRequest
 import app.photon.data.model.string
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -37,21 +37,21 @@ import kotlin.concurrent.thread
  * envelope per line each way (the bridge logs to stderr). Only Photon holds
  * these pipes — the localhost WebSocket this replaced was open to every app
  * on the device. Responses are matched to requests by id; everything else the
- * bridge sends is an event. The name is historical; the API is unchanged.
+ * bridge sends is an event.
  */
-class WsClient(private val bridge: GoBridge) {
+class BridgeClient(private val bridge: GoBridge) {
     private val json = Json { ignoreUnknownKeys = true }
 
     // UI subscribers are best effort: under a burst (history sync) the oldest
     // undelivered events go, and the repositories' fallback re-query covers a
     // missed refresh. Anything that must not be missed uses subscribeLossless.
-    private val _events = MutableSharedFlow<WsEvent>(
+    private val _events = MutableSharedFlow<BridgeEvent>(
         extraBufferCapacity = 256,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
-    val events: SharedFlow<WsEvent> = _events
+    val events: SharedFlow<BridgeEvent> = _events
 
-    private val lossless = CopyOnWriteArrayList<Pair<Set<String>, Channel<WsEvent>>>()
+    private val lossless = CopyOnWriteArrayList<Pair<Set<String>, Channel<BridgeEvent>>>()
 
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected
@@ -60,7 +60,7 @@ class WsClient(private val bridge: GoBridge) {
     private val _whatsappState = MutableStateFlow("disconnected")
     val whatsappState: StateFlow<String> = _whatsappState
 
-    private val pendingRequests = ConcurrentHashMap<String, CompletableDeferred<WsEvent>>()
+    private val pendingRequests = ConcurrentHashMap<String, CompletableDeferred<BridgeEvent>>()
 
     // Serializes starting and stopping the bridge.
     private val lifecycle = Mutex()
@@ -119,7 +119,7 @@ class WsClient(private val bridge: GoBridge) {
             } catch (_: IOException) {
                 // Pipe closed under us: the process died or was stopped.
             }
-            Log.w("WsClient", "WhatsApp bridge output ended")
+            Log.w("BridgeClient", "WhatsApp bridge output ended")
             detach(gen)
         }
     }
@@ -141,9 +141,9 @@ class WsClient(private val bridge: GoBridge) {
 
     private fun onLine(line: String) {
         val event = try {
-            json.decodeFromString<WsEvent>(line)
+            json.decodeFromString<BridgeEvent>(line)
         } catch (e: Exception) {
-            Log.w("WsClient", "Unparseable bridge line (${line.length} chars)", e)
+            Log.w("BridgeClient", "Unparseable bridge line (${line.length} chars)", e)
             return
         }
         if (event.type == "connection_state") {
@@ -161,20 +161,20 @@ class WsClient(private val bridge: GoBridge) {
      * Every event of [types] from now on, across bridge restarts, with none
      * dropped however slowly it's consumed. Cancelling the channel unsubscribes.
      */
-    fun subscribeLossless(types: Set<String>): ReceiveChannel<WsEvent> {
-        val channel = Channel<WsEvent>(Channel.UNLIMITED)
+    fun subscribeLossless(types: Set<String>): ReceiveChannel<BridgeEvent> {
+        val channel = Channel<BridgeEvent>(Channel.UNLIMITED)
         val entry = types to channel
         lossless += entry
         channel.invokeOnClose { lossless.remove(entry) }
         return channel
     }
 
-    suspend fun request(type: String, payload: JsonObject = buildJsonObject {}): WsEvent {
+    suspend fun request(type: String, payload: JsonObject = buildJsonObject {}): BridgeEvent {
         val id = UUID.randomUUID().toString()
-        val deferred = CompletableDeferred<WsEvent>()
+        val deferred = CompletableDeferred<BridgeEvent>()
         pendingRequests[id] = deferred
         try {
-            val line = json.encodeToString(WsRequest(id, type, payload))
+            val line = json.encodeToString(BridgeRequest(id, type, payload))
             withContext(Dispatchers.IO) { send(line) }
             return withTimeout(30_000) { deferred.await() }
         } finally {
@@ -192,7 +192,7 @@ class WsClient(private val bridge: GoBridge) {
     }
 
     /** Ask the Go bridge to repair the WhatsApp socket/session connection. */
-    suspend fun reconnectWhatsApp(): WsEvent {
+    suspend fun reconnectWhatsApp(): BridgeEvent {
         if (!_isConnected.value) {
             connect()
             withTimeout(5_000) { isConnected.first { it } }
@@ -202,7 +202,7 @@ class WsClient(private val bridge: GoBridge) {
 
     // Convenience methods for common requests
 
-    suspend fun sendMessage(jid: String, text: String, replyToId: String? = null): WsEvent {
+    suspend fun sendMessage(jid: String, text: String, replyToId: String? = null): BridgeEvent {
         return request("send_message", buildJsonObject {
             put("jid", jid)
             put("text", text)
@@ -210,13 +210,13 @@ class WsClient(private val bridge: GoBridge) {
         })
     }
 
-    suspend fun retryMessage(messageId: String): WsEvent {
+    suspend fun retryMessage(messageId: String): BridgeEvent {
         return request("retry_message", buildJsonObject {
             put("message_id", messageId)
         })
     }
 
-    suspend fun deleteMessage(jid: String, messageId: String, forEveryone: Boolean): WsEvent {
+    suspend fun deleteMessage(jid: String, messageId: String, forEveryone: Boolean): BridgeEvent {
         return request("delete_message", buildJsonObject {
             put("jid", jid)
             put("message_id", messageId)
@@ -224,13 +224,13 @@ class WsClient(private val bridge: GoBridge) {
         })
     }
 
-    suspend fun resolveParticipants(jid: String): WsEvent {
+    suspend fun resolveParticipants(jid: String): BridgeEvent {
         return request("resolve_participants", buildJsonObject {
             put("jid", jid)
         })
     }
 
-    suspend fun sendReaction(jid: String, messageId: String, senderJid: String, emoji: String): WsEvent {
+    suspend fun sendReaction(jid: String, messageId: String, senderJid: String, emoji: String): BridgeEvent {
         return request("send_reaction", buildJsonObject {
             put("jid", jid)
             put("message_id", messageId)
@@ -239,7 +239,7 @@ class WsClient(private val bridge: GoBridge) {
         })
     }
 
-    suspend fun markRead(jid: String, messageIds: List<String>): WsEvent {
+    suspend fun markRead(jid: String, messageIds: List<String>): BridgeEvent {
         return request("mark_read", buildJsonObject {
             put("jid", jid)
             put("message_ids", kotlinx.serialization.json.JsonArray(
@@ -248,7 +248,7 @@ class WsClient(private val bridge: GoBridge) {
         })
     }
 
-    suspend fun sendMedia(jid: String, filePath: String, mimeType: String, caption: String?, replyToId: String?): WsEvent {
+    suspend fun sendMedia(jid: String, filePath: String, mimeType: String, caption: String?, replyToId: String?): BridgeEvent {
         return request("send_media", buildJsonObject {
             put("jid", jid)
             put("file_path", filePath)
@@ -258,19 +258,19 @@ class WsClient(private val bridge: GoBridge) {
         })
     }
 
-    suspend fun downloadMedia(messageId: String): WsEvent {
+    suspend fun downloadMedia(messageId: String): BridgeEvent {
         return request("download_media", buildJsonObject {
             put("message_id", messageId)
         })
     }
 
-    suspend fun requestPairingCode(phone: String): WsEvent {
+    suspend fun requestPairingCode(phone: String): BridgeEvent {
         return request("get_pairing_code", buildJsonObject {
             put("phone", phone)
         })
     }
 
-    suspend fun requestQr(): WsEvent {
+    suspend fun requestQr(): BridgeEvent {
         return request("get_qr")
     }
 }

@@ -55,12 +55,12 @@ func newClientBridge(t *testing.T) *Bridge {
 // eventLog records every event the bridge broadcasts.
 type eventLog struct {
 	mu  sync.Mutex
-	all []WsMessage
+	all []Envelope
 }
 
 func captureEvents(b *Bridge) *eventLog {
 	l := &eventLog{}
-	b.emit = func(m WsMessage) {
+	b.emit = func(m Envelope) {
 		l.mu.Lock()
 		l.all = append(l.all, m)
 		l.mu.Unlock()

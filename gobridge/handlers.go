@@ -31,7 +31,7 @@ func (b *Bridge) resolveLIDJID(jid types.JID) types.JID {
 	return jid
 }
 
-// resolveLIDString is resolveLIDJID for raw JID strings (WS API params,
+// resolveLIDString is resolveLIDJID for raw JID strings (request params,
 // history sync payloads).
 func (b *Bridge) resolveLIDString(jidStr string) string {
 	parsed, err := types.ParseJID(jidStr)
