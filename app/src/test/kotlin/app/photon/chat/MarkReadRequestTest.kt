@@ -1,4 +1,4 @@
-package app.photon.ui.whatsapp
+package app.photon.chat
 
 import app.photon.data.model.Message
 import app.photon.data.model.MessageStatus
