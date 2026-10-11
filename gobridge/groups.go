@@ -133,12 +133,6 @@ func (b *Bridge) forgetGroupAdmins(jid string) {
 // store was populated — render names without re-pairing. Cheap and idempotent,
 // so it's safe to call on every group open.
 func (b *Bridge) ResolveGroupParticipants(groupJID string) {
-	// Purge number-placeholder names an earlier build wrote (display_name that
-	// is a bare "+<digits>"), which shadowed real push/contact names. Removing
-	// them lets the real name repopulate below or via a future live message; the
-	// UI falls back to the number on its own when a participant has no row.
-	purged := b.purgeNumberPlaceholders(groupJID)
-
 	rows, err := b.msgDB.Query(
 		`SELECT DISTINCT sender_jid FROM messages WHERE conversation_jid = ? AND is_from_me = 0`,
 		groupJID,
@@ -156,7 +150,7 @@ func (b *Bridge) ResolveGroupParticipants(groupJID string) {
 	}
 	rows.Close()
 
-	updated := purged > 0
+	updated := false
 	for _, sjid := range senders {
 		parsed, perr := types.ParseJID(sjid)
 		if perr != nil {

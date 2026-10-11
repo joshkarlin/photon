@@ -5,9 +5,9 @@ import (
 	"database/sql"
 	"testing"
 
-	_ "modernc.org/sqlite"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	_ "modernc.org/sqlite"
 )
 
 // newTestBridge returns a Bridge backed by a fresh in-memory SQLite DB with the
@@ -52,52 +52,6 @@ func TestBestContactName(t *testing.T) {
 				t.Errorf("bestContactName = (%q, %v), want (%q, %v)", gotName, gotAuth, tc.wantName, tc.wantAuth)
 			}
 		})
-	}
-}
-
-func TestPurgeNumberPlaceholders(t *testing.T) {
-	b := newTestBridge(t)
-	const grp = "123@g.us"
-	// Mix of real names and number placeholders, plus a name that merely starts
-	// with a "+digit" but contains letters (must be preserved).
-	seed := []struct{ jid, name string }{
-		{"a@s.whatsapp.net", "Alice"},
-		{"b@s.whatsapp.net", "+14155550001"}, // placeholder → delete
-		{"c@s.whatsapp.net", "+1 Dad"},       // real name with digits → keep
-		{"d@s.whatsapp.net", "+447700900123"}, // placeholder → delete
-		{"e@s.whatsapp.net", "Bob"},
-	}
-	for _, s := range seed {
-		if err := b.UpsertParticipant(grp, s.jid, s.name, "member"); err != nil {
-			t.Fatalf("seed %s: %v", s.jid, err)
-		}
-	}
-	// A placeholder in a *different* group must be untouched.
-	if err := b.UpsertParticipant("999@g.us", "z@s.whatsapp.net", "+15550000000", "member"); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := b.purgeNumberPlaceholders(grp); got != 2 {
-		t.Fatalf("purged = %d, want 2", got)
-	}
-
-	got := participantNames(t, b, grp)
-	want := map[string]string{
-		"a@s.whatsapp.net": "Alice",
-		"c@s.whatsapp.net": "+1 Dad",
-		"e@s.whatsapp.net": "Bob",
-	}
-	if len(got) != len(want) {
-		t.Fatalf("remaining = %v, want %v", got, want)
-	}
-	for k, v := range want {
-		if got[k] != v {
-			t.Errorf("%s = %q, want %q", k, got[k], v)
-		}
-	}
-	// Other group's placeholder survived (purge is scoped per conversation).
-	if other := participantNames(t, b, "999@g.us"); other["z@s.whatsapp.net"] != "+15550000000" {
-		t.Errorf("cross-group purge: other group row was affected: %v", other)
 	}
 }
 

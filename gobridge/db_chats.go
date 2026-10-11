@@ -151,25 +151,6 @@ func (b *Bridge) ParticipantName(convJID, jid string) string {
 	return name
 }
 
-// purgeNumberPlaceholders removes participant rows whose display_name is a bare
-// "+<digits>" phone number — placeholders an earlier build wrote when no real
-// name was known, which then shadowed real push/contact names. The GLOB matches
-// a leading "+" followed by a digit and excludes anything containing a letter,
-// so real names like "+1 Dad" are preserved. Returns the number of rows removed.
-func (b *Bridge) purgeNumberPlaceholders(groupJID string) int64 {
-	res, err := b.msgDB.Exec(
-		`DELETE FROM participants WHERE conversation_jid = ? `+
-			`AND display_name GLOB '+[0-9]*' AND display_name NOT GLOB '*[A-Za-z]*'`,
-		groupJID,
-	)
-	if err != nil {
-		b.log.Errorf("purgeNumberPlaceholders failed: %v", err)
-		return 0
-	}
-	n, _ := res.RowsAffected()
-	return n
-}
-
 // UpdateConversationName updates a conversation's display name. Returns
 // whether the stored name changed.
 func (b *Bridge) UpdateConversationName(jid, name string) bool {
