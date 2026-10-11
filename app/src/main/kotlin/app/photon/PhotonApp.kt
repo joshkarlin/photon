@@ -3,11 +3,14 @@ package app.photon
 import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import app.photon.data.names.DisplayNames
+import app.photon.data.names.deviceCountry
 
 class PhotonApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        DisplayNames.defaultCountry = deviceCountry(this)
         createNotificationChannels()
         cleanupLegacyWebView()
     }
