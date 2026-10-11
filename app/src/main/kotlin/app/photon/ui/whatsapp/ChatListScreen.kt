@@ -17,7 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import app.photon.data.model.Platform
 import app.photon.data.model.int
-import app.photon.service.PhotonService
+import app.photon.service.Sessions
 import app.photon.ui.shared.ChatListContent
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
@@ -25,7 +25,7 @@ import com.thelightphone.sdk.ui.gridUnitsAsDp
 
 @Composable
 fun ChatListScreen(onChat: (String) -> Unit, onSwitch: () -> Unit, onSettings: () -> Unit) {
-    val repo = PhotonService._chatRepository ?: return
+    val repo = Sessions.whatsapp?.repository ?: return
     val rawConversations by repo.conversations.collectAsState()
     val conversations = rawConversations?.filter { conv ->
         !conv.isPseudoChat && conv.lastTimestamp > 0
@@ -44,7 +44,7 @@ fun ChatListScreen(onChat: (String) -> Unit, onSwitch: () -> Unit, onSettings: (
 
 @Composable
 private fun WhatsAppSyncStatus() {
-    val bridge = PhotonService._bridgeClient
+    val bridge = Sessions.whatsapp?.bridge
     val waState = bridge?.whatsappState?.collectAsState()?.value ?: "disconnected"
     var syncProgress by remember { mutableStateOf("") }
     var syncDone by remember { mutableStateOf(false) }
@@ -73,7 +73,7 @@ private fun WhatsAppSyncStatus() {
                     syncDone -> "No messages yet"
                     waState == "connected" -> "Syncing"
                     waState == "connecting" -> "Connecting"
-                    PhotonService._bridgeClient?.isConnected?.value == true -> "Pairing"
+                    Sessions.whatsapp?.bridge?.isConnected?.value == true -> "Pairing"
                     else -> "Connecting"
                 },
                 variant = LightTextVariant.Copy,

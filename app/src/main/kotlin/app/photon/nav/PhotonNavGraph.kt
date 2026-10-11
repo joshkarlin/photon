@@ -9,7 +9,7 @@ import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
-import app.photon.service.PhotonService
+import app.photon.service.Sessions
 import app.photon.ui.home.PlatformPick
 import app.photon.ui.home.PlatformsScreen
 import app.photon.ui.contact.ContactScreen
@@ -74,7 +74,7 @@ fun PhotonNavGraph(
                     val target = when (pick) {
                         PlatformPick.ALL -> Routes.ALL_CHATS
                         PlatformPick.SMS -> Routes.SMS_CHATS
-                        PlatformPick.WHATSAPP -> whatsappRoute(PhotonService._bridgeClient?.whatsappState?.value)
+                        PlatformPick.WHATSAPP -> whatsappRoute(Sessions.whatsapp?.bridge?.whatsappState?.value)
                         PlatformPick.SIGNAL -> Routes.SIGNAL
                     }
                     lateralSwitch(target)

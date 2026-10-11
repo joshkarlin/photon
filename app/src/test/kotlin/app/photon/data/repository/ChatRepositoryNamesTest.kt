@@ -4,6 +4,8 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
 import app.photon.data.db.PhotonDatabase
+import app.photon.data.db.createWhatsAppSchema
+import app.photon.data.db.writeWhatsAppDb
 import app.photon.data.model.Conversation
 import app.photon.data.names.DisplayNames
 import app.photon.data.names.LocalContacts
@@ -59,23 +61,7 @@ class ChatRepositoryNamesTest {
         savedCountry = DisplayNames.defaultCountry
         DisplayNames.defaultCountry = "GB"
         write { db ->
-            db.execSQL(
-                "CREATE TABLE conversations (jid TEXT PRIMARY KEY, name TEXT, is_group INTEGER NOT NULL DEFAULT 0, " +
-                    "last_message_id TEXT, last_timestamp INTEGER NOT NULL DEFAULT 0, unread_count INTEGER NOT NULL DEFAULT 0, " +
-                    "is_muted INTEGER NOT NULL DEFAULT 0, avatar_url TEXT, updated_at INTEGER NOT NULL DEFAULT 0, " +
-                    "muted_until INTEGER NOT NULL DEFAULT 0)",
-            )
-            db.execSQL(
-                "CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_jid TEXT NOT NULL, sender_jid TEXT NOT NULL, " +
-                    "timestamp INTEGER NOT NULL, content_type TEXT NOT NULL, text_body TEXT, media_url TEXT, media_mime TEXT, " +
-                    "media_size INTEGER, thumbnail_path TEXT, sticker_pack_id TEXT, reply_to_id TEXT, " +
-                    "edit_version INTEGER NOT NULL DEFAULT 0, is_from_me INTEGER NOT NULL DEFAULT 0, " +
-                    "status TEXT NOT NULL DEFAULT 'sent', raw_proto BLOB)",
-            )
-            db.execSQL(
-                "CREATE TABLE participants (conversation_jid TEXT NOT NULL, jid TEXT NOT NULL, display_name TEXT, " +
-                    "role TEXT DEFAULT 'member', PRIMARY KEY (conversation_jid, jid))",
-            )
+            createWhatsAppSchema(db)
             db.execSQL("INSERT INTO conversations (jid, name, is_group, last_timestamp) VALUES (?, '', 0, 3)", arrayOf(dad))
             db.execSQL("INSERT INTO conversations (jid, name, is_group, last_timestamp) VALUES (?, '', 0, 2)", arrayOf(lid))
             db.execSQL("INSERT INTO conversations (jid, name, is_group, last_timestamp) VALUES (?, 'Climbing', 1, 1)", arrayOf(group))
@@ -104,12 +90,7 @@ class ChatRepositoryNamesTest {
         dbFile.delete()
     }
 
-    // WAL, as the bridge writes it.
-    private fun write(block: (SQLiteDatabase) -> Unit) =
-        SQLiteDatabase.openOrCreateDatabase(dbFile, null).use { db ->
-            db.enableWriteAheadLogging()
-            block(db)
-        }
+    private fun write(block: (SQLiteDatabase) -> Unit) = writeWhatsAppDb(dbFile, block)
 
     private fun bridgePrints(line: String) {
         bridgeOut.write(line)

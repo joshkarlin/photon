@@ -12,7 +12,7 @@ import app.photon.data.model.Message
 import app.photon.data.model.Platform
 import app.photon.data.names.DisplayNames
 import app.photon.data.model.string
-import app.photon.service.PhotonService
+import app.photon.service.Sessions
 import app.photon.ui.shared.ChatScreenContent
 import app.photon.ui.shared.VisibleConversationEffect
 import app.photon.ui.shared.components.MediaViewer
@@ -35,7 +35,7 @@ internal fun markReadRequest(messages: List<Message>, lastMarkedReadId: String?)
 
 @Composable
 fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, onBack: () -> Unit) {
-    val repo = PhotonService._chatRepository ?: return
+    val repo = Sessions.whatsapp?.repository ?: return
     val scope = rememberCoroutineScope()
     // Observe conversations so the title and participant names refresh live as
     // new messages arrive (e.g. a group member's name learned after open, or
@@ -69,7 +69,7 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
         }
     }
 
-    val waState = PhotonService._bridgeClient?.whatsappState?.collectAsState()?.value
+    val waState = Sessions.whatsapp?.bridge?.whatsappState?.collectAsState()?.value
     LaunchedEffect(waState) {
         if (waState == "connected") markRead()
     }
@@ -133,7 +133,7 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
             mediaMime = media.mediaMime,
             existingPath = media.mediaUrl,
             onDownloadMedia = { id ->
-                val resp = PhotonService.bridgeClient.downloadMedia(id)
+                val resp = Sessions.whatsapp!!.bridge.downloadMedia(id)
                 // Surface the bridge's actual error (e.g. expired CDN media)
                 // instead of letting the strict success-deserializer throw an
                 // opaque JSON parse error that hides the real cause.

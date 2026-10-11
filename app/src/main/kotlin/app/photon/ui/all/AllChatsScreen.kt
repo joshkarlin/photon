@@ -8,7 +8,7 @@ import androidx.compose.ui.res.painterResource
 import app.photon.R
 import app.photon.data.model.Conversation
 import app.photon.data.model.Platform
-import app.photon.service.PhotonService
+import app.photon.service.Sessions
 import app.photon.ui.shared.ChatListContent
 import kotlinx.coroutines.flow.StateFlow
 
@@ -30,9 +30,9 @@ fun AllChatsScreen(
     onSwitch: () -> Unit,
     onSettings: () -> Unit,
 ) {
-    val waConvs by (PhotonService._chatRepository?.conversations ?: emptyConvFlow).collectAsState()
-    val sigConvs by (PhotonService._signalRepository?.conversations ?: emptyConvFlow).collectAsState()
-    val smsConvs by (PhotonService._smsRepository?.conversations ?: emptyConvFlow).collectAsState()
+    val waConvs by (Sessions.whatsapp?.repository?.conversations ?: emptyConvFlow).collectAsState()
+    val sigConvs by (Sessions.signal?.repository?.conversations ?: emptyConvFlow).collectAsState()
+    val smsConvs by (Sessions.sms?.repository?.conversations ?: emptyConvFlow).collectAsState()
 
     val anyLoaded = waConvs != null || sigConvs != null || smsConvs != null
 

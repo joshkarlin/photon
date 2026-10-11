@@ -4,12 +4,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import app.photon.data.model.Platform
-import app.photon.service.PhotonService
+import app.photon.service.Sessions
 import app.photon.ui.shared.ChatListContent
 
 @Composable
 fun SignalChatListScreen(onChat: (String) -> Unit, onSwitch: () -> Unit, onSettings: () -> Unit) {
-    val repo = PhotonService._signalRepository ?: return
+    val repo = Sessions.signal?.repository ?: return
     val conversations by repo.conversations.collectAsState()
 
     ChatListContent(

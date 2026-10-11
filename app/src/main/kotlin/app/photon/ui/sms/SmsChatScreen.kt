@@ -7,7 +7,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import app.photon.data.model.Platform
 import app.photon.data.names.DisplayNames
-import app.photon.service.PhotonService
+import app.photon.service.Sessions
 import app.photon.ui.shared.ChatScreenContent
 import app.photon.ui.shared.VisibleConversationEffect
 import kotlinx.coroutines.Dispatchers
@@ -15,7 +15,7 @@ import kotlinx.coroutines.launch
 
 @Composable
 fun SmsChatScreen(address: String, onContact: (phone: String, name: String) -> Unit, onBack: () -> Unit) {
-    val repo = PhotonService._smsRepository ?: return
+    val repo = Sessions.sms?.repository ?: return
     val scope = rememberCoroutineScope()
     // Track the conversation reactively via the StateFlow so the title
     // updates when a contact is saved or edited (LocalContacts).

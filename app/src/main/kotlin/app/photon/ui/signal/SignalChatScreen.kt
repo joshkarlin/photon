@@ -10,7 +10,7 @@ import androidx.compose.runtime.setValue
 import app.photon.data.model.Message
 import app.photon.data.model.Platform
 import app.photon.data.names.DisplayNames
-import app.photon.service.PhotonService
+import app.photon.service.Sessions
 import app.photon.ui.shared.ChatScreenContent
 import app.photon.ui.shared.VisibleConversationEffect
 import app.photon.ui.shared.components.MediaViewer
@@ -19,7 +19,7 @@ import kotlinx.coroutines.launch
 
 @Composable
 fun SignalChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, onBack: () -> Unit) {
-    val repo = PhotonService._signalRepository ?: return
+    val repo = Sessions.signal?.repository ?: return
     val scope = rememberCoroutineScope()
     // Observe the conversations StateFlow so the title updates live when
     // the conversation row is re-resolved (e.g. after the user saves a
