@@ -102,42 +102,28 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 		b.log.Infof("Call log message %s in %s: %s", msgID, chatJID, textBody)
 	}
 
-	// Update conversation
-	name := ""
-	nameIsAuthoritative := false
+	// Update conversation. A verified or push name the message carries is
+	// the other person's, never the user's own.
+	verifiedName, pushName := "", ""
+	if !isFromMe {
+		pushName = evt.Info.PushName
+		if evt.Info.VerifiedName != nil {
+			verifiedName = evt.Info.VerifiedName.Details.GetVerifiedName()
+		}
+	}
+	var name rankedName
 	isGroup := evt.Info.Chat.Server == types.GroupServer
 	if isGroup {
-		// For groups, get the group name from group info (cached — one
-		// network fetch per group per hour, not per message)
-		name = b.groupName(evt.Info.Chat)
-
-		if member := b.memberName(evt.Info.Sender, evt.Info.PushName); member != "" {
-			b.UpsertParticipant(chatJID, senderJID, member, "member")
+		// The group's subject from its info (cached — one network fetch per
+		// group per hour, not per message).
+		name = rankedName{name: cleanName(b.groupName(evt.Info.Chat)), rank: rankSubject}
+		if !isFromMe {
+			b.UpsertParticipant(chatJID, senderJID, b.memberName(evt.Info.Sender, verifiedName, pushName))
 		}
 	} else {
-		// Only use the event push/verified name from the OTHER person, not
-		// ourselves.
-		eventPushName, verifiedName := "", ""
-		if !isFromMe {
-			eventPushName = evt.Info.PushName
-			if evt.Info.VerifiedName != nil {
-				verifiedName = evt.Info.VerifiedName.Details.GetVerifiedName()
-			}
-		}
-		contact := b.lookupContact(resolvedChat, evt.Info.Chat)
-		name, nameIsAuthoritative = dmName(contact, verifiedName, eventPushName)
-		// For LID JIDs, fall back to the resolved phone number
-		if name == "" && resolvedChat != evt.Info.Chat {
-			name = "+" + resolvedChat.User
-			b.log.Infof("Resolved LID %s to %s", evt.Info.Chat, name)
-		}
+		name = personName(b.lookupContact(evt.Info.Chat), verifiedName, pushName)
 	}
 	b.UpsertConversation(chatJID, name, msgID, ts)
-	// Address book names overwrite previously stored push names; everything
-	// else only fills empty names (handled by UpsertConversation's COALESCE).
-	if nameIsAuthoritative {
-		b.UpdateConversationName(chatJID, name)
-	}
 
 	if isCallLog {
 		b.BroadcastEvent("message_updated", MessageUpdatedEvent{ConversationJID: chatJID, MessageID: msgID})
@@ -149,15 +135,31 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 		b.IncrementUnread(chatJID)
 	}
 
-	// Broadcast new message event
-	b.BroadcastEvent("new_message", NewMessageEvent{
-		ConversationJID: chatJID,
-		MessageID:       msgID,
-		SenderName:      name,
-		TextBody:        textBody,
-		ContentType:     contentType,
-		IsFromMe:        isFromMe,
-	})
+	b.BroadcastEvent("new_message", b.newMessageEvent(chatJID, msgID, senderJID, textBody, contentType, isFromMe))
+}
+
+// newMessageEvent is new_message's payload for a stored message, with the
+// names as stored just now: the chat's, and for a message the user didn't
+// send, the sender's — their member name in a group, the chat's in a DM.
+func (b *Bridge) newMessageEvent(chatJID, msgID, senderJID, text, contentType string, isFromMe bool) NewMessageEvent {
+	evt := NewMessageEvent{
+		ConversationJID:  chatJID,
+		MessageID:        msgID,
+		IsGroup:          isGroupJID(chatJID),
+		ConversationName: b.storedConversationName(chatJID).name,
+		SenderJID:        senderJID,
+		TextBody:         text,
+		ContentType:      contentType,
+		IsFromMe:         isFromMe,
+	}
+	switch {
+	case isFromMe:
+	case evt.IsGroup:
+		evt.SenderName = b.ParticipantName(chatJID, senderJID)
+	default:
+		evt.SenderName = evt.ConversationName
+	}
+	return evt
 }
 
 // applyRevoke blanks a message deleted for everyone. If it was the last unread

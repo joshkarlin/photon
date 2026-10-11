@@ -60,12 +60,13 @@ func TestOfferIsVideo(t *testing.T) {
 func TestCall_missed(t *testing.T) {
 	b := newClientBridge(t)
 	sent := captureEvents(b)
-	b.UpsertConversation(caller.String(), "Alice", "", 0)
+	b.UpsertConversation(caller.String(), named("Alice"), "", 0)
 
 	b.HandleEvent(&events.CallOffer{BasicCallMeta: callMeta("c1", caller, caller), Data: voiceOffer()})
 
 	ringing := sent.ofType("call_incoming")
 	if len(ringing) != 1 || ringing[0]["conversation_jid"] != caller.String() || ringing[0]["caller_name"] != "Alice" ||
+		ringing[0]["caller_jid"] != caller.String() || ringing[0]["conversation_name"] != "Alice" ||
 		ringing[0]["is_video"] != false || ringing[0]["call_id"] != "c1" || ringing[0]["is_group"] != false {
 		t.Fatalf("call_incoming = %v", ringing)
 	}
@@ -79,7 +80,8 @@ func TestCall_missed(t *testing.T) {
 	if got := unreadCount(t, b, caller.String()); got != 1 {
 		t.Errorf("unread = %d, want 1", got)
 	}
-	if missed := sent.ofType("call_missed"); len(missed) != 1 || missed[0]["caller_name"] != "Alice" {
+	if missed := sent.ofType("call_missed"); len(missed) != 1 || missed[0]["caller_name"] != "Alice" ||
+		missed[0]["caller_jid"] != caller.String() || missed[0]["conversation_name"] != "Alice" {
 		t.Errorf("call_missed = %v", missed)
 	}
 
@@ -163,15 +165,36 @@ func TestCall_LIDCallerResolvesToPhoneChat(t *testing.T) {
 
 	b.HandleEvent(&events.CallOffer{BasicCallMeta: callMeta("c1", callerLID, callerLID), Data: voiceOffer()})
 
-	if ringing := sent.ofType("call_incoming"); len(ringing) != 1 || ringing[0]["conversation_jid"] != caller.String() {
-		t.Errorf("call_incoming = %v, want the phone-number chat", ringing)
+	if ringing := sent.ofType("call_incoming"); len(ringing) != 1 || ringing[0]["conversation_jid"] != caller.String() ||
+		ringing[0]["caller_jid"] != caller.String() {
+		t.Errorf("call_incoming = %v, want the phone-number chat and caller", ringing)
+	}
+}
+
+// A caller WhatsApp has no name for is reported nameless, for Kotlin to name
+// from the user's contacts or the number in caller_jid — never as a number.
+func TestCall_unknownCallerIsNeverNamedByNumber(t *testing.T) {
+	b := newClientBridge(t)
+	sent := captureEvents(b)
+	b.HandleEvent(&events.CallOffer{BasicCallMeta: callMeta("c1", caller, caller), Data: voiceOffer()})
+	b.HandleEvent(&events.CallTerminate{BasicCallMeta: callMeta("c1", caller, caller)})
+
+	for _, typ := range []string{"call_incoming", "call_missed"} {
+		got := sent.ofType(typ)
+		if len(got) != 1 || got[0]["caller_name"] != "" || got[0]["conversation_name"] != "" || got[0]["caller_jid"] != caller.String() {
+			t.Errorf("%s = %v, want no names and the caller's phone JID", typ, got)
+		}
+	}
+	if got := conversationRank(t, b, caller.String()); got != (rankedName{}) {
+		t.Errorf("chat name = %+v, want none", got)
 	}
 }
 
 func TestCall_groupCall(t *testing.T) {
 	b := newClientBridge(t)
 	sent := captureEvents(b)
-	b.UpsertConversation(group.String(), "Book club", "", 0)
+	b.UpsertConversation(group.String(), rankedName{name: "Book club", rank: rankSubject}, "", 0)
+	b.UpsertParticipant(group.String(), caller.String(), named("Alice"))
 	other := types.NewJID("447700900002", types.DefaultUserServer)
 	meta := func(from types.JID) types.BasicCallMeta {
 		m := callMeta("g1", from, caller)
@@ -181,7 +204,8 @@ func TestCall_groupCall(t *testing.T) {
 
 	b.HandleEvent(&events.CallOfferNotice{BasicCallMeta: meta(caller), Media: "video", Type: "group"})
 	if ringing := sent.ofType("call_incoming"); len(ringing) != 1 || ringing[0]["conversation_jid"] != group.String() ||
-		ringing[0]["caller_name"] != "Book club" || ringing[0]["is_group"] != true || ringing[0]["is_video"] != true {
+		ringing[0]["conversation_name"] != "Book club" || ringing[0]["caller_name"] != "Alice" || ringing[0]["caller_jid"] != caller.String() ||
+		ringing[0]["is_group"] != true || ringing[0]["is_video"] != true {
 		t.Fatalf("call_incoming = %v", ringing)
 	}
 
@@ -244,7 +268,7 @@ func TestHistorySync_missedCallStubs(t *testing.T) {
 
 func TestWithoutCallRows(t *testing.T) {
 	b := newTestBridge(t)
-	b.UpsertConversation(caller.String(), "Alice", "", 0)
+	b.UpsertConversation(caller.String(), named("Alice"), "", 0)
 	b.InsertMessages([]*MessageRow{
 		{ID: "m1", ConversationJID: caller.String(), SenderJID: caller.String(), Timestamp: 1, ContentType: "text"},
 		{ID: "log1", ConversationJID: caller.String(), SenderJID: caller.String(), Timestamp: 2, ContentType: "call"},

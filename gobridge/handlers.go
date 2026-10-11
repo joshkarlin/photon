@@ -25,16 +25,18 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 		b.log.Infof("Connected to WhatsApp")
 		b.markConnectionConnected()
 		b.client.SendPresence(context.Background(), types.PresenceAvailable)
-		// Fallback reconcile: AppStateSyncComplete normally triggers the
-		// merge+backfill, but if the event never fires (already-synced
-		// session) this single delayed run still converges names.
+		// Reconcile once the connection has settled: LID mappings learned
+		// since the last run, and names that changed while the bridge was
+		// down. A session already synced gets no AppStateSyncComplete.
 		go func() {
 			time.Sleep(60 * time.Second)
 			b.reconcile()
 		}()
 	case *events.AppStateSyncComplete:
-		// Contact names and LID mappings arrive via app state sync — run the
-		// reconcile as soon as a patch lands instead of polling on a timer.
+		// Only a full sync (pairing, or recovery from a broken app state)
+		// ends with this, and it stores contacts without an event for each,
+		// so reconcile to pick them up. Incremental changes arrive one by one
+		// as events.Contact.
 		b.log.Infof("App state sync complete: %s", v.Name)
 		go b.reconcile()
 	case *events.Disconnected:
@@ -67,6 +69,8 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 		})
 	case *events.PushName:
 		b.handlePushName(v)
+	case *events.Contact:
+		b.handleContact(v)
 	case *events.CallOffer, *events.CallOfferNotice, *events.CallPreAccept, *events.CallAccept,
 		*events.CallTerminate, *events.CallReject, *events.UnknownCallEvent:
 		b.handleCallEvent(v)
@@ -89,8 +93,11 @@ func (b *Bridge) reconcile() {
 	b.reconciler.run(func() {
 		b.MergeLIDConversations()
 		b.CanonicalizeSenderJIDs()
-		b.BackfillContactNames()
-		b.BackfillParticipantNames()
+		changed := append(b.BackfillContactNames(), b.BackfillParticipantNames()...)
+		if len(changed) > 0 {
+			b.namesChanged(changed)
+			b.BroadcastEvent("conversation_updated", struct{}{})
+		}
 	})
 }
 

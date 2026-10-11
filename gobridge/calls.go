@@ -23,8 +23,8 @@ const pendingCallTTL = 10 * time.Minute
 type pendingCall struct {
 	chatJID    string
 	senderJID  string
-	callerName string // for the notification; may be a "+number" fallback
-	chatName   string // a real name to store on the chat, or ""
+	callerName string     // the caller's own name, or ""
+	chatName   rankedName // the chat's name, to store with its row
 	isVideo    bool
 	isGroup    bool // a group call (which may not belong to a group chat)
 	answered   bool
@@ -176,19 +176,26 @@ func (b *Bridge) callChat(meta types.BasicCallMeta) types.JID {
 	return b.callerJID(meta)
 }
 
-// callChatName is the chat's real name (stored, group subject, or contact),
-// or "" when none is known.
-func (b *Bridge) callChatName(chat, caller types.JID) string {
-	var stored string
-	b.msgDB.QueryRow(`SELECT COALESCE(name, '') FROM conversations WHERE jid = ?`, chat.String()).Scan(&stored)
-	switch {
-	case stored != "":
-		return stored
-	case chat.Server == types.GroupServer:
-		return b.groupName(chat)
+// callChatName is the chat's name: its stored one, or, if the contact store
+// or group info has a stronger one, that.
+func (b *Bridge) callChatName(chat, caller types.JID) rankedName {
+	stored := b.storedConversationName(chat.String())
+	if chat.Server == types.GroupServer {
+		if stored.name != "" {
+			return stored
+		}
+		return rankedName{name: cleanName(b.groupName(chat)), rank: rankSubject}
 	}
-	name, _ := bestContactName(b.lookupContact(caller, caller), "")
-	return name
+	return better(stored, personName(b.lookupContact(caller), "", ""))
+}
+
+// callerName is the caller's own name: the chat's for a call in their DM;
+// in a group, their member name or, failing that, the contact store's.
+func (b *Bridge) callerName(chat, caller types.JID, chatName rankedName) string {
+	if chat.Server != types.GroupServer {
+		return chatName.name
+	}
+	return better(b.storedParticipantName(chat.String(), caller.String()), personName(b.lookupContact(caller), "", "")).name
 }
 
 // sameUser compares two JIDs as people: device suffix ignored, LIDs resolved.
@@ -245,21 +252,18 @@ func (b *Bridge) callOffered(meta types.BasicCallMeta, isVideo, isGroupCall bool
 		ts:        meta.Timestamp.Unix(),
 		seen:      time.Now(),
 	}
-	c.callerName = c.chatName
-	if c.callerName == "" && caller.Server == types.DefaultUserServer {
-		c.callerName = "+" + caller.User
-	} else if c.callerName == "" {
-		c.callerName = "WhatsApp contact"
-	}
+	c.callerName = b.callerName(chat, caller, c.chatName)
 	if !b.calls.add(meta.CallID, c) {
 		return
 	}
 	b.BroadcastEvent("call_incoming", CallIncomingEvent{
-		ConversationJID: c.chatJID,
-		CallerName:      c.callerName,
-		IsVideo:         c.isVideo,
-		CallID:          meta.CallID,
-		IsGroup:         c.isGroup,
+		ConversationJID:  c.chatJID,
+		ConversationName: c.chatName.name,
+		CallerJID:        c.senderJID,
+		CallerName:       c.callerName,
+		IsVideo:          c.isVideo,
+		CallID:           meta.CallID,
+		IsGroup:          c.isGroup,
 	})
 }
 
@@ -316,11 +320,13 @@ func (b *Bridge) callEnded(meta types.BasicCallMeta, kind, reason string) {
 		b.IncrementUnread(c.chatJID)
 	}
 	b.BroadcastEvent("call_missed", CallMissedEvent{
-		ConversationJID: c.chatJID,
-		CallerName:      c.callerName,
-		IsVideo:         c.isVideo,
-		IsGroup:         c.isGroup,
-		CallID:          meta.CallID,
+		ConversationJID:  c.chatJID,
+		ConversationName: c.chatName.name,
+		CallerJID:        c.senderJID,
+		CallerName:       c.callerName,
+		IsVideo:          c.isVideo,
+		IsGroup:          c.isGroup,
+		CallID:           meta.CallID,
 	})
 }
 

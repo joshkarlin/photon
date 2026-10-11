@@ -15,14 +15,13 @@ type cachedGroupName struct {
 	fetched time.Time
 }
 
-// BackfillParticipantNames names group participants from whatsmeow's contact
-// store — the group-chat counterpart to BackfillContactNames (DM conversation
-// names). Runs on the same triggers so initial sync, live messages, and
-// everyday app-state patches all converge group sender names the same way.
-func (b *Bridge) BackfillParticipantNames() {
+// BackfillParticipantNames names group members from whatsmeow's contact
+// store — the group counterpart to BackfillContactNames, run by the same
+// reconcile. Returns the groups whose member names changed.
+func (b *Bridge) BackfillParticipantNames() []string {
 	rows, err := b.msgDB.Query(`SELECT jid FROM conversations WHERE is_group = 1`)
 	if err != nil {
-		return
+		return nil
 	}
 	var groups []string
 	for rows.Next() {
@@ -32,16 +31,22 @@ func (b *Bridge) BackfillParticipantNames() {
 		}
 	}
 	rows.Close()
+	var changed []string
 	for _, g := range groups {
-		b.ResolveGroupParticipants(g)
+		if b.resolveGroupParticipants(g) {
+			changed = append(changed, g)
+		}
 	}
+	return changed
 }
 
 func (b *Bridge) handleGroupInfo(evt *events.GroupInfo) {
 	jid := evt.JID.String()
 	if evt.Name != nil {
 		b.setGroupName(jid, evt.Name.Name)
-		b.UpdateConversationName(jid, evt.Name.Name)
+		if b.SetConversationName(jid, rankedName{name: cleanName(evt.Name.Name), rank: rankSubject}) {
+			b.namesChanged([]string{jid})
+		}
 	}
 	if len(evt.Promote) > 0 || len(evt.Demote) > 0 {
 		b.forgetGroupAdmins(jid)
@@ -126,31 +131,35 @@ func (b *Bridge) forgetGroupAdmins(jid string) {
 	b.groupNameMu.Unlock()
 }
 
-// memberName is the name to store for a group member: their address-book
-// name or verified business name, else the push name their message carried,
-// else one whatsmeow has seen. "" when none is known — never their number,
-// which the UI shows by itself and which would overwrite a real name in the
-// participants table. Live messages, history sync and
-// ResolveGroupParticipants all name members with it.
-func (b *Bridge) memberName(sender types.JID, pushName string) string {
-	name, _ := bestContactName(b.lookupContact(b.resolveLIDJID(sender), sender), pushName)
-	return name
+// memberName is the name to store for a group member, ranked as personName
+// ranks it: their address-book name, verified business name or push name
+// (verifiedName and pushName being those their message carried, if any).
+// Live messages, history sync and ResolveGroupParticipants all name members
+// with it, and a DM is named the same way.
+func (b *Bridge) memberName(sender types.JID, verifiedName, pushName string) rankedName {
+	return personName(b.lookupContact(sender), verifiedName, pushName)
 }
 
-// ResolveGroupParticipants fills display names for every distinct sender in a
-// group's stored messages from whatsmeow's contact store (address-book name
-// preferred, observed push name as fallback). This lets historical senders —
-// stored before any live message taught us their name, or before the contact
-// store was populated — render names without re-pairing. Cheap and idempotent,
-// so it's safe to call on every group open.
+// ResolveGroupParticipants names every distinct sender in a group's stored
+// messages from whatsmeow's contact store, so senders stored before the
+// store knew them (history, a contact added later) get a name without a
+// re-pair. The rank rules make it upgrade names and never downgrade them.
+// Cheap and idempotent, so it runs on every group open.
 func (b *Bridge) ResolveGroupParticipants(groupJID string) {
+	if b.resolveGroupParticipants(groupJID) {
+		b.namesChanged([]string{groupJID})
+		b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: groupJID})
+	}
+}
+
+func (b *Bridge) resolveGroupParticipants(groupJID string) (changed bool) {
 	rows, err := b.msgDB.Query(
 		`SELECT DISTINCT sender_jid FROM messages WHERE conversation_jid = ? AND is_from_me = 0`,
 		groupJID,
 	)
 	if err != nil {
 		b.log.Errorf("ResolveGroupParticipants query failed: %v", err)
-		return
+		return false
 	}
 	var senders []string
 	for rows.Next() {
@@ -161,22 +170,17 @@ func (b *Bridge) ResolveGroupParticipants(groupJID string) {
 	}
 	rows.Close()
 
-	updated := false
 	for _, sjid := range senders {
 		parsed, perr := types.ParseJID(sjid)
 		if perr != nil {
 			continue
 		}
-		// No name: the row is left alone, keeping any push name a message
+		// No name: nothing is written, keeping any push name a message
 		// taught us (members outside the address book have no contact-store
-		// name), and the UI falls back to the number on its own.
-		if name := b.memberName(parsed, ""); name != "" {
-			if upErr := b.UpsertParticipant(groupJID, sjid, name, "member"); upErr == nil {
-				updated = true
-			}
+		// name), and Kotlin falls back to the number on its own.
+		if b.UpsertParticipant(groupJID, sjid, b.memberName(parsed, "", "")) {
+			changed = true
 		}
 	}
-	if updated {
-		b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: groupJID})
-	}
+	return changed
 }

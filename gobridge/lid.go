@@ -102,11 +102,12 @@ func (b *Bridge) mergeConversation(from, to string) (bool, error) {
 	}
 	defer tx.Rollback()
 
-	var name, lastMsgID string
+	var lastMsgID string
+	var name rankedName
 	var unread int
 	var lastTS, mutedUntil int64
-	err = tx.QueryRow(`SELECT COALESCE(name, ''), COALESCE(last_message_id, ''), last_timestamp, unread_count, muted_until
-		FROM conversations WHERE jid = ?`, from).Scan(&name, &lastMsgID, &lastTS, &unread, &mutedUntil)
+	err = tx.QueryRow(`SELECT COALESCE(name, ''), name_rank, COALESCE(last_message_id, ''), last_timestamp, unread_count, muted_until
+		FROM conversations WHERE jid = ?`, from).Scan(&name.name, &name.rank, &lastMsgID, &lastTS, &unread, &mutedUntil)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -115,8 +116,9 @@ func (b *Bridge) mergeConversation(from, to string) (bool, error) {
 	}
 
 	// Re-key messages and participants, then merge the conversation row.
-	// upsertConversation fills the target's name/last-message only where
-	// they're missing or older, which is exactly the merge we want.
+	// upsertConversation moves the target's last message only forward, and
+	// the source's name, as it may be the older of the two, only fills a
+	// missing or weaker one — exactly the merge we want.
 	for _, q := range []string{
 		`UPDATE messages SET conversation_jid = ? WHERE conversation_jid = ?`,
 		`UPDATE OR IGNORE participants SET conversation_jid = ? WHERE conversation_jid = ?`,
@@ -128,6 +130,7 @@ func (b *Bridge) mergeConversation(from, to string) (bool, error) {
 	if _, err := tx.Exec(`DELETE FROM participants WHERE conversation_jid = ?`, from); err != nil {
 		return false, err
 	}
+	name.stale = true
 	if err := b.upsertConversation(tx, to, name, lastMsgID, lastTS); err != nil {
 		return false, err
 	}
@@ -170,9 +173,16 @@ func (b *Bridge) CanonicalizeSenderJIDs() {
 			continue // mapping not known yet — retry on the next sync patch
 		}
 		// messages.sender_jid isn't unique, so a plain update is safe; the
-		// PK-bearing tables use UPDATE OR IGNORE + delete to fold duplicates.
+		// PK-bearing tables use UPDATE OR IGNORE + delete to fold duplicates,
+		// a member's LID row first lending the phone row its name if that's
+		// missing or weaker.
 		if err := b.inTx(func(tx *sql.Tx) error {
 			for _, q := range []string{
+				`UPDATE participants SET display_name = l.display_name, name_rank = l.name_rank
+					FROM participants AS l
+					WHERE participants.jid = ? AND l.jid = ? AND l.conversation_jid = participants.conversation_jid
+					AND COALESCE(l.display_name, '') <> ''
+					AND (COALESCE(participants.display_name, '') = '' OR l.name_rank > participants.name_rank)`,
 				`UPDATE messages SET sender_jid = ? WHERE sender_jid = ?`,
 				`UPDATE OR IGNORE reactions SET sender_jid = ? WHERE sender_jid = ?`,
 				`UPDATE OR IGNORE participants SET jid = ? WHERE jid = ?`,

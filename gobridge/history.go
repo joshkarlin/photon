@@ -4,6 +4,7 @@ import (
 	"time"
 
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -34,8 +35,6 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 		// Resolve @lid history conversations to phone JIDs so they merge
 		// with rows created by live messages instead of duplicating them.
 		jid := b.resolveLIDString(rawJID)
-
-		name := conv.GetName()
 		isGroup := isGroupJID(jid)
 
 		msgs := conv.GetMessages()
@@ -137,12 +136,14 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 			b.applyRevoke(jid, r.info, r.targetID)
 		}
 
-		// Name each distinct group sender once, as live messages do.
+		// Name each distinct group sender once, as live messages do, but
+		// from the contact store first: it holds their current push name,
+		// the payload one from whenever they sent the message.
 		for sjid, pushName := range histParticipantNames {
 			if parsed, err := types.ParseJID(sjid); err == nil {
-				if member := b.memberName(parsed, pushName); member != "" {
-					b.UpsertParticipant(jid, sjid, member, "member")
-				}
+				member := better(b.memberName(parsed, "", ""), rankedName{name: cleanName(pushName), rank: rankPush})
+				member.stale = true
+				b.UpsertParticipant(jid, sjid, member)
 			}
 		}
 
@@ -150,36 +151,7 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 			b.log.Debugf("  Conv %s: inserted %d, skipped %d nil, %d old, %d content-free", jid, convMsgCount, skippedNil, skippedOld, skippedEmpty)
 		}
 
-		// For DMs, resolve contact name from whatsmeow's contact store.
-		if !isGroup && name == "" {
-			var contact types.ContactInfo
-			if parsedJID, parseErr := types.ParseJID(jid); parseErr == nil {
-				parsedRaw, rawErr := types.ParseJID(rawJID)
-				if rawErr != nil {
-					parsedRaw = parsedJID
-				}
-				contact = b.lookupContact(parsedJID, parsedRaw)
-			}
-			name, _ = bestContactName(contact, "")
-			// Fallback: check message push names (only from received messages, not sent)
-			if name == "" {
-				for _, histMsg := range msgs {
-					wm := histMsg.GetMessage()
-					if wm == nil {
-						continue
-					}
-					// Skip messages sent by us
-					if wm.GetKey() != nil && wm.GetKey().GetFromMe() {
-						continue
-					}
-					pn := wm.GetPushName()
-					if pn != "" {
-						name = pn
-						break
-					}
-				}
-			}
-		}
+		name := b.historyChatName(conv, jid, rawJID, isGroup)
 
 		// Upsert conversation after processing messages. Derive the preview
 		// (last message + timestamp) from the newest message we actually
@@ -206,6 +178,47 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 
 	b.BroadcastEvent("history_sync_complete", struct{}{})
 	b.log.Infof("History sync complete: %d conversations, %d messages", totalConvs, totalMsgs)
+}
+
+// historyChatName names a chat from a history payload. A group's is its
+// subject. A DM's is the contact store's address-book or business name,
+// else the payload's name for the chat, else a push name — the store's
+// current one, then any the payload's received messages carried. The
+// payload's chat name ranks as a push name: what WhatsApp puts there for a
+// DM isn't documented and may be stale, and an address-book contact is named
+// by the store anyway. Every history name is stale, as a chunk can land well
+// after live messages named the chat.
+func (b *Bridge) historyChatName(conv *waHistorySync.Conversation, jid, rawJID string, isGroup bool) rankedName {
+	name := rankedName{name: cleanName(conv.GetName()), rank: rankSubject, stale: true}
+	if isGroup {
+		return name
+	}
+	name.rank = rankPush
+	var forms []types.JID
+	for _, j := range []string{jid, rawJID} {
+		if parsed, err := types.ParseJID(j); err == nil {
+			forms = append(forms, parsed)
+		}
+	}
+	if best := personName(b.lookupContact(forms...), "", ""); best.rank > rankPush {
+		name = best
+	} else if name.name == "" {
+		name = best
+	}
+	if name.name == "" {
+		for _, histMsg := range conv.GetMessages() {
+			wm := histMsg.GetMessage()
+			if wm == nil || wm.GetKey().GetFromMe() {
+				continue
+			}
+			if pn := cleanName(wm.GetPushName()); pn != "" {
+				name = rankedName{name: pn, rank: rankPush}
+				break
+			}
+		}
+	}
+	name.stale = true
+	return name
 }
 
 // historyEdit and historyRevoke are edits and revokes found in a history

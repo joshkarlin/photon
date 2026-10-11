@@ -238,7 +238,7 @@ func (b *Bridge) markMessageFailed(jid, id string) {
 // correctly relative to messages that arrived during the send.
 func (b *Bridge) markMessageSent(jid, id string, ts int64) {
 	b.UpdateMessageStatusAndTimestamp(id, "sent", ts)
-	b.UpsertConversation(jid, "", id, ts)
+	b.UpsertConversation(jid, rankedName{}, id, ts)
 	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
 		ConversationJID: jid, MessageID: id,
 	})
@@ -310,11 +310,8 @@ func (b *Bridge) SendTextMessage(ctx context.Context, jid string, text string, r
 		IsFromMe:        true,
 		Status:          "sending",
 	})
-	b.UpsertConversation(jid, "", id, ts)
-	b.BroadcastEvent("new_message", NewMessageEvent{
-		ConversationJID: jid, MessageID: id, TextBody: text,
-		ContentType: "text", IsFromMe: true,
-	})
+	b.UpsertConversation(jid, rankedName{}, id, ts)
+	b.BroadcastEvent("new_message", b.newMessageEvent(jid, id, b.client.Store.ID.ToNonAD().String(), text, "text", true))
 
 	msg := b.buildTextMessage(text, replyToID)
 	resp, err := b.client.SendMessage(ctx, targetJID, msg, whatsmeow.SendRequestExtra{ID: id})
