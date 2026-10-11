@@ -1,6 +1,7 @@
 package app.photon.data
 
 import android.content.Context
+import androidx.annotation.VisibleForTesting
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -9,11 +10,40 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.runBlocking
 
-private val Context.dataStore: DataStore<Preferences> by preferencesDataStore("photon_prefs")
+@VisibleForTesting
+internal val Context.dataStore: DataStore<Preferences> by preferencesDataStore("photon_prefs")
+
+/**
+ * How message and call notifications alert. Each level but [OFF] posts to
+ * its own channel (`PhotonApp`), because a channel's sound, vibration and
+ * importance are fixed once it exists.
+ *
+ * - [SOUND]: heads-up, with the default sound and vibration.
+ * - [VIBRATE]: heads-up and vibration, no sound.
+ * - [SILENT]: in the shade and on the badge only.
+ * - [OFF]: nothing is posted.
+ */
+enum class NotificationLevel(val label: String) {
+    SOUND("SOUND"),
+    VIBRATE("VIBRATE"),
+    SILENT("SILENT"),
+    OFF("OFF");
+
+    fun next(): NotificationLevel = entries[(ordinal + 1) % entries.size]
+
+    companion object {
+        val DEFAULT = SOUND
+
+        /**
+         * Resolves the stored setting. Before the levels, NOTIFICATIONS was
+         * ON / OFF: ON becomes [SOUND] (what it did) and OFF stays [OFF].
+         */
+        fun resolve(stored: String?, legacyEnabled: Boolean?): NotificationLevel =
+            entries.firstOrNull { it.name == stored } ?: if (legacyEnabled == false) OFF else DEFAULT
+    }
+}
 
 /**
  * What the LP3 scroll dial does in Photon. LightOS uses the dial for screen
@@ -90,18 +120,22 @@ class PhotonPreferences(private val context: Context) {
     private val maxMessagesKey = intPreferencesKey("max_messages")
     private val maxDaysKey = intPreferencesKey("max_days")
     private val showThumbnailsKey = booleanPreferencesKey("show_thumbnails")
-    private val notificationsKey = booleanPreferencesKey("notifications_enabled")
+    private val notificationLevelKey = stringPreferencesKey("notification_level")
     private val scrollDialKey = stringPreferencesKey("scroll_dial")
     private val composeStyleKey = stringPreferencesKey("compose_style")
     private val keyboardStyleKey = stringPreferencesKey("keyboard_style")
     // Superseded by scroll_dial; read for migration, removed on the next write.
     private val legacyChatScrollSpeedKey = stringPreferencesKey("chat_scroll_speed")
     private val legacyMenuScrollSpeedKey = stringPreferencesKey("menu_scroll_speed")
+    // Superseded by notification_level; read for migration, removed on the next write.
+    private val legacyNotificationsKey = booleanPreferencesKey("notifications_enabled")
 
     val maxMessages: Flow<Int> = context.dataStore.data.map { it[maxMessagesKey] ?: 50 }
     val maxDays: Flow<Int> = context.dataStore.data.map { it[maxDaysKey] ?: 7 }
     val showThumbnails: Flow<Boolean> = context.dataStore.data.map { it[showThumbnailsKey] ?: true }
-    val notificationsEnabled: Flow<Boolean> = context.dataStore.data.map { it[notificationsKey] ?: true }
+    val notificationLevel: Flow<NotificationLevel> = context.dataStore.data.map {
+        NotificationLevel.resolve(it[notificationLevelKey], it[legacyNotificationsKey])
+    }
     val scrollDial: Flow<ScrollDial> = context.dataStore.data.map {
         ScrollDial.resolve(it[scrollDialKey], it[legacyChatScrollSpeedKey], it[legacyMenuScrollSpeedKey])
     }
@@ -120,8 +154,11 @@ class PhotonPreferences(private val context: Context) {
         context.dataStore.edit { it[showThumbnailsKey] = value }
     }
 
-    suspend fun setNotificationsEnabled(value: Boolean) {
-        context.dataStore.edit { it[notificationsKey] = value }
+    suspend fun setNotificationLevel(value: NotificationLevel) {
+        context.dataStore.edit {
+            it[notificationLevelKey] = value.name
+            it.remove(legacyNotificationsKey)
+        }
     }
 
     suspend fun setScrollDial(value: ScrollDial) {
@@ -138,9 +175,5 @@ class PhotonPreferences(private val context: Context) {
 
     suspend fun setKeyboardStyle(value: KeyboardStyle) {
         context.dataStore.edit { it[keyboardStyleKey] = value.name }
-    }
-
-    fun getNotificationsEnabledSync(): Boolean {
-        return runBlocking { context.dataStore.data.map { it[notificationsKey] ?: true }.first() }
     }
 }
