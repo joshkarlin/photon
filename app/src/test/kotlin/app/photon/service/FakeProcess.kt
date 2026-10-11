@@ -15,9 +15,12 @@ import java.util.concurrent.atomic.AtomicInteger
  * A bridge process on in-memory pipes. [print] writes a line to its stdout
  * and [sent] reads what was written to its stdin. It exits when its stdin
  * closes, unless [hangsOnExit] (whatsmeow's disconnect stuck), when only
- * [destroyForcibly] ends it.
+ * [destroyForcibly] ends it; [onStdinClosed] runs first either way.
  */
-internal class FakeProcess(private val hangsOnExit: Boolean = false) : Process() {
+internal class FakeProcess(
+    private val hangsOnExit: Boolean = false,
+    private val onStdinClosed: (FakeProcess) -> Unit = {},
+) : Process() {
     private val toBridge = Pipe.open()
     private val fromBridge = Pipe.open()
     private val exited = CountDownLatch(1)
@@ -27,6 +30,7 @@ internal class FakeProcess(private val hangsOnExit: Boolean = false) : Process()
         override fun write(b: ByteArray, off: Int, len: Int) = out.write(b, off, len)
         override fun close() {
             super.close()
+            onStdinClosed(this@FakeProcess)
             if (!hangsOnExit) exit()
         }
     }

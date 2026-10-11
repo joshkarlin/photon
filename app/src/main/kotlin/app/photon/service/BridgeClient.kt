@@ -65,32 +65,38 @@ class BridgeClient(private val bridge: GoBridge) {
     // Serializes starting and stopping the bridge.
     private val lifecycle = Mutex()
 
-    // Guards stdin and generation. generation counts attached processes so a
-    // dead process's reader can't detach its successor.
+    // The bridge being read from, if any. Only it is written to, and only its
+    // lines count: a stopped bridge's reader can still be draining its last
+    // output. It changes under writeLock together with isConnected, so a
+    // stale reader winding down can't undo a newer attach.
+    private class Attachment(val stdin: Writer)
     private val writeLock = Any()
-    private var stdin: Writer? = null
-    private var generation = 0
+    @Volatile private var attached: Attachment? = null
 
     /** Start the bridge if it isn't running and attach to it. */
-    suspend fun connect() {
+    suspend fun connect() = withContext(Dispatchers.IO) {
         lifecycle.withLock { connectLocked() }
     }
 
     private suspend fun connectLocked() {
-        if (_isConnected.value && bridge.isRunning()) return
-        // A bridge whose output we've stopped reading may still be alive:
-        // it goes before another starts, as two must never share the session.
-        withContext(Dispatchers.IO) { bridge.stop() }
+        if (attached != null && bridge.isRunning()) return
+        // Whatever is left of the last bridge goes first: two must never
+        // share the WhatsApp session.
+        stopLocked()
         val process = bridge.start() ?: return
         attach(process.inputStream, process.outputStream)
     }
 
     /**
-     * Stop the bridge; nothing restarts it until [connect]. Blocks until it
-     * has exited (a few seconds at most), so keep it off the main thread.
+     * Stop the bridge and wait for it to exit (a few seconds at most);
+     * nothing restarts it until [connect].
      */
-    fun disconnect() {
-        detach(currentGeneration())
+    suspend fun disconnect() = withContext(Dispatchers.IO) {
+        lifecycle.withLock { stopLocked() }
+    }
+
+    private fun stopLocked() {
+        attached?.let(::detach)
         bridge.stop()
     }
 
@@ -101,7 +107,7 @@ class BridgeClient(private val bridge: GoBridge) {
      */
     suspend fun whileStopped(block: suspend () -> Unit) = withContext(Dispatchers.IO) {
         lifecycle.withLock {
-            disconnect()
+            stopLocked()
             try {
                 block()
             } finally {
@@ -112,41 +118,43 @@ class BridgeClient(private val bridge: GoBridge) {
 
     /**
      * Read events and responses from [stdout] and write requests to [stdin],
-     * until stdout ends (the process exited). Internal for tests.
+     * until stdout ends (the process exited) or the bridge is stopped. One
+     * bridge at a time. Internal for tests.
      */
     internal fun attach(stdout: InputStream, stdin: OutputStream) {
-        val gen = synchronized(writeLock) {
-            this.stdin = stdin.bufferedWriter(Charsets.UTF_8)
-            ++generation
+        val attachment = Attachment(stdin.bufferedWriter(Charsets.UTF_8))
+        synchronized(writeLock) {
+            check(attached == null) { "already attached to a WhatsApp bridge" }
+            attached = attachment
+            _isConnected.value = true
         }
-        _isConnected.value = true
         thread(isDaemon = true, name = "gobridge-stdout") {
             try {
-                stdout.bufferedReader(Charsets.UTF_8).forEachLine(::onLine)
+                stdout.bufferedReader(Charsets.UTF_8).forEachLine { onLine(attachment, it) }
             } catch (_: IOException) {
                 // Pipe closed under us: the process died or was stopped.
             }
             Log.w("BridgeClient", "WhatsApp bridge output ended")
-            detach(gen)
+            detach(attachment)
         }
     }
 
-    private fun currentGeneration(): Int = synchronized(writeLock) { generation }
-
-    private fun detach(gen: Int) {
+    /** Stop reading [from] and fail its pending requests, unless it's already gone. */
+    private fun detach(from: Attachment) {
         synchronized(writeLock) {
-            if (gen != generation || stdin == null) return
-            stdin = null
+            if (attached !== from) return
+            attached = null
+            _isConnected.value = false
+            // The bridge reports the real state again once it's back.
+            _whatsappState.value = "connecting"
+            val failure = IOException("WhatsApp bridge stopped")
+            pendingRequests.values.forEach { it.completeExceptionally(failure) }
+            pendingRequests.clear()
         }
-        _isConnected.value = false
-        // The bridge reports the real state again once it's back.
-        _whatsappState.value = "connecting"
-        val failure = IOException("WhatsApp bridge stopped")
-        pendingRequests.values.forEach { it.completeExceptionally(failure) }
-        pendingRequests.clear()
     }
 
-    private fun onLine(line: String) {
+    private fun onLine(from: Attachment, line: String) {
+        if (attached !== from) return
         val event = try {
             json.decodeFromString<BridgeEvent>(line)
         } catch (e: Exception) {
@@ -154,7 +162,10 @@ class BridgeClient(private val bridge: GoBridge) {
             return
         }
         if (event.type == "connection_state") {
-            _whatsappState.value = event.string("state") ?: "disconnected"
+            synchronized(writeLock) {
+                if (attached !== from) return
+                _whatsappState.value = event.string("state") ?: "disconnected"
+            }
         }
         val id = event.id
         if (id != null && pendingRequests.remove(id)?.complete(event) == true) return
@@ -191,7 +202,7 @@ class BridgeClient(private val bridge: GoBridge) {
 
     private fun send(line: String) {
         synchronized(writeLock) {
-            val w = stdin ?: throw IllegalStateException("WhatsApp bridge not running")
+            val w = attached?.stdin ?: throw IllegalStateException("WhatsApp bridge not running")
             w.write(line)
             w.write("\n")
             w.flush()

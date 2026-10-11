@@ -41,6 +41,7 @@ import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.concurrent.thread
 
@@ -189,7 +190,7 @@ class PhotonService : Service() {
         bridgeJob?.cancel()
         // Stopping waits for the bridge to exit; keep that off the main thread.
         val client = bridgeClient
-        thread(name = "gobridge-stop") { client.disconnect() }
+        thread(name = "gobridge-stop") { runBlocking { client.disconnect() } }
         _bridgeClient = null
         _chatRepository = null
         _database = null

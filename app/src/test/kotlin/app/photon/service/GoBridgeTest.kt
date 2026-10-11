@@ -91,5 +91,6 @@ class GoBridgeStopTest {
         assertTrue(first.killed)
         assertTrue(client.isConnected.value, "no new bridge after whileStopped")
         assertTrue(processes.isEmpty(), "the replacement bridge was never started")
+        runBlocking { client.disconnect() }
     }
 }
