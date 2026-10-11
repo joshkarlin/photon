@@ -78,6 +78,9 @@ class ChatBackendTest {
 
     // ─── WhatsApp ───────────────────────────────────────────────────
 
+    /** Each request the fake bridge was sent: its type and payload. */
+    private val bridgeRequests = java.util.concurrent.CopyOnWriteArrayList<Pair<String, String>>()
+
     /** A backend over a bridge that answers each request with [respond]'s payload. */
     private fun whatsApp(respond: (type: String) -> String): WhatsAppBackend {
         writeWhatsAppDb(File(context.filesDir, "messages.db")) { db ->
@@ -102,6 +105,7 @@ class ChatBackendTest {
                     val request = Json.parseToJsonElement(line).jsonObject
                     val id = request["id"]!!.jsonPrimitive.content
                     val type = request["type"]!!.jsonPrimitive.content
+                    bridgeRequests += type to request["payload"].toString()
                     synchronized(out) {
                         out.write("""{"id":"$id","type":"${type}_response","payload":${respond(type)}}""")
                         out.newLine()
@@ -128,6 +132,15 @@ class ChatBackendTest {
         val e = assertFailsWith<ChatBackendException> { backend.markRead("a@s.whatsapp.net", listOf("m1")) }
         assertEquals("media expired", e.message)
         assertFailsWith<ChatBackendException> { backend.retry("m1") }
+    }
+
+    @Test
+    fun whatsAppSendsADocumentUnderItsOwnName() = runBlocking<Unit> {
+        val backend = whatsApp { """{"message_id":"id1","timestamp":1}""" }
+        backend.sendMedia("a@s.whatsapp.net", "/files/send_media_1.pdf", "application/pdf", null, fileName = "Q1 report.pdf")
+        val payload = Json.parseToJsonElement(bridgeRequests.single { it.first == "send_media" }.second).jsonObject
+        assertEquals("Q1 report.pdf", payload["file_name"]?.jsonPrimitive?.content)
+        assertEquals("/files/send_media_1.pdf", payload["file_path"]?.jsonPrimitive?.content)
     }
 
     @Test

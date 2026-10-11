@@ -39,7 +39,8 @@ class SmsBackend(private val repository: SmsRepository) : ChatBackend {
         backendCall("Send") { withContext(Dispatchers.IO) { repository.sendMessage(jid, text) } }
     }
 
-    override suspend fun sendMedia(jid: String, path: String, mime: String, replyToId: String?) = unsupported("media")
+    override suspend fun sendMedia(jid: String, path: String, mime: String, replyToId: String?, fileName: String?) =
+        unsupported("media")
 
     override suspend fun react(jid: String, messageId: String, senderJid: String, emoji: String) = unsupported("reactions")
 

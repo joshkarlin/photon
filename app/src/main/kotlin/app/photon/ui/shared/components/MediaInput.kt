@@ -1,12 +1,14 @@
 package app.photon.ui.shared.components
 
 import android.Manifest
+import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.MediaRecorder
 import android.net.Uri
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -49,7 +51,7 @@ class MediaInput internal constructor(
     private val context: Context,
     private val scope: CoroutineScope,
     private val sendAudio: State<((path: String) -> Unit)?>,
-    private val sendMedia: State<((path: String, mime: String) -> Unit)?>,
+    private val sendMedia: State<((path: String, mime: String, fileName: String?) -> Unit)?>,
     private val cameraAvailable: Boolean,
 ) {
     internal lateinit var micPermission: ActivityResultLauncher<String>
@@ -137,7 +139,7 @@ class MediaInput internal constructor(
         }
         val staged = File(context.filesDir, "send_media_${System.currentTimeMillis()}.jpg")
         if (capture.renameTo(staged)) {
-            send(staged.absolutePath, "image/jpeg")
+            send(staged.absolutePath, "image/jpeg", null)
         } else {
             capture.delete()
             Toast.makeText(context, "Couldn't attach that photo", Toast.LENGTH_SHORT).show()
@@ -192,10 +194,10 @@ class MediaInput internal constructor(
     }
 
     /**
-     * Copies a picked file into app storage and hands its path to the
-     * platform sender, which inserts the bubble. Copies off the main thread
-     * (a multi-MB image would jank it) and never fails silently: on any
-     * failure it toasts and drops the staged file.
+     * Copies a picked file into app storage and hands its path, with the
+     * file's own name, to the platform sender, which inserts the bubble.
+     * Copies off the main thread (a multi-MB image would jank it) and never
+     * fails silently: on any failure it toasts and drops the staged file.
      */
     internal fun stageAndSend(uri: Uri) {
         val send = sendMedia.value ?: return
@@ -203,6 +205,7 @@ class MediaInput internal constructor(
         val ext = stagedExtension(mime)
         scope.launch {
             val outFile = File(context.filesDir, "send_media_${System.currentTimeMillis()}$ext")
+            val name = withContext(Dispatchers.IO) { pickedFileName(context.contentResolver, uri) }
             val ok = withContext(Dispatchers.IO) {
                 try {
                     val input = context.contentResolver.openInputStream(uri)
@@ -215,7 +218,7 @@ class MediaInput internal constructor(
                 }
             }
             if (ok) {
-                send(outFile.absolutePath, mime)
+                send(outFile.absolutePath, mime, name)
             } else {
                 outFile.delete()
                 Toast.makeText(context, "Couldn't attach that file", Toast.LENGTH_SHORT).show()
@@ -231,7 +234,7 @@ class MediaInput internal constructor(
 @Composable
 fun rememberMediaInput(
     onSendAudio: ((path: String) -> Unit)?,
-    onSendMedia: ((path: String, mime: String) -> Unit)?,
+    onSendMedia: ((path: String, mime: String, fileName: String?) -> Unit)?,
 ): MediaInput {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -289,6 +292,65 @@ internal fun stagedExtension(mime: String): String {
         type.startsWith("video/") -> ".mp4"
         else -> ".bin"
     }
+}
+
+/**
+ * A picked file's own name ([OpenableColumns.DISPLAY_NAME]), made safe to
+ * send by [sanitizeFileName]; null when the provider gives none.
+ */
+internal fun pickedFileName(resolver: ContentResolver, uri: Uri): String? = try {
+    resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst() && !cursor.isNull(0)) sanitizeFileName(cursor.getString(0)) else null
+    }
+} catch (_: RuntimeException) {
+    // A provider that refuses the query (SecurityException, an unsupported
+    // column): the file still goes, without its name.
+    null
+}
+
+/** The longest file name sent, in characters, extension included. */
+internal const val MAX_FILE_NAME_LENGTH = 100
+
+/** Longer than this, an extension is taken to be part of the name, and may be cut. */
+private const val MAX_EXTENSION_LENGTH = 10
+
+/**
+ * [raw], a file name from another app, as safe to send and show: path
+ * separators become "_", control characters and bidirectional overrides
+ * (which can disguise an extension) go, and it's cut to
+ * [MAX_FILE_NAME_LENGTH] characters, keeping its extension. Null when nothing
+ * is left.
+ */
+internal fun sanitizeFileName(raw: String): String? {
+    val cleaned = buildString {
+        raw.codePoints().forEach { cp ->
+            when {
+                cp == '/'.code || cp == '\\'.code -> append('_')
+                Character.getType(cp) == Character.CONTROL.toInt() -> {}
+                cp in BIDI_CONTROLS -> {}
+                cp == 0x2028 || cp == 0x2029 -> {} // line and paragraph separators
+                else -> appendCodePoint(cp)
+            }
+        }
+    }.trim()
+    if (cleaned.all { it == '.' }) return null
+    return truncateKeepingExtension(cleaned, MAX_FILE_NAME_LENGTH)
+}
+
+/** Unicode's bidirectional marks, embeddings, overrides and isolates. */
+private val BIDI_CONTROLS = setOf(0x061C, 0x200E, 0x200F) + (0x202A..0x202E) + (0x2066..0x2069)
+
+/** [name] cut to [max] code points, keeping a short extension and whole characters. */
+private fun truncateKeepingExtension(name: String, max: Int): String {
+    val length = name.codePointCount(0, name.length)
+    if (length <= max) return name
+    val dot = name.lastIndexOf('.')
+    val ext = if (dot > 0) name.substring(dot) else ""
+    val extLength = ext.codePointCount(0, ext.length)
+    val keep = if (extLength in 2..MAX_EXTENSION_LENGTH + 1) ext else ""
+    val stemLimit = max - keep.codePointCount(0, keep.length)
+    val stem = name.substring(0, name.offsetByCodePoints(0, stemLimit)).trimEnd()
+    return stem + keep
 }
 
 /** Appended to the package name: the FileProvider the camera writes through (AndroidManifest.xml). */

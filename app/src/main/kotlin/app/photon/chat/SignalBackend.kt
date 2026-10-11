@@ -48,8 +48,8 @@ class SignalBackend(
         succeed("Message not sent") { repository.sendMessage(jid, text, replyToId) }
     }
 
-    override suspend fun sendMedia(jid: String, path: String, mime: String, replyToId: String?) {
-        succeed("Message not sent") { repository.sendMedia(jid, path, mime, null, replyToId) }
+    override suspend fun sendMedia(jid: String, path: String, mime: String, replyToId: String?, fileName: String?) {
+        succeed("Message not sent") { repository.sendMedia(jid, path, mime, null, replyToId, fileName) }
     }
 
     override suspend fun react(jid: String, messageId: String, senderJid: String, emoji: String) {

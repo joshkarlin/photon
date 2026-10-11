@@ -102,7 +102,7 @@ internal fun ChatScreen(
             { path, replyToId -> act { backend.sendAudio(jid, path, replyToId) } }
         } else null,
         onSendMedia = if (capabilities.media) {
-            { path, mime, replyToId -> act { backend.sendMedia(jid, path, mime, replyToId) } }
+            { path, mime, fileName, replyToId -> act { backend.sendMedia(jid, path, mime, replyToId, fileName) } }
         } else null,
         onBack = onBack,
         onMediaTap = { msg -> viewingMedia = msg },

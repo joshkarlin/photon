@@ -34,6 +34,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** Attach's sheet in the thread: Camera, Photos and Files, as the platform and phone allow. */
@@ -45,7 +46,8 @@ class AttachSheetTest {
 
     @get:Rule val rules: RuleChain = RuleChain.outerRule(RegisterComposeHostActivity()).around(rule)
 
-    private val sentMedia = mutableListOf<Pair<String, String>>()
+    /** What was sent: the staged path, mime type and the file's own name. */
+    private val sentMedia = mutableListOf<Triple<String, String, String?>>()
 
     /** Lets an app answer "take a photo", as a camera app would. */
     private fun installCameraApp() {
@@ -69,7 +71,7 @@ class AttachSheetTest {
                     participantNames = emptyMap(),
                     onSendText = { _, _ -> },
                     onSendAudio = if (canSendMedia) { _, _ -> } else null,
-                    onSendMedia = if (canSendMedia) { path, mime, _ -> sentMedia += path to mime } else null,
+                    onSendMedia = if (canSendMedia) { path, mime, name, _ -> sentMedia += Triple(path, mime, name) } else null,
                     onBack = {},
                     onMediaTap = null,
                     onMessagesLoaded = null,
@@ -219,13 +221,41 @@ class AttachSheetTest {
         shadowOf(rule.activity).receiveResult(request, Activity.RESULT_OK, null)
         rule.waitForIdle()
 
-        // Staged where the platforms send from, as a JPEG.
-        val (path, mime) = sentMedia.single()
+        // Staged where the platforms send from, as a JPEG with no name of its own.
+        val (path, mime, name) = sentMedia.single()
         val staged = File(path)
         assertEquals(rule.activity.filesDir, staged.parentFile)
         assertTrue(staged.name.matches(Regex("send_media_\\d+\\.jpg")), staged.name)
         assertContentEquals(byteArrayOf(1, 2, 3), staged.readBytes())
         assertEquals("image/jpeg", mime)
+        assertNull(name)
         assertFalse(capture.exists())
+    }
+
+    /** A document from Files is staged under Photon's name and sent with its own. */
+    @Test
+    fun aPickedFileIsStagedAndSentWithItsOwnName() {
+        PickedDocumentProvider.install()
+        PickedDocumentProvider.displayName = "Invoice 03/2026.pdf"
+        PickedDocumentProvider.file = File(rule.activity.cacheDir, "picked").apply { writeBytes(byteArrayOf(4, 5, 6)) }
+        try {
+            showDm()
+            openSheet()
+            described("Files").performClick()
+            shadowOf(rule.activity).receiveResult(
+                lastStarted(), Activity.RESULT_OK, Intent().setData(PickedDocumentProvider.DOCUMENT),
+            )
+            rule.waitUntil(5_000) { sentMedia.isNotEmpty() }
+
+            val (path, mime, name) = sentMedia.single()
+            assertEquals("Invoice 03_2026.pdf", name)
+            assertEquals("application/pdf", mime)
+            val staged = File(path)
+            assertEquals(rule.activity.filesDir, staged.parentFile)
+            assertTrue(staged.name.matches(Regex("send_media_\\d+\\.pdf")), staged.name)
+            assertContentEquals(byteArrayOf(4, 5, 6), staged.readBytes())
+        } finally {
+            PickedDocumentProvider.reset()
+        }
     }
 }

@@ -74,7 +74,7 @@ internal fun formatContent(msg: Message): String {
         "image" -> if (body != null) "[ image ] $body" else "[ image ]"
         "video" -> if (body != null) "[ video ] $body" else "[ video ]"
         "audio" -> "[ audio ]"
-        // WhatsApp keeps a document's file name as its body.
+        // A document's body is its file name: WhatsApp's, and those Photon sends.
         "document" -> if (body != null) "[ document: $body ]" else "[ document ]"
         "sticker" -> "[ sticker ]"
         "location" -> "[ location ]"

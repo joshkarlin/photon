@@ -90,7 +90,7 @@ class ChatThreadInputTest {
                     participantNames = emptyMap(),
                     onSendText = { text, replyTo -> sent += text to replyTo },
                     onSendAudio = if (canSendMedia) { _, _ -> } else null,
-                    onSendMedia = if (canSendMedia) { _, _, _ -> } else null,
+                    onSendMedia = if (canSendMedia) { _, _, _, _ -> } else null,
                     onBack = onBack,
                     onMediaTap = null,
                     onMessagesLoaded = null,
@@ -274,7 +274,7 @@ class ChatThreadInputTest {
                 ChatThread(
                     title = PreviewSamples.LONG_DM_TITLE, platform = Platform.WHATSAPP, messages = PreviewSamples.dmMessages,
                     isGroup = false, participantNames = emptyMap(), onSendText = { _, _ -> }, onSendAudio = { _, _ -> },
-                    onSendMedia = { _, _, _ -> }, onBack = {}, onMediaTap = null, onMessagesLoaded = null, onReact = null,
+                    onSendMedia = { _, _, _, _ -> }, onBack = {}, onMediaTap = null, onMessagesLoaded = null, onReact = null,
                     onRetry = null, onDelete = null, onTitleClick = null, supportsReply = true, headerContent = null,
                     composeStyle = style, keyboardStyle = KeyboardStyle.SYSTEM,
                 )

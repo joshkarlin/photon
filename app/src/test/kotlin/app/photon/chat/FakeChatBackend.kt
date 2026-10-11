@@ -28,7 +28,7 @@ internal class FakeChatBackend(
     override fun messages(jid: String): Flow<List<Message>> = messages
     override fun participantNames(jid: String): Flow<Map<String, String>> = flowOf(emptyMap())
     override suspend fun sendText(jid: String, text: String, replyToId: String?) {}
-    override suspend fun sendMedia(jid: String, path: String, mime: String, replyToId: String?) {}
+    override suspend fun sendMedia(jid: String, path: String, mime: String, replyToId: String?, fileName: String?) {}
     override suspend fun react(jid: String, messageId: String, senderJid: String, emoji: String) {}
     override suspend fun retry(messageId: String) {}
     override suspend fun delete(jid: String, messageId: String, forEveryone: Boolean) {}
