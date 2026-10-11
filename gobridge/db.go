@@ -83,8 +83,54 @@ func (b *Bridge) InitMessageDB(ctx context.Context) error {
 			return fmt.Errorf("schema exec failed: %w", err)
 		}
 	}
+	if err := b.migrateMessageDB(ctx); err != nil {
+		return err
+	}
 	b.log.Infof("Message DB schema initialized (%d statements)", len(statements))
 	return nil
+}
+
+// migrateMessageDB upgrades existing installs in place. Each step is
+// idempotent; CREATE TABLE IF NOT EXISTS above never alters an existing table.
+func (b *Bridge) migrateMessageDB(ctx context.Context) error {
+	// muted_until: 0 = not muted, -1 = muted forever, otherwise the unix
+	// second the mute ends. Rows muted before this column existed have no
+	// known end, so start them as "forever"; BackfillMutedUntil then copies
+	// the real end time from whatsmeow's own chat settings.
+	added, err := b.addColumnIfMissing(ctx, "conversations", "muted_until", "INTEGER NOT NULL DEFAULT 0")
+	if err != nil {
+		return err
+	}
+	if added {
+		if _, err := b.msgDB.ExecContext(ctx, `UPDATE conversations SET muted_until = -1 WHERE is_muted = 1`); err != nil {
+			return fmt.Errorf("migrate muted_until: %w", err)
+		}
+		b.log.Infof("Migrated conversations: added muted_until")
+	}
+	return nil
+}
+
+// addColumnIfMissing adds a column unless the table already has it.
+func (b *Bridge) addColumnIfMissing(ctx context.Context, table, column, def string) (added bool, err error) {
+	rows, err := b.msgDB.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false, fmt.Errorf("inspect %s: %w", table, err)
+	}
+	exists := false
+	for rows.Next() {
+		var name string
+		if rows.Scan(&name) == nil && name == column {
+			exists = true
+		}
+	}
+	rows.Close()
+	if exists {
+		return false, nil
+	}
+	if _, err := b.msgDB.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+def); err != nil {
+		return false, fmt.Errorf("add %s.%s: %w", table, column, err)
+	}
+	return true, nil
 }
 
 // RepairConversationMetadata fixes existing conversation rows whose is_group or
@@ -295,18 +341,20 @@ func (b *Bridge) MarkChatUnread(jid string) {
 	}
 }
 
-// UpdateMute sets is_muted for a conversation, inserting the row if it
-// doesn't exist yet (mute events can arrive before any message in a chat).
-func (b *Bridge) UpdateMute(jid string, muted bool) {
+// UpdateMute stores a conversation's mute (see migrateMessageDB for
+// muted_until's encoding), inserting the row if it doesn't exist yet (mute
+// events can arrive before any message in a chat). is_muted stays as "a mute
+// is set"; whether it's still in force depends on the time it's read.
+func (b *Bridge) UpdateMute(jid string, mutedUntil int64) {
 	m := 0
-	if muted {
+	if mutedUntil != 0 {
 		m = 1
 	}
 	_, err := b.msgDB.Exec(`
-		INSERT INTO conversations (jid, is_muted, updated_at)
-		VALUES (?, ?, 0)
-		ON CONFLICT(jid) DO UPDATE SET is_muted = excluded.is_muted
-	`, jid, m)
+		INSERT INTO conversations (jid, is_muted, muted_until, updated_at)
+		VALUES (?, ?, ?, 0)
+		ON CONFLICT(jid) DO UPDATE SET is_muted = excluded.is_muted, muted_until = excluded.muted_until
+	`, jid, m, mutedUntil)
 	if err != nil {
 		b.log.Errorf("Failed to update mute for %s: %v", jid, err)
 	}
