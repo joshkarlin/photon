@@ -66,6 +66,15 @@ class ConversationRowTest {
         rule.onNode(hasText("Climbing") and hasText("2")).assertExists()
     }
 
+    /** The time ends the row, so times line up down the list; the count goes before it. */
+    @Test
+    fun theUnreadCountSitsBeforeTheTime() {
+        showRows()
+        val count = rule.onNodeWithText("2", useUnmergedTree = true).getBoundsInRoot()
+        val time = rule.onNodeWithText(formatTimestamp(now - 1800), useUnmergedTree = true).getBoundsInRoot()
+        assertTrue(count.right <= time.left, "count $count should sit left of time $time")
+    }
+
     @Test
     fun theMutedIconSitsJustBeforeTheTime() {
         showRows()

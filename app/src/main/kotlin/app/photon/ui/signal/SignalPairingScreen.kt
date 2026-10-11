@@ -76,7 +76,7 @@ fun SignalPairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
             variant = LightTextVariant.Detail,
             lighten = true,
             modifier = Modifier.padding(
-                horizontal = PhotonGrid.MENU_MARGIN.gridUnitsAsDp(),
+                horizontal = PhotonGrid.MARGIN.gridUnitsAsDp(),
                 vertical = 1f.gridUnitsAsDp(),
             ),
         )
@@ -86,7 +86,7 @@ fun SignalPairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
             bitmap = qrBitmap,
             error = error,
             waitingText = status,
-            modifier = Modifier.weight(1f).padding(horizontal = PhotonGrid.MENU_MARGIN.gridUnitsAsDp()),
+            modifier = Modifier.weight(1f).padding(horizontal = PhotonGrid.MARGIN.gridUnitsAsDp()),
         )
     }
 }

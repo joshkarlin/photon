@@ -127,7 +127,7 @@ fun ContactScreen(
         Column(
             modifier = Modifier
                 .weight(1f)
-                .padding(horizontal = PhotonGrid.MENU_MARGIN.gridUnitsAsDp()),
+                .padding(horizontal = PhotonGrid.MARGIN.gridUnitsAsDp()),
             verticalArrangement = Arrangement.spacedBy(1f.gridUnitsAsDp()),
         ) {
             // Phone number (read-only display).

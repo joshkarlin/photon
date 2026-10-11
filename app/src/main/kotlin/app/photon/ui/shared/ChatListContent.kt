@@ -17,10 +17,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextAlign
 import app.photon.data.model.Conversation
 import app.photon.data.model.Platform
 import app.photon.service.NotificationHelper
+import app.photon.ui.shared.components.PageScrollBar
 import app.photon.ui.shared.components.settingsButton
 import app.photon.ui.theme.PhotonGrid
 import com.thelightphone.sdk.ui.LightLazyScrollView
@@ -101,6 +103,9 @@ fun ChatListContent(
     )
 }
 
+/** Test tag of the chat list's scroll view. */
+internal const val CHAT_LIST_TAG = "chatList"
+
 /** The chat list without its effects, so previews can render it. */
 @Composable
 internal fun ChatListLayout(
@@ -139,7 +144,7 @@ internal fun ChatListLayout(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
-                        .padding(horizontal = PhotonGrid.MENU_MARGIN.gridUnitsAsDp()),
+                        .padding(horizontal = PhotonGrid.MARGIN.gridUnitsAsDp()),
                     contentAlignment = Alignment.Center,
                 ) {
                     if (emptyContent != null) {
@@ -150,13 +155,15 @@ internal fun ChatListLayout(
                 }
             }
 
-            // Conversations list
+            // Conversations list: full width, so the scroll bar sits in the
+            // right margin by the screen's edge; each row insets itself.
             else -> {
                 LightLazyScrollView(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
-                        .padding(horizontal = PhotonGrid.MENU_MARGIN.gridUnitsAsDp()),
+                        .testTag(CHAT_LIST_TAG),
+                    scrollBarPosition = PageScrollBar,
                     listState = listState,
                     uniformItemHeightGridUnits = PhotonGrid.LIST_ROW_HEIGHT,
                 ) {

@@ -11,7 +11,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import app.photon.ui.shared.MenuScrollDialEffect
 import app.photon.ui.theme.PhotonGrid
-import com.thelightphone.sdk.ui.LightScrollView
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
 import com.thelightphone.sdk.ui.LightThemeTokens
@@ -22,8 +21,8 @@ import com.thelightphone.sdk.ui.lightClickable
 
 /**
  * A LightOS-style menu page: top bar (Back on the left when [onBack] is set,
- * centred [title]) over a scrolling column of [MenuRow]s that the scroll dial
- * steps through.
+ * centred [title]) over a scrolling column of [MenuRow]s ([PageScrollView])
+ * that the scroll dial steps through.
  */
 @Composable
 fun MenuScreen(
@@ -43,14 +42,7 @@ fun MenuScreen(
             center = title?.let { LightTopBarCenter.Text(it) },
             modifier = Modifier.padding(bottom = 1f.gridUnitsAsDp()),
         )
-        LightScrollView(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(start = PhotonGrid.MENU_MARGIN.gridUnitsAsDp()),
-            scrollState = scrollState,
-            content = content,
-        )
+        PageScrollView(modifier = Modifier.weight(1f), scrollState = scrollState, content = content)
     }
 }
 
