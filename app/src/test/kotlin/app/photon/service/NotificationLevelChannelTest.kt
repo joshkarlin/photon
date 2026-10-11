@@ -28,7 +28,9 @@ import kotlin.test.assertTrue
  * whichever channel a notification went to.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(manifest = Config.NONE, sdk = [34])
+// A plain Application: PhotonApp would also follow the stored level into the
+// shared cache, racing the level each test sets.
+@Config(manifest = Config.NONE, sdk = [34], application = android.app.Application::class)
 class NotificationLevelChannelTest {
 
     private val context = ApplicationProvider.getApplicationContext<Context>()
