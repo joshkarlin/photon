@@ -160,6 +160,14 @@ type ConversationUpdatedEvent struct {
 	JID string `json:"jid"`
 }
 
+// NamesChangedEvent: stored names changed outside a message — an address-book
+// edit, a new push or verified business name, a group rename, the reconcile.
+// JIDs are the conversations to refresh: a DM renamed, or a group whose own
+// name or one of whose members' names changed.
+type NamesChangedEvent struct {
+	JIDs []string `json:"jids"`
+}
+
 type HistorySyncProgressEvent struct {
 	ConversationsDone  int `json:"conversations_done"`
 	ConversationsTotal int `json:"conversations_total"`

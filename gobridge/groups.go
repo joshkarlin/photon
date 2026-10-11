@@ -15,14 +15,13 @@ type cachedGroupName struct {
 	fetched time.Time
 }
 
-// BackfillParticipantNames names group participants from whatsmeow's contact
-// store — the group-chat counterpart to BackfillContactNames (DM conversation
-// names). Runs on the same triggers so initial sync, live messages, and
-// everyday app-state patches all converge group sender names the same way.
-func (b *Bridge) BackfillParticipantNames() {
+// BackfillParticipantNames names group members from whatsmeow's contact
+// store — the group counterpart to BackfillContactNames, run by the same
+// reconcile. Returns the groups whose member names changed.
+func (b *Bridge) BackfillParticipantNames() []string {
 	rows, err := b.msgDB.Query(`SELECT jid FROM conversations WHERE is_group = 1`)
 	if err != nil {
-		return
+		return nil
 	}
 	var groups []string
 	for rows.Next() {
@@ -32,16 +31,22 @@ func (b *Bridge) BackfillParticipantNames() {
 		}
 	}
 	rows.Close()
+	var changed []string
 	for _, g := range groups {
-		b.ResolveGroupParticipants(g)
+		if b.resolveGroupParticipants(g) {
+			changed = append(changed, g)
+		}
 	}
+	return changed
 }
 
 func (b *Bridge) handleGroupInfo(evt *events.GroupInfo) {
 	jid := evt.JID.String()
 	if evt.Name != nil {
 		b.setGroupName(jid, evt.Name.Name)
-		b.SetConversationName(jid, rankedName{name: cleanName(evt.Name.Name), rank: rankSubject})
+		if b.SetConversationName(jid, rankedName{name: cleanName(evt.Name.Name), rank: rankSubject}) {
+			b.namesChanged([]string{jid})
+		}
 	}
 	if len(evt.Promote) > 0 || len(evt.Demote) > 0 {
 		b.forgetGroupAdmins(jid)
@@ -141,13 +146,20 @@ func (b *Bridge) memberName(sender types.JID, verifiedName, pushName string) ran
 // re-pair. The rank rules make it upgrade names and never downgrade them.
 // Cheap and idempotent, so it runs on every group open.
 func (b *Bridge) ResolveGroupParticipants(groupJID string) {
+	if b.resolveGroupParticipants(groupJID) {
+		b.namesChanged([]string{groupJID})
+		b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: groupJID})
+	}
+}
+
+func (b *Bridge) resolveGroupParticipants(groupJID string) (changed bool) {
 	rows, err := b.msgDB.Query(
 		`SELECT DISTINCT sender_jid FROM messages WHERE conversation_jid = ? AND is_from_me = 0`,
 		groupJID,
 	)
 	if err != nil {
 		b.log.Errorf("ResolveGroupParticipants query failed: %v", err)
-		return
+		return false
 	}
 	var senders []string
 	for rows.Next() {
@@ -158,7 +170,6 @@ func (b *Bridge) ResolveGroupParticipants(groupJID string) {
 	}
 	rows.Close()
 
-	updated := false
 	for _, sjid := range senders {
 		parsed, perr := types.ParseJID(sjid)
 		if perr != nil {
@@ -168,10 +179,8 @@ func (b *Bridge) ResolveGroupParticipants(groupJID string) {
 		// taught us (members outside the address book have no contact-store
 		// name), and Kotlin falls back to the number on its own.
 		if b.UpsertParticipant(groupJID, sjid, b.memberName(parsed, "", "")) {
-			updated = true
+			changed = true
 		}
 	}
-	if updated {
-		b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: groupJID})
-	}
+	return changed
 }

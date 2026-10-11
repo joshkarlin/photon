@@ -100,27 +100,129 @@ func better(a, b rankedName) rankedName {
 	return a
 }
 
-// handlePushName applies a changed push name to the person's DM. The rank
-// rules keep an address-book or business name.
+// handleContact applies an address-book entry the user added or changed on
+// their phone. whatsmeow emits one per incremental app-state change, having
+// just stored it under the mutation's JID; the action's own name is laid over
+// the merged lookup so a stale entry under the person's other JID form can't
+// win. A full sync stores contacts without events — the reconcile after
+// AppStateSyncComplete covers those. whatsmeow drops removals, so a contact
+// deleted on the phone keeps its name here.
+func (b *Bridge) handleContact(evt *events.Contact) {
+	forms := []types.JID{evt.JID}
+	for _, alt := range []string{evt.Action.GetPnJID(), evt.Action.GetLidJID()} {
+		if j, err := types.ParseJID(alt); alt != "" && err == nil {
+			forms = append(forms, j)
+		}
+	}
+	contact := b.lookupContact(forms...)
+	if evt.Action.GetFullName() != "" || evt.Action.GetFirstName() != "" {
+		contact.FullName, contact.FirstName = evt.Action.GetFullName(), evt.Action.GetFirstName()
+	}
+	b.renamePerson(personName(contact, "", ""), forms...)
+}
+
+// handlePushName applies a person's changed push name, which whatsmeow
+// reports once per change, from any message.
 func (b *Bridge) handlePushName(evt *events.PushName) {
-	user := evt.JID.ToNonAD()
-	resolved := b.resolveLIDJID(user)
-	b.SetConversationName(resolved.String(), personName(b.lookupContact(user), "", evt.NewPushName))
+	b.renamePerson(personName(b.lookupContact(evt.JID, evt.JIDAlt), "", evt.NewPushName), evt.JID, evt.JIDAlt)
+}
+
+// handleBusinessName applies a business's changed verified name.
+func (b *Bridge) handleBusinessName(evt *events.BusinessName) {
+	b.renamePerson(personName(b.lookupContact(evt.JID), evt.NewBusinessName, ""), evt.JID)
+}
+
+// renamePerson stores a person's (re-worked-out) name on their DM and on
+// their member row in every group they've written in, under the rank rules:
+// a new push name doesn't displace an address-book or business name. Rows
+// are keyed by the number when the LID mapping is known and by the LID
+// otherwise, and may still exist under both, so every form is renamed.
+func (b *Bridge) renamePerson(name rankedName, forms ...types.JID) {
+	if name.name == "" {
+		return
+	}
+	var keys []string
+	for _, j := range b.personForms(forms...) {
+		keys = append(keys, j.String())
+	}
+	if len(keys) == 0 {
+		return
+	}
+	var changed []string
+	for _, k := range keys {
+		if b.SetConversationName(k, name) {
+			changed = append(changed, k)
+		}
+	}
+	changed = append(changed, b.renameMember(keys, name)...)
+	b.namesChanged(changed)
+}
+
+// renameMember names a person in every group where they have a member row
+// or a stored message, under any of the given JIDs. Returns the groups
+// whose stored names changed.
+func (b *Bridge) renameMember(keys []string, name rankedName) []string {
+	args := make([]interface{}, 0, 2*len(keys))
+	for _, k := range keys {
+		args = append(args, k)
+	}
+	args = append(args, args...)
+	rows, err := b.msgDB.Query(`
+		SELECT DISTINCT conversation_jid, sender_jid FROM messages
+			WHERE is_from_me = 0 AND sender_jid IN (`+sqlInList(len(keys))+`) AND conversation_jid LIKE '%@g.us'
+		UNION SELECT conversation_jid, jid FROM participants WHERE jid IN (`+sqlInList(len(keys))+`)`, args...)
+	if err != nil {
+		b.log.Errorf("Failed to find groups of %v: %v", keys, err)
+		return nil
+	}
+	type member struct{ group, jid string }
+	var members []member
+	for rows.Next() {
+		var m member
+		if rows.Scan(&m.group, &m.jid) == nil {
+			members = append(members, m)
+		}
+	}
+	rows.Close()
+
+	var changed []string
+	for _, m := range members {
+		if b.UpsertParticipant(m.group, m.jid, name) {
+			changed = append(changed, m.group)
+		}
+	}
+	return changed
+}
+
+// namesChanged tells Kotlin which conversations' stored names (their own,
+// or their members') changed outside a message, so it can refresh them.
+func (b *Bridge) namesChanged(jids []string) {
+	if len(jids) == 0 {
+		return
+	}
+	seen := map[string]bool{}
+	var unique []string
+	for _, j := range jids {
+		if !seen[j] {
+			seen[j] = true
+			unique = append(unique, j)
+		}
+	}
+	b.BroadcastEvent("names_changed", NamesChangedEvent{JIDs: unique})
 }
 
 // BackfillContactNames re-applies every DM's name from whatsmeow's contact
-// store, as the reconcile after connect and after a full app-state sync
-// (which stores contacts without an event per contact). The rank rules make
-// it upgrade names and never downgrade them; at equal rank the store, which
-// holds the current value, wins.
-func (b *Bridge) BackfillContactNames() {
+// store, for the reconcile. The rank rules make it upgrade names and never
+// downgrade them; at equal rank the store, which holds the current value,
+// wins. Returns the conversations renamed.
+func (b *Bridge) BackfillContactNames() []string {
 	// @lid rows are DMs whose phone number isn't known yet; whatsmeow keys
 	// their push/business names by the LID. Read everything before writing
 	// (a cursor held open across the updates deadlocks a single connection).
 	var jids []string
 	rows, err := b.msgDB.Query(`SELECT jid FROM conversations WHERE jid LIKE '%@s.whatsapp.net' OR jid LIKE '%@lid'`)
 	if err != nil {
-		return
+		return nil
 	}
 	for rows.Next() {
 		var jid string
@@ -130,38 +232,28 @@ func (b *Bridge) BackfillContactNames() {
 	}
 	rows.Close()
 
-	updated := 0
+	var changed []string
 	for _, jid := range jids {
 		parsed, err := types.ParseJID(jid)
 		if err != nil {
 			continue
 		}
 		if b.SetConversationName(jid, personName(b.lookupContact(parsed), "", "")) {
-			updated++
+			changed = append(changed, jid)
 		}
 	}
-	b.log.Infof("Backfill: updated %d contact names", updated)
-	if updated > 0 {
-		b.BroadcastEvent("conversation_updated", struct{}{})
-	}
-}
-
-// handleBusinessName applies a business's (changed) verified name to its DM.
-// The rank rules keep an address-book name.
-func (b *Bridge) handleBusinessName(evt *events.BusinessName) {
-	user := evt.JID.ToNonAD()
-	resolved := b.resolveLIDJID(user)
-	jid := resolved.String()
-	if b.SetConversationName(jid, personName(b.lookupContact(user), evt.NewBusinessName, "")) {
-		b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: jid})
-	}
+	b.log.Infof("Backfill: updated %d contact names", len(changed))
+	return changed
 }
 
 // lookupContact merges what whatsmeow's contact store holds for a person
 // under each of their JID forms. The store keys an entry by the exact JID it
 // came with — an address-book entry by its app-state mutation's index, which
 // may be the LID or the number — so a phone-keyed chat must look under the
-// LID too, and the other way round. Phone forms are read first.
+// LID too, and the other way round. Where both forms hold a name, the LID's
+// wins: whatsmeow ignores app-state removals, so a contact WhatsApp moved
+// from its number's index to its LID's leaves a stale entry under the
+// number, never the reverse.
 func (b *Bridge) lookupContact(forms ...types.JID) types.ContactInfo {
 	var out types.ContactInfo
 	for _, jid := range b.personForms(forms...) {
@@ -180,7 +272,7 @@ func (b *Bridge) lookupContact(forms ...types.JID) types.ContactInfo {
 
 // personForms is every JID form of the people given: each without its device
 // suffix, plus its phone or LID counterpart where whatsmeow knows the
-// mapping. Phone forms come first.
+// mapping. LID forms come first (see lookupContact).
 func (b *Bridge) personForms(jids ...types.JID) []types.JID {
 	seen := map[types.JID]bool{}
 	var phones, lids []types.JID
@@ -205,7 +297,7 @@ func (b *Bridge) personForms(jids ...types.JID) []types.JID {
 			add(alt.ToNonAD())
 		}
 	}
-	return append(phones, lids...)
+	return append(lids, phones...)
 }
 
 // resolveMentions replaces "@<number>" mention tokens in WhatsApp text with the

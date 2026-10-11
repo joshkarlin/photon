@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"testing"
+	"time"
 
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/proto/waSyncAction"
 	"go.mau.fi/whatsmeow/proto/waVnameCert"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -69,8 +71,8 @@ func TestHandleBusinessName(t *testing.T) {
 		if got := conversationName(t, b, shop.String()); got != "ACME Ltd" {
 			t.Errorf("name = %q", got)
 		}
-		if len(sent.ofType("conversation_updated")) != 1 {
-			t.Errorf("no conversation_updated for the rename")
+		if got := sent.ofType("names_changed"); len(got) != 1 || !hasJID(got[0], shop.String()) {
+			t.Errorf("names_changed = %v, want one naming the chat", got)
 		}
 	})
 
@@ -79,10 +81,14 @@ func TestHandleBusinessName(t *testing.T) {
 		b.client.Store.Contacts.PutContactName(ctx, shop, "Corner", "Corner Shop")
 		b.UpsertConversation(shop.String(), rankedName{name: "Corner Shop", rank: rankContact}, "m1", 100)
 
+		sent := captureEvents(b)
 		b.handleBusinessName(&events.BusinessName{JID: shop, NewBusinessName: "ACME Ltd"})
 
 		if got := conversationName(t, b, shop.String()); got != "Corner Shop" {
 			t.Errorf("name = %q, want the address-book name kept", got)
+		}
+		if got := sent.ofType("names_changed"); len(got) != 0 {
+			t.Errorf("names_changed = %v for a name that didn't change", got)
 		}
 	})
 }
@@ -94,7 +100,7 @@ func TestBackfillContactNames_namesLIDChats(t *testing.T) {
 	b.client.Store.Contacts.PutPushName(ctx, lid, "Bob")
 	b.UpsertConversation(lid.String(), rankedName{}, "m1", 100)
 
-	b.BackfillContactNames()
+	b.reconcile()
 
 	if got := conversationName(t, b, lid.String()); got != "Bob" {
 		t.Errorf("@lid chat name = %q, want Bob from the contact store", got)
@@ -338,4 +344,161 @@ func TestLookupContact_readsPhoneAndLIDForms(t *testing.T) {
 			t.Errorf("chat = %+v, want the address-book name", got)
 		}
 	})
+}
+
+// hasJID reports whether a names_changed payload lists jid.
+func hasJID(payload map[string]any, jid string) bool {
+	jids, _ := payload["jids"].([]any)
+	for _, j := range jids {
+		if j == jid {
+			return true
+		}
+	}
+	return false
+}
+
+// An address-book edit on the phone reaches Photon as one events.Contact
+// (whatsmeow stores it first). The person's DM and their name in every group
+// they've written in follow it at once, and Kotlin hears which chats changed.
+func TestHandleContact_renamesDMAndGroupMembers(t *testing.T) {
+	ctx := context.Background()
+	alice := types.NewJID("447700900001", types.DefaultUserServer)
+	aliceLID := types.NewJID("11223344", types.HiddenUserServer)
+	club := types.NewJID("120363000000000001", types.GroupServer)
+	work := types.NewJID("120363000000000002", types.GroupServer)
+
+	setup := func(t *testing.T) (*Bridge, *eventLog) {
+		b := newClientBridge(t)
+		b.client.Store.LIDs.PutLIDMapping(ctx, aliceLID, alice)
+		b.client.Store.Contacts.PutContactName(ctx, aliceLID, "Alice", "Alice")
+		b.handleMessage(textEvent(alice, alice, "d1", "hi", 100))
+		b.handleMessage(textEvent(club, alice, "c1", "hi club", 100))
+		b.handleMessage(textEvent(work, aliceLID, "w1", "hi work", 100)) // keyed by the number all the same
+		return b, captureEvents(b)
+	}
+	contactEvent := func(jid types.JID, act *waSyncAction.ContactAction) *events.Contact {
+		// What whatsmeow does before dispatching the event.
+		return &events.Contact{JID: jid, Timestamp: time.Unix(200, 0), Action: act}
+	}
+
+	t.Run("renamed under the LID", func(t *testing.T) {
+		b, sent := setup(t)
+		b.client.Store.Contacts.PutContactName(ctx, aliceLID, "Alice", "Alice Smith")
+		b.HandleEvent(contactEvent(aliceLID, &waSyncAction.ContactAction{FullName: s("Alice Smith"), FirstName: s("Alice")}))
+
+		want := rankedName{name: "Alice Smith", rank: rankContact}
+		if got := conversationRank(t, b, alice.String()); got != want {
+			t.Errorf("DM = %+v, want %+v", got, want)
+		}
+		for _, g := range []types.JID{club, work} {
+			if got := b.storedParticipantName(g.String(), alice.String()); got != want {
+				t.Errorf("member in %s = %+v, want %+v", g, got, want)
+			}
+		}
+		got := sent.ofType("names_changed")
+		if len(got) != 1 || !hasJID(got[0], alice.String()) || !hasJID(got[0], club.String()) || !hasJID(got[0], work.String()) {
+			t.Errorf("names_changed = %v, want one naming the DM and both groups", got)
+		}
+	})
+
+	// A contact WhatsApp re-indexed from number to LID leaves a stale entry
+	// under the number (whatsmeow drops the removal).
+	t.Run("a stale entry under the number never wins", func(t *testing.T) {
+		b, _ := setup(t)
+		b.client.Store.Contacts.PutContactName(ctx, alice, "Al", "Alice Old")
+		b.client.Store.Contacts.PutContactName(ctx, aliceLID, "Alice", "Alice New")
+		b.HandleEvent(contactEvent(aliceLID, &waSyncAction.ContactAction{FullName: s("Alice New"), FirstName: s("Alice")}))
+		if got := conversationName(t, b, alice.String()); got != "Alice New" {
+			t.Errorf("DM = %q, want the edited name", got)
+		}
+		b.reconcile()
+		if got := conversationName(t, b, alice.String()); got != "Alice New" {
+			t.Errorf("DM = %q after the reconcile, want the edited name kept", got)
+		}
+	})
+
+	t.Run("the action maps a LID whatsmeow can't yet", func(t *testing.T) {
+		b := newClientBridge(t)
+		bob := types.NewJID("447700900002", types.DefaultUserServer)
+		bobLID := types.NewJID("55667788", types.HiddenUserServer)
+		b.handleMessage(textEvent(bob, bob, "d1", "hi", 100))
+		b.client.Store.Contacts.PutContactName(ctx, bobLID, "Bob", "Bob Jones")
+		b.HandleEvent(contactEvent(bobLID, &waSyncAction.ContactAction{FullName: s("Bob Jones"), PnJID: s(bob.String())}))
+
+		if got := conversationName(t, b, bob.String()); got != "Bob Jones" {
+			t.Errorf("DM = %q, want the address-book name", got)
+		}
+	})
+}
+
+// A new push name renames the person wherever only a push name named them,
+// and nowhere an address-book name does.
+func TestHandlePushName_renamesOnlyWeakerNames(t *testing.T) {
+	ctx := context.Background()
+	b := newClientBridge(t)
+	dave := types.NewJID("447700900004", types.DefaultUserServer)
+	carol := types.NewJID("447700900003", types.DefaultUserServer)
+	club := types.NewJID("120363000000000001", types.GroupServer)
+	b.client.Store.Contacts.PutContactName(ctx, carol, "Carol", "Carol Smith")
+	for _, m := range []struct {
+		chat, sender types.JID
+		id, push     string
+	}{{dave, dave, "d1", "Dave"}, {club, dave, "c1", "Dave"}, {carol, carol, "d2", "caz"}, {club, carol, "c2", "caz"}} {
+		evt := textEvent(m.chat, m.sender, m.id, "hi", 100)
+		evt.Info.PushName = m.push
+		b.handleMessage(evt)
+	}
+	sent := captureEvents(b)
+
+	b.client.Store.Contacts.PutPushName(ctx, dave, "Dave G")
+	b.HandleEvent(&events.PushName{JID: dave, OldPushName: "Dave", NewPushName: "Dave G"})
+	b.client.Store.Contacts.PutPushName(ctx, carol, "cazza")
+	b.HandleEvent(&events.PushName{JID: carol, OldPushName: "caz", NewPushName: "cazza"})
+
+	if got := conversationName(t, b, dave.String()); got != "Dave G" {
+		t.Errorf("Dave's DM = %q", got)
+	}
+	if got := participantNames(t, b, club.String()); got[dave.String()] != "Dave G" || got[carol.String()] != "Carol Smith" {
+		t.Errorf("members = %v, want Dave renamed and Carol's address-book name kept", got)
+	}
+	if got := conversationName(t, b, carol.String()); got != "Carol Smith" {
+		t.Errorf("Carol's DM = %q, want her address-book name kept", got)
+	}
+	got := sent.ofType("names_changed")
+	if len(got) != 1 || !hasJID(got[0], dave.String()) || !hasJID(got[0], club.String()) || hasJID(got[0], carol.String()) {
+		t.Errorf("names_changed = %v, want only Dave's change", got)
+	}
+}
+
+// The reconcile upgrades names from the contact store, never downgrades
+// them, and says which chats it renamed.
+func TestReconcile_upgradesWithoutDowngrading(t *testing.T) {
+	ctx := context.Background()
+	b := newClientBridge(t)
+	alice := types.NewJID("447700900001", types.DefaultUserServer)
+	shop := types.NewJID("447700900099", types.DefaultUserServer)
+	club := types.NewJID("120363000000000001", types.GroupServer)
+	b.handleMessage(textEvent(alice, alice, "d1", "hi", 100)) // nothing known yet
+	b.handleMessage(textEvent(club, alice, "c1", "hi", 100))
+	b.handleMessage(verifiedEvent(shop, "s1", "acme help", "ACME Ltd"))
+	// A full sync stores contacts with no event each.
+	b.client.Store.Contacts.PutContactName(ctx, alice, "Alice", "Alice Smith")
+	b.client.Store.Contacts.PutPushName(ctx, shop, "acme support")
+	sent := captureEvents(b)
+
+	b.reconcile()
+
+	if got := conversationName(t, b, alice.String()); got != "Alice Smith" {
+		t.Errorf("DM = %q", got)
+	}
+	if got := participantNames(t, b, club.String())[alice.String()]; got != "Alice Smith" {
+		t.Errorf("member = %q", got)
+	}
+	if got := conversationName(t, b, shop.String()); got != "ACME Ltd" {
+		t.Errorf("business DM = %q, want the verified name kept", got)
+	}
+	got := sent.ofType("names_changed")
+	if len(got) != 1 || !hasJID(got[0], alice.String()) || !hasJID(got[0], club.String()) || hasJID(got[0], shop.String()) {
+		t.Errorf("names_changed = %v", got)
+	}
 }
