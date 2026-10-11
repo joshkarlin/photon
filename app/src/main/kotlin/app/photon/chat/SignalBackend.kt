@@ -74,6 +74,16 @@ class SignalBackend(
         backendCall("Download") { withContext(Dispatchers.IO) { downloadAttachment(messageId) } }
             ?: throw ChatBackendException("Download not available")
 
+    // Signal reaches only people Photon already knows: an ACI the contacts
+    // table maps to the number, from the primary's contact sync or past
+    // chats. Finding anyone else would need Signal's contact discovery
+    // service (CDSI), which Photon doesn't use; that's out of scope for now.
+    override suspend fun reach(phoneE164: String): Reach = withContext(Dispatchers.IO) {
+        val aci = runCatching { repository.aciForPhone(phoneE164) }.getOrNull()
+            ?: return@withContext Reach.Unreachable(NOT_KNOWN)
+        Reach.Reachable(aci, existing = runCatching { repository.hasMessages(aci) }.getOrDefault(false))
+    }
+
     // A read sync that failed offline goes out once Signal is back.
     override val reconnects: Flow<Unit> = receiverState.filter { it == "connected" }.map { }
 
@@ -91,5 +101,9 @@ class SignalBackend(
 
     private suspend fun succeed(failure: String, call: suspend () -> Boolean) {
         if (!backendCall(failure) { call() }) throw ChatBackendException(failure)
+    }
+
+    internal companion object {
+        const val NOT_KNOWN = "not known to Signal"
     }
 }

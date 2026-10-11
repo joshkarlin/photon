@@ -56,6 +56,20 @@ class SmsBackend(private val repository: SmsRepository) : ChatBackend {
 
     override suspend fun downloadMedia(messageId: String): String = unsupported("media")
 
+    // Any phone number. A chat may already exist under the number as it was
+    // written then ("07400 123456"), and that one opens. A chat with an
+    // alphanumeric sender has no number to reach it by: it's only ever
+    // opened as itself.
+    override suspend fun reach(phoneE164: String): Reach = withContext(Dispatchers.IO) {
+        if (DisplayNames.phoneOf(phoneE164, Platform.SMS) == null) return@withContext Reach.Unreachable(NOT_A_NUMBER)
+        val existing = runCatching { repository.conversationWith(phoneE164) }.getOrNull()
+        if (existing != null) {
+            Reach.Reachable(existing.jid, existing = true)
+        } else {
+            Reach.Reachable(repository.addressFor(phoneE164), existing = false)
+        }
+    }
+
     // A number-keyed chat is its number; an alphanumeric sender ("HSBC UK")
     // isn't one to save.
     override fun contactPhone(jid: String): String? = DisplayNames.phoneOf(jid, Platform.SMS)
@@ -63,4 +77,8 @@ class SmsBackend(private val repository: SmsRepository) : ChatBackend {
     override fun mayHaveContactPhone(jid: String) = contactPhone(jid) != null
 
     private fun unsupported(what: String): Nothing = throw ChatBackendException("SMS has no $what")
+
+    internal companion object {
+        const val NOT_A_NUMBER = "not a phone number"
+    }
 }

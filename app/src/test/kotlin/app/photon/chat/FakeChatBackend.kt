@@ -39,6 +39,15 @@ internal class FakeChatBackend(
 
     override suspend fun downloadMedia(messageId: String): String = throw ChatBackendException("none")
 
+    /** What [reach] answers, by number; anything else is unreachable. */
+    val reaches = mutableMapOf<String, Reach>()
+    val reached = mutableListOf<String>()
+
+    override suspend fun reach(phoneE164: String): Reach {
+        reached += phoneE164
+        return reaches[phoneE164] ?: Reach.Unreachable("not on ${platform.label}")
+    }
+
     override suspend fun onOpen(jid: String, isGroup: Boolean) {
         opened += jid to isGroup
     }
