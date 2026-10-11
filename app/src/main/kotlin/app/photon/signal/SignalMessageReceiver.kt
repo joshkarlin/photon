@@ -12,6 +12,7 @@ import app.photon.signal.receiver.ContactsSync
 import app.photon.signal.receiver.DataMessageHandler
 import app.photon.signal.receiver.EnvelopeProcessor
 import app.photon.signal.receiver.GroupMetadata
+import app.photon.signal.receiver.NetworkMonitor
 import app.photon.signal.receiver.PreKeyRefill
 import app.photon.signal.receiver.Receipts
 import app.photon.signal.receiver.RemoteEdits
@@ -93,6 +94,10 @@ class SignalMessageReceiver(
         receipts, dataMessages, syncMessages, calls,
     )
 
+    // A validated network ends a reconnect backoff early.
+    private val networkReturn = NetworkReturn()
+    private val networkMonitor = NetworkMonitor(context) { networkReturn.networkValidated() }
+
     private val _state = MutableStateFlow("disconnected")
     val state: StateFlow<String> = _state
 
@@ -129,6 +134,7 @@ class SignalMessageReceiver(
         synchronized(lifecycleLock) {
             if (running) return
             running = true
+            networkMonitor.start()
             val gen = ++generation
             // A fresh start (including "Refresh connection") re-runs upkeep.
             lastMaintenanceAt = 0L
@@ -188,6 +194,7 @@ class SignalMessageReceiver(
             groupManager = null
             _state.value = "disconnected"
         }
+        networkMonitor.stop()
         app.photon.service.PhotonService._signalGroupManager = null
         closeSockets(pair)
         return loop
@@ -247,6 +254,7 @@ class SignalMessageReceiver(
         while (isCurrent(gen)) {
             var ws: SignalWebSocket.AuthenticatedWebSocket? = null
             val attempt = Attempt()
+            val networkEpoch = networkReturn.epoch
             try {
                 setState(gen, "connecting")
                 ws = connectWebSocket(gen)
@@ -280,7 +288,9 @@ class SignalMessageReceiver(
             val wait = SignalReconnect.delayMs(failures)
             setState(gen, "disconnected")
             Log.i(TAG, "Reconnecting in ${wait / 1000}s (attempt $failures, last state: $wsState)")
-            delay(wait)
+            val networkReturned = networkReturn.await(wait, networkEpoch)
+            if (networkReturned) Log.i(TAG, "Network validated; reconnecting now")
+            failures = NetworkReturn.failuresAfterWait(failures, networkReturned)
         }
     }
 
@@ -300,6 +310,7 @@ class SignalMessageReceiver(
             groupManager = null
             _state.value = "logged_out"
         }
+        networkMonitor.stop()
         app.photon.service.PhotonService._signalGroupManager = null
         closeSockets(pair)
     }
