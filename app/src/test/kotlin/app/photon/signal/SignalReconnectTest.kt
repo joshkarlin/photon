@@ -80,18 +80,31 @@ class SignalReconnectTest {
         assertEquals(6, NetworkReturn.failuresAfterWait(6, networkReturned = false))
     }
 
-    /** Capabilities are re-reported for signal changes; only a newly validated network counts. */
+    /** Capabilities are re-reported for signal changes; only a newly validated default network counts. */
     @Test
-    fun onlyANewlyValidatedNetworkCounts() {
-        val networks = ValidatedNetworks()
+    fun onlyANewlyValidatedDefaultNetworkCounts() {
+        val network = DefaultNetworkValidation()
 
-        assertTrue(networks.onCapabilities("wifi", isValidated = true))
-        assertFalse(networks.onCapabilities("wifi", isValidated = true))
-        assertFalse(networks.onCapabilities("wifi", isValidated = false))
-        assertTrue(networks.onCapabilities("wifi", isValidated = true))
-        networks.onLost("wifi")
-        assertTrue(networks.onCapabilities("wifi", isValidated = true))
-        assertTrue(networks.onCapabilities("cell", isValidated = true))
-        assertFalse(networks.onCapabilities("cell", isValidated = false))
+        assertTrue(network.onCapabilities("wifi", isValidated = true))
+        assertFalse(network.onCapabilities("wifi", isValidated = true))
+        assertFalse(network.onCapabilities("wifi", isValidated = false))
+        assertTrue(network.onCapabilities("wifi", isValidated = true))
+        network.onLost("wifi")
+        assertTrue(network.onCapabilities("wifi", isValidated = true))
+    }
+
+    /**
+     * Wi-Fi becoming the default doesn't report mobile lost; it just stops
+     * being the default. Switching back to mobile must still count.
+     */
+    @Test
+    fun switchingBackToAnEarlierDefaultNetworkCounts() {
+        val network = DefaultNetworkValidation()
+
+        assertTrue(network.onCapabilities("cell", isValidated = true))
+        assertTrue(network.onCapabilities("wifi", isValidated = true))
+        network.onLost("wifi")
+        assertTrue(network.onCapabilities("cell", isValidated = true))
+        assertFalse(network.onCapabilities("cell", isValidated = true))
     }
 }

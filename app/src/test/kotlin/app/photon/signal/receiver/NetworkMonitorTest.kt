@@ -62,4 +62,22 @@ class NetworkMonitorTest {
         assertEquals(2, validations)
         monitor.stop()
     }
+
+    /** The default switching to Wi-Fi and back to mobile, with no onLost for mobile. */
+    @Test
+    fun reportsASwitchBackToAnEarlierDefaultNetwork() {
+        var validations = 0
+        val monitor = NetworkMonitor(context) { validations++ }
+        monitor.start()
+        val callback = connectivity.networkCallbacks.single()
+        val cell = ShadowNetwork.newInstance(2)
+        val wifi = ShadowNetwork.newInstance(1)
+
+        callback.onCapabilitiesChanged(cell, capabilities(validated = true))
+        callback.onCapabilitiesChanged(wifi, capabilities(validated = true))
+        callback.onCapabilitiesChanged(cell, capabilities(validated = true))
+
+        assertEquals(3, validations)
+        monitor.stop()
+    }
 }

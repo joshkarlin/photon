@@ -6,7 +6,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.util.Log
 import app.photon.signal.SignalMessageReceiver
-import app.photon.signal.ValidatedNetworks
+import app.photon.signal.DefaultNetworkValidation
 
 private const val TAG = SignalMessageReceiver.TAG
 
@@ -25,7 +25,7 @@ internal class NetworkMonitor(
     @Synchronized
     fun start() {
         if (callback != null) return
-        val networks = ValidatedNetworks()
+        val networks = DefaultNetworkValidation()
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
                 val validated = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)

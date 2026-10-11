@@ -216,8 +216,10 @@ class SignalMessageReceiver(
             profileFetcher = null
             groupManager = null
             _state.value = "disconnected"
+            // Under the lock, or a start() in between keeps the old callback
+            // and this stop() then removes the new loop's.
+            networkMonitor.stop()
         }
-        networkMonitor.stop()
         app.photon.service.PhotonService._signalGroupManager = null
         closeSockets(pair)
         return loop
@@ -332,8 +334,8 @@ class SignalMessageReceiver(
             profileFetcher = null
             groupManager = null
             _state.value = "logged_out"
+            networkMonitor.stop()
         }
-        networkMonitor.stop()
         app.photon.service.PhotonService._signalGroupManager = null
         closeSockets(pair)
     }

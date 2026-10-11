@@ -72,23 +72,34 @@ internal class NetworkReturn {
 }
 
 /**
- * Turns network-callback updates into "a network just became validated"
- * events. Capabilities are re-reported for bandwidth and signal changes;
- * only a network newly (or again) validated counts.
+ * Turns default-network callback updates into "the default network just
+ * became validated" events. Capabilities are re-reported for bandwidth and
+ * signal changes, so only a transition counts: a new default network
+ * becoming validated (including switching back to one used before, which
+ * gets no onLost when it merely stops being the default), or the same one
+ * being validated again.
  */
-internal class ValidatedNetworks {
-    private val validated = mutableSetOf<Any>()
+internal class DefaultNetworkValidation {
+    private var current: Any? = null
+    private var validated = false
 
-    /** Returns true when [network] has just become validated. */
+    /** Returns true when the default network has just become validated. */
     @Synchronized
     fun onCapabilities(network: Any, isValidated: Boolean): Boolean {
-        if (isValidated) return validated.add(network)
-        validated.remove(network)
-        return false
+        if (network != current) {
+            current = network
+            validated = false
+        }
+        val becameValidated = isValidated && !validated
+        validated = isValidated
+        return becameValidated
     }
 
     @Synchronized
     fun onLost(network: Any) {
-        validated.remove(network)
+        if (network == current) {
+            current = null
+            validated = false
+        }
     }
 }
