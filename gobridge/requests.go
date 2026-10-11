@@ -207,7 +207,7 @@ func (b *Bridge) handleEditMessage(ctx context.Context, raw json.RawMessage) (js
 		return nil, err
 	}
 
-	b.UpdateMessageEdit(p.MessageID, p.NewText)
+	b.UpdateMessageEdit(p.MessageID, targetJID.String(), p.NewText, &author{isMe: true})
 	// Tell connected UIs to refresh, mirroring the live edit path which
 	// broadcasts message_updated (ws request responses don't flow through the
 	// event stream).

@@ -24,9 +24,10 @@ type RetentionConfig struct {
 	MediaTTLMins int // Minutes before temp media files are deleted
 }
 
-// cachedGroupName is a groupNames cache entry; see Bridge.groupName.
+// cachedGroupName is a groupNames cache entry; see Bridge.groupEntry.
 type cachedGroupName struct {
 	name    string
+	admins  map[string]bool // user parts (phone and LID) of admins; nil = not fetched
 	fetched time.Time
 }
 

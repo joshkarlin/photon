@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
@@ -177,5 +178,71 @@ func TestHandleMessage_unreadableEditKeepsText(t *testing.T) {
 
 	if got := textBody(t, b, "m1"); got != "original" {
 		t.Errorf("text = %q, an edit with no content must not blank the message", got)
+	}
+}
+
+var (
+	grp   = types.NewJID("120363000000000009", types.GroupServer)
+	alice = types.NewJID("447700900001", types.DefaultUserServer)
+	bob   = types.NewJID("447700900002", types.DefaultUserServer)
+)
+
+func editEvent(chat, sender types.JID, id, targetID, text string) *events.Message {
+	return messageEvent(chat, sender, id, 200, editProtocol(targetID, &waE2E.Message{Conversation: proto.String(text)}))
+}
+
+// Message IDs are visible to every group member and the server can't check
+// an end-to-end encrypted edit, so the bridge must.
+func TestHandleMessage_editOnlyByTheSenderInTheSameChat(t *testing.T) {
+	b := newClientBridge(t)
+	b.handleMessage(textEvent(grp, alice, "m1", "meet at 6", 100))
+
+	b.handleMessage(editEvent(grp, bob, "e1", "m1", "meet at 9")) // another member
+	b.handleMessage(editEvent(bob, bob, "e2", "m1", "meet at 9")) // from another chat
+	if got := textBody(t, b, "m1"); got != "meet at 6" {
+		t.Fatalf("text = %q: someone other than the sender edited it", got)
+	}
+
+	b.handleMessage(editEvent(grp, alice, "e3", "m1", "meet at 7"))
+	if got := textBody(t, b, "m1"); got != "meet at 7" {
+		t.Errorf("text = %q, want the sender's edit", got)
+	}
+}
+
+func TestHandleMessage_ownEditOnlyTouchesOwnMessages(t *testing.T) {
+	b := newClientBridge(t)
+	b.handleMessage(textEvent(alice, alice, "m1", "theirs", 100))
+	b.handleMessage(editEvent(alice, ownJID, "e1", "m1", "rewritten"))
+	if got := textBody(t, b, "m1"); got != "theirs" {
+		t.Errorf("text = %q: our edit rewrote the other person's message", got)
+	}
+}
+
+func TestHandleMessage_revokeOnlyBySenderOrAdmin(t *testing.T) {
+	b := newClientBridge(t)
+	b.handleMessage(textEvent(grp, alice, "m1", "one", 100))
+	b.handleMessage(textEvent(grp, alice, "m2", "two", 101))
+	b.handleMessage(textEvent(alice, alice, "d1", "dm", 102))
+
+	b.handleMessage(revokeEvent(grp, bob, "r1", "m1", 110)) // not the sender, not an admin
+	b.handleMessage(revokeEvent(bob, bob, "r2", "d1", 111)) // from another chat
+	if messageStatus(t, b, "m1") == "deleted" || messageStatus(t, b, "d1") == "deleted" {
+		t.Fatal("a revoke from someone not entitled to it was applied")
+	}
+
+	// A group admin may delete anyone's message.
+	b.groupNames = map[string]cachedGroupName{
+		grp.String(): {name: "G", admins: map[string]bool{bob.User: true}, fetched: time.Now()},
+	}
+	b.handleMessage(revokeEvent(grp, bob, "r3", "m1", 112))
+	if got := messageStatus(t, b, "m1"); got != "deleted" {
+		t.Errorf("admin revoke: status = %q", got)
+	}
+
+	// So may the sender, and the user's own devices (they only can if admin).
+	b.handleMessage(revokeEvent(alice, alice, "r4", "d1", 113))
+	b.handleMessage(revokeEvent(grp, ownJID, "r5", "m2", 114))
+	if messageStatus(t, b, "d1") != "deleted" || messageStatus(t, b, "m2") != "deleted" {
+		t.Errorf("sender/own revokes not applied: d1=%s m2=%s", messageStatus(t, b, "d1"), messageStatus(t, b, "m2"))
 	}
 }

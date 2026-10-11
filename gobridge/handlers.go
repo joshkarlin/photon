@@ -292,10 +292,10 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 		})
 		return
 	case kindRevoke:
-		b.applyRevoke(targetID)
+		b.applyRevoke(chatJID, evt.Info, targetID)
 		return
 	case kindEdit:
-		b.applyEdit(chatJID, targetID, msg.GetProtocolMessage().GetEditedMessage())
+		b.applyEdit(chatJID, targetID, msg.GetProtocolMessage().GetEditedMessage(), b.authorOf(evt.Info))
 		return
 	case kindDrop:
 		b.log.Debugf("Skipping content-free message %s in %s", msgID, chatJID)
@@ -417,10 +417,10 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 // applyRevoke blanks a message deleted for everyone. If it was the last unread
 // message in its chat, Kotlin uses message_revoked's unread_count to withdraw
 // the notification that announced it.
-func (b *Bridge) applyRevoke(targetID string) {
-	res, ok := b.RevokeMessage(targetID)
+func (b *Bridge) applyRevoke(chatJID string, info types.MessageInfo, targetID string) {
+	res, ok := b.revoke(chatJID, info, targetID)
 	if !ok {
-		b.log.Debugf("Revoke for unknown message %s", targetID)
+		b.log.Debugf("Ignoring revoke of %s in %s by %s: no such message of theirs", targetID, chatJID, info.Sender)
 		return
 	}
 	for _, f := range res.Files {
@@ -438,6 +438,51 @@ func (b *Bridge) applyRevoke(targetID string) {
 		WasUnread:       res.WasUnread,
 		UnreadCount:     res.Unread,
 	})
+}
+
+// revoke applies a "delete for everyone" only from someone entitled to it:
+// the message's sender, or — in a group — an admin (or the user's own
+// devices). The server can't check, as the revoke is end-to-end encrypted,
+// and message IDs are visible to every member of a group.
+func (b *Bridge) revoke(chatJID string, info types.MessageInfo, targetID string) (RevokeResult, bool) {
+	by := b.authorOf(info)
+	if res, ok := b.RevokeMessage(targetID, chatJID, &by); ok {
+		return res, true
+	}
+	if info.Chat.Server == types.GroupServer && (info.IsFromMe || b.isGroupAdmin(info.Chat, info.Sender, info.SenderAlt)) {
+		return b.RevokeMessage(targetID, chatJID, nil)
+	}
+	return RevokeResult{}, false
+}
+
+// author identifies who sent an edit or revoke, to match it against the
+// stored message it targets.
+type author struct {
+	isMe bool     // one of the user's own devices
+	keys []string // sender_jid forms the person's stored messages may carry
+}
+
+func (b *Bridge) authorOf(info types.MessageInfo) author {
+	if info.IsFromMe {
+		return author{isMe: true}
+	}
+	keys := []string{b.canonicalSenderJID(info.Sender), info.Sender.ToNonAD().String()}
+	if !info.SenderAlt.IsEmpty() {
+		keys = append(keys, b.canonicalSenderJID(info.SenderAlt), info.SenderAlt.ToNonAD().String())
+	}
+	return author{keys: keys}
+}
+
+// sqlClause restricts a messages query to rows this author sent.
+func (a author) sqlClause() (string, []interface{}) {
+	if a.isMe {
+		return "is_from_me = 1", nil
+	}
+	args := make([]interface{}, len(a.keys))
+	for i, k := range a.keys {
+		args[i] = k
+	}
+	return "is_from_me = 0 AND sender_jid IN (" + sqlInList(len(a.keys)) + ")", args
 }
 
 func (b *Bridge) handleReceipt(evt *events.Receipt) {
@@ -552,7 +597,7 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 		// Edits and revokes in the payload apply to rows in this batch, so
 		// they run after the insert.
 		var edits []historyEdit
-		var revokes []string
+		var revokes []historyRevoke
 		// Collect each distinct group sender's best name from history push
 		// names so historical messages render the contact/profile name instead
 		// of a bare number. Upserted once per sender after the loop.
@@ -599,13 +644,13 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 			// ParseWebMessage reads.
 			evt := b.historyEvent(chat, wm)
 			if targetID, edited := historyEditTarget(evt, wm); targetID != "" {
-				edits = append(edits, historyEdit{targetID, edited})
+				edits = append(edits, historyEdit{targetID, edited, b.authorOf(evt.Info)})
 				continue
 			}
 			kind, targetID := classifyMessageEvent(evt.Message)
 			switch kind {
 			case kindRevoke:
-				revokes = append(revokes, targetID)
+				revokes = append(revokes, historyRevoke{targetID, evt.Info})
 				continue
 			case kindReaction, kindDrop:
 				skippedEmpty++
@@ -633,11 +678,11 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 		b.InsertMessages(pending)
 		for _, e := range edits {
 			if _, text, _ := extractContent(e.edited); text != "" {
-				b.UpdateMessageEdit(e.targetID, b.resolveMentions(e.edited, jid, text))
+				b.UpdateMessageEdit(e.targetID, jid, b.resolveMentions(e.edited, jid, text), &e.by)
 			}
 		}
-		for _, id := range revokes {
-			b.RevokeMessage(id)
+		for _, r := range revokes {
+			b.revoke(jid, r.info, r.targetID)
 		}
 
 		// Backfill group participant names: prefer the address-book contact
@@ -718,10 +763,17 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 	b.log.Infof("History sync complete: %d conversations, %d messages", totalConvs, totalMsgs)
 }
 
-// historyEdit is an edit found in a history payload.
+// historyEdit and historyRevoke are edits and revokes found in a history
+// payload, applied after its messages are stored.
 type historyEdit struct {
 	targetID string
 	edited   *waE2E.Message
+	by       author
+}
+
+type historyRevoke struct {
+	targetID string
+	info     types.MessageInfo
 }
 
 // historyEvent parses a history-sync message into the same event a live one
@@ -1067,6 +1119,9 @@ func (b *Bridge) handleGroupInfo(evt *events.GroupInfo) {
 		b.setGroupName(jid, evt.Name.Name)
 		b.UpdateConversationName(jid, evt.Name.Name)
 	}
+	if len(evt.Promote) > 0 || len(evt.Demote) > 0 {
+		b.forgetGroupAdmins(jid)
+	}
 	b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: jid})
 }
 
@@ -1074,30 +1129,76 @@ func (b *Bridge) handleGroupInfo(evt *events.GroupInfo) {
 // hour per group — GetGroupInfo is a network round-trip and groups rarely
 // rename. Rename events (handleGroupInfo) refresh the cache immediately.
 func (b *Bridge) groupName(jid types.JID) string {
+	return b.groupEntry(jid, false).name
+}
+
+// isGroupAdmin reports whether a person (any of their JID forms) is an admin
+// of the group, per the server's group info, cached like the name.
+func (b *Bridge) isGroupAdmin(group types.JID, who ...types.JID) bool {
+	admins := b.groupEntry(group, true).admins
+	for _, w := range who {
+		if w.IsEmpty() {
+			continue
+		}
+		if admins[w.User] || admins[b.resolveLIDJID(w.ToNonAD()).User] {
+			return true
+		}
+	}
+	return false
+}
+
+// groupEntry returns the cached group info, fetching it when it's over an
+// hour old or (needAdmins) its admin list isn't known. Failures aren't
+// cached — the next call retries.
+func (b *Bridge) groupEntry(jid types.JID, needAdmins bool) cachedGroupName {
 	key := jid.String()
 	b.groupNameMu.Lock()
 	cached, ok := b.groupNames[key]
 	b.groupNameMu.Unlock()
-	if ok && time.Since(cached.fetched) < time.Hour {
-		return cached.name
+	if ok && time.Since(cached.fetched) < time.Hour && (!needAdmins || cached.admins != nil) {
+		return cached
 	}
 
 	groupInfo, err := b.client.GetGroupInfo(context.Background(), jid)
 	if err != nil {
-		// Don't cache failures — retry on the next message.
 		b.log.Warnf("GetGroupInfo failed for %s: %v", key, err)
-		return ""
+		return cached
 	}
 	if groupInfo.Name == "" {
 		b.log.Warnf("GetGroupInfo returned empty name for %s", key)
 	}
-	b.setGroupName(key, groupInfo.Name)
-	return groupInfo.Name
+	entry := cachedGroupName{name: groupInfo.Name, admins: map[string]bool{}, fetched: time.Now()}
+	for _, p := range groupInfo.Participants {
+		if p.IsAdmin || p.IsSuperAdmin {
+			for _, j := range []types.JID{p.JID, p.PhoneNumber, p.LID} {
+				if !j.IsEmpty() {
+					entry.admins[j.User] = true
+				}
+			}
+		}
+	}
+	b.groupNameMu.Lock()
+	b.groupNames[key] = entry
+	b.groupNameMu.Unlock()
+	return entry
 }
 
+// setGroupName records a rename; the admin list is kept.
 func (b *Bridge) setGroupName(jid, name string) {
 	b.groupNameMu.Lock()
-	b.groupNames[jid] = cachedGroupName{name: name, fetched: time.Now()}
+	entry := b.groupNames[jid]
+	entry.name, entry.fetched = name, time.Now()
+	b.groupNames[jid] = entry
+	b.groupNameMu.Unlock()
+}
+
+// forgetGroupAdmins makes the next admin check refetch the group's info.
+func (b *Bridge) forgetGroupAdmins(jid string) {
+	b.groupNameMu.Lock()
+	if entry, ok := b.groupNames[jid]; ok {
+		entry.admins = nil
+		b.groupNames[jid] = entry
+	}
 	b.groupNameMu.Unlock()
 }
 
@@ -1329,17 +1430,24 @@ func getInlineThumbnail(msg *waE2E.Message) []byte {
 	return nil
 }
 
-// applyEdit replaces a stored message's text with its edited version. An edit
-// whose new text can't be extracted is ignored rather than blanking the row.
-func (b *Bridge) applyEdit(chatJID, targetID string, edited *waE2E.Message) {
+// applyEdit replaces a stored message's text with its edited version — only
+// if the editor sent it, in this chat (the server can't check; message IDs are
+// visible to every group member). An edit whose new text can't be extracted
+// is ignored rather than blanking the row.
+func (b *Bridge) applyEdit(chatJID, targetID string, edited *waE2E.Message, by author) {
 	_, newText, _ := extractContent(edited)
 	if newText == "" {
 		b.log.Warnf("Ignoring edit of %s in %s: no text in edited content", targetID, chatJID)
 		return
 	}
 	newText = b.resolveMentions(edited, chatJID, newText)
-	if err := b.UpdateMessageEdit(targetID, newText); err != nil {
+	applied, err := b.UpdateMessageEdit(targetID, chatJID, newText, &by)
+	if err != nil {
 		b.log.Errorf("Failed to apply edit of %s: %v", targetID, err)
+		return
+	}
+	if !applied {
+		b.log.Debugf("Ignoring edit of %s in %s: no such message from the editor", targetID, chatJID)
 		return
 	}
 	b.BroadcastEvent("message_updated", MessageUpdatedEvent{

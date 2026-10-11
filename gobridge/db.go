@@ -308,9 +308,10 @@ type RevokeResult struct {
 
 // RevokeMessage blanks a message deleted for everyone so it renders as
 // "[ deleted ]" (text type, no body, status "deleted"), drops its reactions,
-// and takes it out of the unread count if it was still unread. ok is false
-// when the target isn't stored (pruned, or outside the history window).
-func (b *Bridge) RevokeMessage(id string) (res RevokeResult, ok bool) {
+// and takes it out of the unread count if it was still unread. Only a message
+// in chatJID sent by `by` matches (nil: any sender). ok is false when no such
+// message is stored (pruned, outside the history window, or not theirs).
+func (b *Bridge) RevokeMessage(id, chatJID string, by *author) (res RevokeResult, ok bool) {
 	tx, err := b.msgDB.Begin()
 	if err != nil {
 		b.log.Errorf("Revoke %s: %v", id, err)
@@ -318,11 +319,17 @@ func (b *Bridge) RevokeMessage(id string) (res RevokeResult, ok bool) {
 	}
 	defer tx.Rollback()
 
+	query := `SELECT conversation_jid, is_from_me, status, media_url, thumbnail_path FROM messages WHERE id = ? AND conversation_jid = ?`
+	args := []interface{}{id, chatJID}
+	if by != nil {
+		clause, extra := by.sqlClause()
+		query += " AND " + clause
+		args = append(args, extra...)
+	}
 	var isFromMe int
 	var status string
 	var mediaURL, thumbPath sql.NullString
-	err = tx.QueryRow(`SELECT conversation_jid, is_from_me, status, media_url, thumbnail_path FROM messages WHERE id = ?`, id).
-		Scan(&res.ConversationJID, &isFromMe, &status, &mediaURL, &thumbPath)
+	err = tx.QueryRow(query, args...).Scan(&res.ConversationJID, &isFromMe, &status, &mediaURL, &thumbPath)
 	if err != nil {
 		return res, false
 	}
@@ -523,10 +530,18 @@ func (b *Bridge) UpdateMessageStatusAndTimestamp(id, status string, ts int64) er
 }
 
 // UpdateMessageEdit replaces a message's text (the caption, for media) after
-// an edit and bumps its edit version. Deleted messages stay deleted.
-func (b *Bridge) UpdateMessageEdit(id, newText string) error {
-	_, err := b.msgDB.Exec(`UPDATE messages SET text_body = ?, edit_version = edit_version + 1 WHERE id = ? AND status <> 'deleted'`, newText, id)
-	return err
+// an edit and bumps its edit version. Only a message in chatJID sent by `by`
+// matches; deleted messages stay deleted. Returns whether one was edited.
+func (b *Bridge) UpdateMessageEdit(id, chatJID, newText string, by *author) (bool, error) {
+	clause, extra := by.sqlClause()
+	args := append([]interface{}{newText, id, chatJID}, extra...)
+	res, err := b.msgDB.Exec(`UPDATE messages SET text_body = ?, edit_version = edit_version + 1
+		WHERE id = ? AND conversation_jid = ? AND status <> 'deleted' AND `+clause, args...)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // UpsertReaction inserts or updates a reaction. Empty emoji removes the reaction.
