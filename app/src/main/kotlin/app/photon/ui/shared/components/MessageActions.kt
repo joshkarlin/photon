@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -17,12 +16,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.text.style.TextAlign
 import app.photon.data.model.Message
 import app.photon.data.model.MessageStatus
-import app.photon.ui.theme.PhotonGrid
-import com.thelightphone.sdk.ui.LightBarButton
-import com.thelightphone.sdk.ui.LightBottomBar
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
 import com.thelightphone.sdk.ui.LightThemeTokens
@@ -113,7 +108,15 @@ internal fun MessageActions(
                 }
             }
             ActionPage.REACT -> ReactionPicker(onPick = { emoji -> finish { onReact(emoji) } }, onBack = onDismiss)
-            ActionPage.CONFIRM_DELETE -> ConfirmDeleteForEveryone(onConfirm = { finish { onDelete(true) } }, onBack = onDismiss)
+            // Delete for Everyone can't be undone, and the others see that a
+            // message was deleted, so this says so first.
+            ActionPage.CONFIRM_DELETE -> ConfirmPage(
+                title = MessageAction.DELETE_FOR_EVERYONE.label,
+                text = DELETE_FOR_EVERYONE_WARNING,
+                action = "DELETE",
+                onConfirm = { finish { onDelete(true) } },
+                onBack = onDismiss,
+            )
         }
     }
 }
@@ -148,38 +151,6 @@ private fun ReactionPicker(onPick: (String) -> Unit, onBack: () -> Unit) {
                 }
             }
         }
-    }
-}
-
-/**
- * Delete for Everyone can't be undone, and the others see that a message
- * was deleted, so this says so, with the delete itself in the bottom bar.
- */
-@Composable
-private fun ConfirmDeleteForEveryone(onConfirm: () -> Unit, onBack: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(LightThemeTokens.colors.background),
-    ) {
-        LightTopBar(
-            leftButton = backButton(onBack),
-            center = LightTopBarCenter.Text(MessageAction.DELETE_FOR_EVERYONE.label),
-        )
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = PhotonGrid.MARGIN.gridUnitsAsDp()),
-            contentAlignment = Alignment.Center,
-        ) {
-            LightText(
-                text = DELETE_FOR_EVERYONE_WARNING,
-                variant = LightTextVariant.Copy,
-                align = TextAlign.Center,
-            )
-        }
-        LightBottomBar(items = listOf(LightBarButton.Text(text = "DELETE", onClick = onConfirm)))
     }
 }
 
