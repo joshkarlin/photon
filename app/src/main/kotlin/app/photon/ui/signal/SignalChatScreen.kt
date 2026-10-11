@@ -57,7 +57,7 @@ fun SignalChatScreen(jid: String, onContact: (phone: String, name: String) -> Un
         onBack = onBack,
         onMediaTap = { msg -> viewingMedia = msg },
         onMessagesLoaded = { messages ->
-            scope.launch { repo.markRead(jid, messages.filter { !it.isFromMe }.map { it.id }) }
+            scope.launch { repo.markRead(jid) }
         },
         onReact = { messageId, _, emoji ->
             scope.launch { repo.sendReaction(jid, messageId, emoji) }
@@ -79,7 +79,7 @@ fun SignalChatScreen(jid: String, onContact: (phone: String, name: String) -> Un
             messageId = media.id,
             mediaMime = media.mediaMime,
             existingPath = media.mediaUrl,
-            onDownloadMedia = { id -> repo.downloadMedia(id) },
+            onDownloadMedia = { id -> Sessions.signal!!.backend.downloadMedia(id) },
             onDismiss = { viewingMedia = null },
         )
     }

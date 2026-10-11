@@ -126,7 +126,8 @@ class SignalMessageSender internal constructor(
         return messageId
     }
 
-    fun sendTextMessage(conversationJid: String, text: String, replyToId: String? = null) {
+    /** Send a text message; returns whether it went out (otherwise its row is "failed"). */
+    fun sendTextMessage(conversationJid: String, text: String, replyToId: String? = null): Boolean {
         val timestamp = System.currentTimeMillis()
         val replyPrefix = replyPrefixFor(replyToId)
         val recipient = recipientFor(conversationJid)
@@ -135,9 +136,9 @@ class SignalMessageSender internal constructor(
         )
         if (recipient == null) {
             Log.w(TAG, "Refusing send: $conversationJid is neither an ACI nor a known group")
-            return
+            return false
         }
-        deliverRow(messageId, recipient, timestamp) { OutgoingContent.Message(text, replyPrefix) }
+        return deliverRow(messageId, recipient, timestamp) { OutgoingContent.Message(text, replyPrefix) }
     }
 
     /**
@@ -145,6 +146,7 @@ class SignalMessageSender internal constructor(
      * media_url/media_mime so the bubble renders while the file is uploaded
      * to Signal's CDN; the pointer then rides a normal DataMessage. Audio
      * sends are flagged as voice notes — that's the only audio Photon records.
+     * Returns whether it went out (otherwise its row is "failed").
      */
     fun sendMediaMessage(
         conversationJid: String,
@@ -152,7 +154,7 @@ class SignalMessageSender internal constructor(
         mimeType: String,
         caption: String?,
         replyToId: String? = null,
-    ) {
+    ): Boolean {
         val timestamp = System.currentTimeMillis()
         val replyPrefix = replyPrefixFor(replyToId)
         val contentType = contentTypeForMime(mimeType)
@@ -165,9 +167,9 @@ class SignalMessageSender internal constructor(
         )
         if (recipient == null) {
             Log.w(TAG, "Refusing media send to $conversationJid (fileExists=${file.exists()})")
-            return
+            return false
         }
-        deliverRow(messageId, recipient, timestamp) {
+        return deliverRow(messageId, recipient, timestamp) {
             val pointer = transport.upload(file, mimeType, voiceNote = contentType == "audio")
             OutgoingContent.Message(caption, replyPrefix, listOf(pointer))
         }

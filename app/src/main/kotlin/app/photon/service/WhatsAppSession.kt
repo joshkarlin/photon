@@ -2,6 +2,8 @@ package app.photon.service
 
 import android.content.Context
 import android.util.Log
+import app.photon.chat.ChatBackend
+import app.photon.chat.WhatsAppBackend
 import app.photon.data.db.PhotonDatabase
 import app.photon.data.model.BridgeEvent
 import app.photon.data.model.Platform
@@ -42,6 +44,7 @@ class WhatsAppSession internal constructor(
     val bridge = BridgeClient(goBridge)
     val database = PhotonDatabase(context)
     val repository = ChatRepository(database, bridge, scope, LocalContacts.get(context))
+    val backend: ChatBackend = WhatsAppBackend(repository, bridge, scope)
 
     private var job: Job? = null
 

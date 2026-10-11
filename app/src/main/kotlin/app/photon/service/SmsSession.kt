@@ -1,6 +1,8 @@
 package app.photon.service
 
 import android.content.Context
+import app.photon.chat.ChatBackend
+import app.photon.chat.SmsBackend
 import app.photon.sms.SmsRepository
 import kotlinx.coroutines.CoroutineScope
 
@@ -10,6 +12,7 @@ import kotlinx.coroutines.CoroutineScope
  */
 class SmsSession(context: Context, scope: CoroutineScope) {
     val repository = SmsRepository(context, scope)
+    val backend: ChatBackend = SmsBackend(repository)
 
     fun start() = repository.startSendResults()
 

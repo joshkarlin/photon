@@ -32,8 +32,6 @@ import kotlinx.coroutines.withContext
  * ([SignalNames]), so they follow both the stored sources and the LP3
  * address book.
  *
- * @param downloadAttachment fetches an incoming attachment by message id
- *   (the receiver's), returning its local path
  * @param selfAci the account's own ACI, whose DM is "Note to Self"
  */
 class SignalRepository(
@@ -41,7 +39,6 @@ class SignalRepository(
     val sender: SignalMessageSender?,
     scope: CoroutineScope,
     localContacts: LocalContacts,
-    private val downloadAttachment: (messageId: String) -> String? = { null },
     selfAci: () -> String?,
 ) {
     companion object {
@@ -88,57 +85,53 @@ class SignalRepository(
 
     fun getMessage(id: String): Message? = db.getMessage(id)
 
-    suspend fun sendMessage(jid: String, text: String, replyToId: String? = null) {
-        withContext(Dispatchers.IO) {
-            sender?.sendTextMessage(jid, text, replyToId)
-        }
-    }
+    // Each send returns whether it went out. A message that didn't is left
+    // "failed" in its thread for the user to retry.
 
-    suspend fun retryMessage(messageId: String) {
+    suspend fun sendMessage(jid: String, text: String, replyToId: String? = null): Boolean =
         withContext(Dispatchers.IO) {
-            sender?.retryMessage(messageId)
+            sender?.sendTextMessage(jid, text, replyToId) ?: false
         }
-    }
 
-    suspend fun deleteMessage(jid: String, messageId: String, forEveryone: Boolean) {
+    suspend fun retryMessage(messageId: String): Boolean =
         withContext(Dispatchers.IO) {
-            sender?.deleteMessage(jid, messageId, forEveryone)
+            sender?.retryMessage(messageId) ?: false
         }
-    }
 
-    suspend fun sendReaction(jid: String, messageId: String, emoji: String) {
+    suspend fun deleteMessage(jid: String, messageId: String, forEveryone: Boolean): Boolean =
         withContext(Dispatchers.IO) {
-            sender?.sendReaction(jid, messageId, emoji)
+            sender?.deleteMessage(jid, messageId, forEveryone) ?: false
         }
-    }
 
-    suspend fun markRead(jid: String, messageIds: List<String>) {
+    suspend fun sendReaction(jid: String, messageId: String, emoji: String): Boolean =
+        withContext(Dispatchers.IO) {
+            sender?.sendReaction(jid, messageId, emoji) ?: false
+        }
+
+    /**
+     * Clear the chat's unread count and sync the read to the user's other
+     * devices. Returns false when that sync was due but didn't go out.
+     */
+    suspend fun markRead(jid: String): Boolean =
         withContext(Dispatchers.IO) {
             db.markConversationSeen(jid)
-            val sender = sender ?: return@withContext
             // Sync read state to our other devices so the primary's unread
             // badge clears. Rows only flip from 'seen' to 'read' when they
             // were in a payload that was actually sent, so failures — and
             // rows that can't be expressed in a read sync — retry on the
-            // next chat open instead of being marked read silently.
+            // next mark-read instead of being marked read silently.
             val plan = planReadSync(db.getUnsyncedIncomingReads(jid))
             if (unsyncableReads.firstReport(jid, plan)) {
                 Log.w(TAG, "Cannot sync read state for ${plan.skippedIds.size} message(s) without an ACI key")
             }
-            if (plan.entries.isEmpty()) return@withContext
-            if (sender.sendReadSync(plan.entries)) {
-                db.markMessagesRead(plan.rowIds)
-            }
+            if (plan.entries.isEmpty()) return@withContext true
+            val synced = sender?.sendReadSync(plan.entries) == true
+            if (synced) db.markMessagesRead(plan.rowIds)
+            synced
         }
-    }
 
-    suspend fun sendMedia(jid: String, filePath: String, mimeType: String, caption: String?, replyToId: String?) {
+    suspend fun sendMedia(jid: String, filePath: String, mimeType: String, caption: String?, replyToId: String?): Boolean =
         withContext(Dispatchers.IO) {
-            sender?.sendMediaMessage(jid, filePath, mimeType, caption, replyToId)
+            sender?.sendMediaMessage(jid, filePath, mimeType, caption, replyToId) ?: false
         }
-    }
-
-    suspend fun downloadMedia(messageId: String): String? = withContext(Dispatchers.IO) {
-        downloadAttachment(messageId)
-    }
 }

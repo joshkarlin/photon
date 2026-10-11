@@ -2,6 +2,8 @@ package app.photon.service
 
 import android.content.Context
 import android.util.Log
+import app.photon.chat.ChatBackend
+import app.photon.chat.SignalBackend
 import app.photon.data.PhotonPreferences
 import app.photon.data.names.LocalContacts
 import app.photon.signal.AndroidRecordFix
@@ -49,10 +51,8 @@ class SignalSession(private val context: Context, private val scope: CoroutineSc
         groupManager = { receiver.groupManager },
     )
     val receiver = SignalMessageReceiver(context, credentials, protocolStore, messageDb, sender)
-    val repository = SignalRepository(
-        messageDb, sender, scope, LocalContacts.get(context),
-        downloadAttachment = receiver::downloadAttachment,
-    ) { credentials.aciString }
+    val repository = SignalRepository(messageDb, sender, scope, LocalContacts.get(context)) { credentials.aciString }
+    val backend: ChatBackend = SignalBackend(repository, receiver.state, sender.identityStore, receiver::downloadAttachment)
 
     /** The receiver's GroupV2 manager, while it's connected. */
     val groupManager: SignalGroupV2Manager? get() = receiver.groupManager
