@@ -60,14 +60,39 @@ func registerFKDriver() {
 	sql.Register("sqlite_fk", &fkDriver{inner: &sqliteDriver.Driver{}})
 }
 
-func main() {
-	dataDir := flag.String("data-dir", ".", "Path to data directory")
-	wsPort := flag.Int("ws-port", 8765, "WebSocket server port")
-	logLevel := flag.String("log-level", "DEBUG", "Log level (DEBUG, INFO, WARN, ERROR)")
-	flag.Parse()
+// bridgeConfig is the bridge's command line.
+type bridgeConfig struct {
+	dataDir   string
+	wsPort    int
+	logLevel  string
+	retention RetentionConfig
+}
 
-	logger := waLog.Stdout("Bridge", *logLevel, true)
-	logger.Infof("Starting Photon bridge, data-dir=%s, ws-port=%d", *dataDir, *wsPort)
+// parseConfig reads the command line. Retention flags carry the user's
+// settings across bridge restarts; zero or absent keeps the defaults (50
+// messages per chat, 7 days, 5-minute media), and Kotlin still sends
+// set_retention for live changes.
+func parseConfig(args []string) (bridgeConfig, error) {
+	var cfg bridgeConfig
+	fs := flag.NewFlagSet("gobridge", flag.ContinueOnError)
+	fs.StringVar(&cfg.dataDir, "data-dir", ".", "Path to data directory")
+	fs.IntVar(&cfg.wsPort, "ws-port", 8765, "WebSocket server port")
+	fs.StringVar(&cfg.logLevel, "log-level", "DEBUG", "Log level (DEBUG, INFO, WARN, ERROR)")
+	fs.IntVar(&cfg.retention.MaxMessages, "max-messages", 0, "Messages kept per chat (0 = default)")
+	fs.IntVar(&cfg.retention.MaxDays, "max-days", 0, "Days of history kept (0 = default)")
+	fs.IntVar(&cfg.retention.MediaTTLMins, "media-ttl-mins", 0, "Minutes downloaded media is kept (0 = default)")
+	err := fs.Parse(args)
+	return cfg, err
+}
+
+func main() {
+	cfg, err := parseConfig(os.Args[1:])
+	if err != nil {
+		os.Exit(2)
+	}
+
+	logger := waLog.Stdout("Bridge", cfg.logLevel, true)
+	logger.Infof("Starting Photon bridge, data-dir=%s, ws-port=%d", cfg.dataDir, cfg.wsPort)
 
 	// Android doesn't have /etc/resolv.conf, so Go's pure-Go DNS resolver
 	// can't find DNS servers. Override the default resolver to use Google DNS.
@@ -80,8 +105,8 @@ func main() {
 	}
 
 	// Ensure directories exist
-	os.MkdirAll(filepath.Join(*dataDir, "media"), 0755)
-	os.MkdirAll(filepath.Join(*dataDir, "thumbs"), 0755)
+	os.MkdirAll(filepath.Join(cfg.dataDir, "media"), 0755)
+	os.MkdirAll(filepath.Join(cfg.dataDir, "thumbs"), 0755)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -89,9 +114,9 @@ func main() {
 	// Initialize whatsmeow session store (pure Go SQLite)
 	// whatsmeow requires foreign keys enabled. Register a custom driver
 	// that runs PRAGMA foreign_keys=ON on each connection.
-	sessionPath := filepath.Join(*dataDir, "whatsmeow.db")
+	sessionPath := filepath.Join(cfg.dataDir, "whatsmeow.db")
 	registerFKDriver()
-	container, err := sqlstore.New(ctx, "sqlite_fk", sessionPath, waLog.Stdout("Session", *logLevel, true))
+	container, err := sqlstore.New(ctx, "sqlite_fk", sessionPath, waLog.Stdout("Session", cfg.logLevel, true))
 	if err != nil {
 		logger.Errorf("Failed to init session store: %v", err)
 		os.Exit(1)
@@ -99,7 +124,7 @@ func main() {
 
 	// Initialize message database (use plain path, not file: URI). The
 	// sqlite_fk driver applies the WAL/foreign keys/busy timeout pragmas.
-	msgDSN := filepath.Join(*dataDir, "messages.db")
+	msgDSN := filepath.Join(cfg.dataDir, "messages.db")
 	msgDB, err := sql.Open("sqlite_fk", msgDSN)
 	if err != nil {
 		logger.Errorf("Failed to open message DB: %v", err)
@@ -119,14 +144,16 @@ func main() {
 	store.DeviceProps.Os = &photonName
 
 	// Create whatsmeow client
-	client := whatsmeow.NewClient(device, waLog.Stdout("Client", *logLevel, true))
+	client := whatsmeow.NewClient(device, waLog.Stdout("Client", cfg.logLevel, true))
 	// A stored session can need a few attempts after a long offline period or
 	// a transient primary-device/network outage. Let whatsmeow retry an initial
 	// connection in the background instead of returning a terminal failure.
 	client.InitialAutoReconnect = true
 
 	// Create bridge
-	bridge := NewBridge(client, msgDB, *dataDir, logger)
+	bridge := NewBridge(client, msgDB, cfg.dataDir, logger)
+	bridge.SetRetention(cfg.retention.MaxMessages, cfg.retention.MaxDays, cfg.retention.MediaTTLMins)
+	logger.Infof("Retention: %+v", bridge.retention)
 
 	// Initialize message DB schema
 	if err := bridge.InitMessageDB(ctx); err != nil {
@@ -148,7 +175,7 @@ func main() {
 	mux := http.NewServeMux()
 	bridge.RegisterWSHandler(mux)
 
-	addr := fmt.Sprintf("127.0.0.1:%d", *wsPort)
+	addr := fmt.Sprintf("127.0.0.1:%d", cfg.wsPort)
 	server := &http.Server{Addr: addr, Handler: mux}
 
 	go func() {

@@ -3,6 +3,8 @@ package app.photon.service
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.util.Log
+import app.photon.data.PhotonPreferences
+import kotlinx.coroutines.flow.first
 import java.io.File
 import kotlin.concurrent.thread
 
@@ -10,7 +12,7 @@ class GoBridge(private val context: Context) {
     private var process: Process? = null
     val port = 8765
 
-    fun start() {
+    suspend fun start() {
         if (process?.isAlive == true) return
 
         // The Go binary is packaged as libgobridge.so in the native libs directory.
@@ -29,10 +31,9 @@ class GoBridge(private val context: Context) {
         File(dataDir, "media").mkdirs()
         File(dataDir, "thumbs").mkdirs()
 
+        val prefs = PhotonPreferences(context)
         val pb = ProcessBuilder(
-            binary.absolutePath,
-            "--data-dir", dataDir,
-            "--ws-port", port.toString(),
+            bridgeArgs(binary.absolutePath, dataDir, port, prefs.maxMessages.first(), prefs.maxDays.first()),
         )
             .directory(context.filesDir)
             .redirectErrorStream(true)
@@ -64,4 +65,24 @@ class GoBridge(private val context: Context) {
     }
 
     fun isRunning(): Boolean = process?.isAlive == true
+
+    companion object {
+        /** Downloaded media is deleted this long after it was fetched. */
+        const val MEDIA_TTL_MINS = 5
+    }
 }
+
+/**
+ * The bridge's command line. Retention rides along so a restart keeps the
+ * user's settings (the bridge otherwise falls back to 50 messages / 7 days
+ * until the next set_retention).
+ */
+internal fun bridgeArgs(binary: String, dataDir: String, port: Int, maxMessages: Int, maxDays: Int): List<String> =
+    listOf(
+        binary,
+        "--data-dir", dataDir,
+        "--ws-port", port.toString(),
+        "--max-messages", maxMessages.toString(),
+        "--max-days", maxDays.toString(),
+        "--media-ttl-mins", GoBridge.MEDIA_TTL_MINS.toString(),
+    )
