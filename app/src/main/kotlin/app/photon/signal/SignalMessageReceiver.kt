@@ -65,8 +65,7 @@ class SignalMessageReceiver(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val config = SignalConfig.createConfiguration()
-    private val lp3: (String) -> String? = LocalContacts.get(context)::nameFor
-    private val names = SignalNames(messageDb, lp3) { credentials.aciString }
+    private val names = SignalNames(messageDb, LocalContacts.get(context)::nameFor) { credentials.aciString }
     private val notifier: SignalNotifier = AndroidSignalNotifier(context)
     // Read syncs that arrived before their message (see EarlyReadCache).
     private val earlyReads = EarlyReadCache()
@@ -83,7 +82,7 @@ class SignalMessageReceiver(
     private val groupMetadata = GroupMetadata(messageDb, scope, { groupManager }, sessionPings)
     private val attachments = Attachments(context, messageDb) { pushSocket }
     private val contactsSync = ContactsSync(
-        context, messageDb, lp3,
+        context, messageDb,
         pushSocket = { pushSocket },
         onSynced = { contactNames.mergeResolvableServiceIds() },
     )

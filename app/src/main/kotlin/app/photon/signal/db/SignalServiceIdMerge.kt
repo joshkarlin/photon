@@ -37,10 +37,10 @@ fun SignalMessageDatabase.getResolvableNonAciIds(): List<Pair<String, String>> {
  *    the [from] copy is dropped and stops counting as unread.
  *  - The two conversations become one: unread counts add up, the newer last
  *    message wins, and a blank name takes the other's.
- *  - Participant rows move to [to]. The contact row's phone, profile key
- *    and profile name fill gaps in [to]'s; the [from] row stays as an
- *    alias, so a later envelope from [from] that carries no phone number
- *    still maps to [to] through the phone stored there.
+ *  - Participant rows move to [to]. The contact row's phone, address-book
+ *    name, profile key and profile name fill gaps in [to]'s; the [from] row
+ *    stays as an alias, so a later envelope from [from] that carries no
+ *    phone number still maps to [to] through the phone stored there.
  *
  * Incoming rows keep their read state, so rows seen in Photon but never
  * read-synced (impossible without an ACI) are synced on the next chat open.
@@ -203,10 +203,11 @@ private fun mergeContactRows(db: SQLiteDatabase, from: String, to: String) {
         """
         UPDATE contacts SET
             phone_number = COALESCE(phone_number, (SELECT phone_number FROM contacts WHERE jid = ?)),
+            name = COALESCE(NULLIF(name, ''), (SELECT name FROM contacts WHERE jid = ?)),
             profile_key = COALESCE(profile_key, (SELECT profile_key FROM contacts WHERE jid = ?)),
             profile_name = COALESCE(NULLIF(profile_name, ''), (SELECT profile_name FROM contacts WHERE jid = ?))
         WHERE jid = ?
         """.trimIndent(),
-        arrayOf(from, from, from, to),
+        arrayOf(from, from, from, from, to),
     )
 }

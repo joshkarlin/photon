@@ -90,6 +90,25 @@ fun SignalMessageDatabase.updateContactPhone(jid: String, phone: String) {
     notifyChanged()
 }
 
+/**
+ * A contact as the primary's contact sync describes it. The sync carries the
+ * whole current entry, so its address-book [name] replaces the stored one
+ * (null: no longer named there). A missing [phone] keeps the stored one,
+ * which an envelope may have supplied.
+ */
+fun SignalMessageDatabase.updateContactFromSync(jid: String, phone: String?, name: String?) {
+    writableDatabase.execSQL(
+        """
+        INSERT INTO contacts (jid, name, phone_number, updated_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(jid) DO UPDATE SET
+            name = excluded.name,
+            phone_number = COALESCE(excluded.phone_number, contacts.phone_number)
+        """,
+        arrayOf<Any?>(jid, name?.trim()?.takeIf { it.isNotEmpty() }, phone, System.currentTimeMillis()),
+    )
+    notifyChanged()
+}
+
 fun SignalMessageDatabase.updateContactProfileKey(jid: String, profileKey: ByteArray) {
     writableDatabase.execSQL(
         """
