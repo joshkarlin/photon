@@ -1,5 +1,6 @@
 package app.photon.signal
 
+import android.util.Log
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
 import app.photon.data.repository.conversationsFlow
@@ -16,6 +17,10 @@ class SignalRepository(
     var sender: SignalMessageSender? = null,
     scope: CoroutineScope,
 ) {
+    companion object {
+        private const val TAG = "SignalRepository"
+    }
+
     val conversations: StateFlow<List<Conversation>?> =
         conversationsFlow(scope, "SignalRepository", db.changes) { db.getConversations() }
 
@@ -73,9 +78,18 @@ class SignalRepository(
             // send, so failures retry on the next chat open.
             val pending = db.getUnsyncedIncomingReads(jid)
             if (pending.isEmpty()) return@withContext
-            val reads = pending.mapNotNull { MessageKeys.parse(it) }
-            if (sender.sendReadSync(reads)) {
-                db.markMessagesRead(pending)
+            val parsed = pending.mapNotNull { id ->
+                MessageKeys.parse(id)?.let { id to it }
+            }
+            if (parsed.isEmpty()) {
+                // Never treat an empty wire payload as success: sendReadSync
+                // intentionally ignores malformed ids, and marking all rows
+                // read here would permanently lose the retry opportunity.
+                Log.w(TAG, "Cannot sync read state for ${pending.size} malformed message id(s)")
+                return@withContext
+            }
+            if (sender.sendReadSync(parsed.map { it.second })) {
+                db.markMessagesRead(parsed.map { it.first })
             }
         }
     }

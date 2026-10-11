@@ -64,6 +64,10 @@ class SignalMessageReceiver(
         // Conversation name used until the GroupV2 state fetch resolves the
         // real title. Also doubles as the "needs fetch" sentinel.
         private const val PLACEHOLDER_GROUP_NAME = "Signal group"
+        // SignalWebSocket exposes inbound frames through a blocking long-poll
+        // API. Its Object.wait() releases the socket monitor, so outbound
+        // MessageApi/KeysApi requests can proceed while this waits.
+        private const val MESSAGE_POLL_TIMEOUT_MS = 30_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -476,7 +480,7 @@ class SignalMessageReceiver(
         Log.d(TAG, "Starting message read loop")
         while (running) {
             try {
-                val hasMore = ws.readMessageBatch(30_000, 10) { envelopes ->
+                val hasMore = ws.readMessageBatch(MESSAGE_POLL_TIMEOUT_MS, 10) { envelopes ->
                     Log.i(TAG, "Received batch of ${envelopes.size} envelopes")
                     for (envelope in envelopes) {
                         val env = envelope.envelope
