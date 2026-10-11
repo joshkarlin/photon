@@ -124,7 +124,7 @@ fun PairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
                 QrPanel(
                     bitmap = qrBitmap,
                     error = error,
-                    waitingText = "Waiting for QR code…",
+                    waitingText = "waiting for QR code…",
                     modifier = Modifier.weight(1f).padding(horizontal = PhotonGrid.MARGIN.gridUnitsAsDp()),
                 )
                 LightBottomBar(

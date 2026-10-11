@@ -140,7 +140,7 @@ fun ContactScreen(
             // Name field — editable. Pre-filled with existing name if the number
             // is already saved, otherwise with whatever display name we knew.
             Column {
-                LightText("NAME", variant = LightTextVariant.Detail, lighten = true)
+                LightText("Name", variant = LightTextVariant.Detail)
                 LightInputField(
                     value = nameInput,
                     onValueChange = { nameInput = it; status = null },

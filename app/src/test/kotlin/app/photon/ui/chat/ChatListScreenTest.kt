@@ -83,7 +83,7 @@ class ChatListScreenTest {
         rule.onNodeWithContentDescription("Settings").assertExists()
         signal.conversations.value = emptyList()
         rule.waitForIdle()
-        rule.onNodeWithText("No messages yet").assertExists()
+        rule.onNodeWithText("no messages yet").assertExists()
         rule.onNodeWithContentDescription("Settings").assertExists()
     }
 
@@ -118,14 +118,14 @@ class ChatListScreenTest {
         whatsapp.conversations.value = emptyList()
         show(Platform.WHATSAPP)
         // No session running: WhatsApp's sync status shows its connection.
-        rule.onNodeWithText("Connecting").assertExists()
+        rule.onNodeWithText("connecting").assertExists()
     }
 
     @Test
     fun anEmptySignalListSaysNoMessagesYet() {
         signal.conversations.value = emptyList()
         show(Platform.SIGNAL)
-        rule.onNodeWithText("No messages yet").assertExists()
+        rule.onNodeWithText("no messages yet").assertExists()
     }
 
     @Test

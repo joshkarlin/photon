@@ -240,7 +240,7 @@ private fun ChatListPreview() = PhotonPreview { ChatListSample() }
 @Preview(name = "Chat list – empty", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
 @Composable
 private fun EmptyChatListPreview() = PhotonPreview {
-    ChatListLayout(filter = "Signal", conversations = emptyList(), platformOf = { Platform.SIGNAL }, onChat = {}, emptyMessage = "No messages yet", onFilter = {}, onSettings = {})
+    ChatListLayout(filter = "Signal", conversations = emptyList(), platformOf = { Platform.SIGNAL }, onChat = {}, emptyMessage = "no messages yet", onFilter = {}, onSettings = {})
 }
 
 @Preview(name = "DM", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)

@@ -53,7 +53,7 @@ internal fun ChatListScreen(
         conversations = conversations,
         platformOf = { platformOf(it.jid) },
         onChat = { jid -> onChat(platformOf(jid), jid) },
-        emptyMessage = if (filter == Platform.SIGNAL) "No messages yet" else "No messages",
+        emptyMessage = if (filter == Platform.SIGNAL) "no messages yet" else "no messages",
         emptyContent = if (filter == Platform.WHATSAPP) {
             { WhatsAppSyncStatus() }
         } else null,

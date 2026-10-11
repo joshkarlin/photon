@@ -31,7 +31,7 @@ fun SignalPairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
     val manager = session.accountManager
     var qrBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    var status by remember { mutableStateOf("Connecting...") }
+    var status by remember { mutableStateOf("connecting…") }
     var paired by remember { mutableStateOf(false) }
 
     // Navigate on main thread when pairing completes

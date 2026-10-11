@@ -51,7 +51,7 @@ fun ChatListContent(
     conversations: List<Conversation>?,
     platformOf: (Conversation) -> Platform,
     onChat: (String) -> Unit,
-    emptyMessage: String = "No messages",
+    emptyMessage: String = "no messages",
     emptyContent: @Composable (() -> Unit)? = null,
     icon: @Composable ((Conversation) -> Painter)? = null,
     onFilter: (() -> Unit)? = null,
@@ -129,7 +129,7 @@ internal fun ChatListLayout(
     platformOf: (Conversation) -> Platform,
     onChat: (String) -> Unit,
     listState: LazyListState = rememberLazyListState(),
-    emptyMessage: String = "No messages",
+    emptyMessage: String = "no messages",
     emptyContent: @Composable (() -> Unit)? = null,
     icon: @Composable ((Conversation) -> Painter)? = null,
     onFilter: (() -> Unit)? = null,
@@ -148,7 +148,8 @@ internal fun ChatListLayout(
                 // Loading — show nothing
                 conversations == null -> {}
 
-                // Empty — show custom content or default message
+                // Empty — custom content or a short message, lower case as
+                // LightOS writes them ("no events")
                 conversations.isEmpty() -> {
                     Box(
                         modifier = Modifier

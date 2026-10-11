@@ -177,13 +177,20 @@ private fun ChatPage(onBack: () -> Unit) {
     val context = LocalContext.current
     val prefs = remember { PhotonPreferences(context) }
 
-    val showThumbnails by prefs.showThumbnails.collectAsState(initial = true)
-    val notificationLevel by prefs.notificationLevel.collectAsState(initial = NotificationLevel.DEFAULT)
-    val scrollDial by prefs.scrollDial.collectAsState(initial = ScrollDial.DEFAULT)
-    val composeStyle by prefs.composeStyle.collectAsState(initial = ComposeStyle.DEFAULT)
-    val keyboardStyle by prefs.keyboardStyle.collectAsState(initial = KeyboardStyle.DEFAULT)
+    // Null until read, so no default flashes before the stored value.
+    val showThumbnails = prefs.showThumbnails.collectAsState(initial = null).value
+    val notificationLevel = prefs.notificationLevel.collectAsState(initial = null).value
+    val scrollDial = prefs.scrollDial.collectAsState(initial = null).value
+    val composeStyle = prefs.composeStyle.collectAsState(initial = null).value
+    val keyboardStyle = prefs.keyboardStyle.collectAsState(initial = null).value
 
     BackHandler { onBack() }
+    if (showThumbnails == null || notificationLevel == null || scrollDial == null ||
+        composeStyle == null || keyboardStyle == null
+    ) {
+        MenuScreen("Chat", onBack) {}
+        return
+    }
     ChatSettingsContent(
         notificationLevel = notificationLevel,
         showThumbnails = showThumbnails,
@@ -231,16 +238,19 @@ private fun StoragePage(onBack: () -> Unit) {
     val prefs = remember { PhotonPreferences(context) }
     val bridge = Sessions.whatsapp?.bridge
 
-    val maxMessages by prefs.maxMessages.collectAsState(initial = 50)
-    val maxDays by prefs.maxDays.collectAsState(initial = 7)
+    // Null until read, so no default flashes before the stored value.
+    val maxMessages = prefs.maxMessages.collectAsState(initial = null).value
+    val maxDays = prefs.maxDays.collectAsState(initial = null).value
 
     BackHandler { onBack() }
     MenuScreen("Storage", onBack) {
-        ValueCycleRow("Messages per Chat", maxMessages.toString(), listOf(25, 50, 100, 200), maxMessages) { v ->
-            scope.launch { prefs.setMaxMessages(v); syncRetention(bridge, v, maxDays) }
+        val messages = maxMessages ?: return@MenuScreen
+        val days = maxDays ?: return@MenuScreen
+        ValueCycleRow("Messages per Chat", messages.toString(), listOf(25, 50, 100, 200), messages) { v ->
+            scope.launch { prefs.setMaxMessages(v); syncRetention(bridge, v, days) }
         }
-        ValueCycleRow("Message History", if (maxDays == 1) "1 day" else "$maxDays days", listOf(1, 3, 7, 14, 30), maxDays) { v ->
-            scope.launch { prefs.setMaxDays(v); syncRetention(bridge, maxMessages, v) }
+        ValueCycleRow("Message History", if (days == 1) "1 day" else "$days days", listOf(1, 3, 7, 14, 30), days) { v ->
+            scope.launch { prefs.setMaxDays(v); syncRetention(bridge, messages, v) }
         }
     }
 }
