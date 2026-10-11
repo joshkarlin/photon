@@ -17,13 +17,11 @@ import app.photon.ui.settings.SettingsScreen
 import app.photon.ui.all.AllChatsScreen
 import app.photon.data.model.Platform
 import app.photon.ui.signal.SignalChatListScreen
-import app.photon.ui.signal.SignalChatScreen
 import app.photon.ui.sms.SmsChatListScreen
-import app.photon.ui.sms.SmsChatScreen
 import app.photon.ui.signal.SignalPairingScreen
 import app.photon.ui.signal.SignalScreen
 import app.photon.ui.whatsapp.ChatListScreen
-import app.photon.ui.whatsapp.ChatScreen
+import app.photon.ui.chat.ChatScreen
 import app.photon.ui.whatsapp.PairingScreen
 
 @Composable
@@ -44,15 +42,11 @@ fun PhotonNavGraph(
         }
     }
 
+    fun openChat(platform: Platform, jid: String) = navController.navigate(Routes.chat(platform, jid))
+
     LaunchedEffect(deepLink) {
         val link = deepLink ?: return@LaunchedEffect
-        val jid = Uri.encode(link.conversationJid)
-        val route = when (link.platform) {
-            Platform.WHATSAPP -> Routes.chat(jid)
-            Platform.SIGNAL -> Routes.signalChat(jid)
-            Platform.SMS -> Routes.smsChat(jid)
-        }
-        navController.navigate(route) {
+        navController.navigate(link.route) {
             popUpTo(rootRoute) { inclusive = false }
             launchSingleTop = true
         }
@@ -93,24 +87,9 @@ fun PhotonNavGraph(
         }
         composable(Routes.WHATSAPP_CHATS) {
             ChatListScreen(
-                onChat = { jid ->
-                    navController.navigate(Routes.chat(Uri.encode(jid)))
-                },
+                onChat = { jid -> openChat(Platform.WHATSAPP, jid) },
                 onSwitch = { navController.navigate(Routes.PLATFORMS) },
                 onSettings = { navController.navigate(Routes.SETTINGS) },
-            )
-        }
-        composable(
-            route = Routes.WHATSAPP_CHAT,
-            arguments = listOf(navArgument("jid") { type = NavType.StringType }),
-        ) { backStackEntry ->
-            val jid = Uri.decode(backStackEntry.arguments?.getString("jid") ?: "")
-            ChatScreen(
-                jid = jid,
-                onContact = { phone, name ->
-                    navController.navigate(Routes.contact(Uri.encode(phone), Uri.encode(name)))
-                },
-                onBack = { navController.popBackStack() },
             )
         }
         composable(Routes.SIGNAL) {
@@ -140,19 +119,22 @@ fun PhotonNavGraph(
         }
         composable(Routes.SIGNAL_CHATS) {
             SignalChatListScreen(
-                onChat = { jid ->
-                    navController.navigate(Routes.signalChat(Uri.encode(jid)))
-                },
+                onChat = { jid -> openChat(Platform.SIGNAL, jid) },
                 onSwitch = { navController.navigate(Routes.PLATFORMS) },
                 onSettings = { navController.navigate(Routes.SETTINGS) },
             )
         }
         composable(
-            route = Routes.SIGNAL_CHAT,
-            arguments = listOf(navArgument("jid") { type = NavType.StringType }),
+            route = Routes.CHAT,
+            arguments = listOf(
+                navArgument("platform") { type = NavType.StringType },
+                navArgument("jid") { type = NavType.StringType },
+            ),
         ) { backStackEntry ->
+            val platform = Routes.platformOf(backStackEntry.arguments?.getString("platform")) ?: return@composable
             val jid = Uri.decode(backStackEntry.arguments?.getString("jid") ?: "")
-            SignalChatScreen(
+            ChatScreen(
+                platform = platform,
                 jid = jid,
                 onContact = { phone, name ->
                     navController.navigate(Routes.contact(Uri.encode(phone), Uri.encode(name)))
@@ -162,37 +144,16 @@ fun PhotonNavGraph(
         }
         composable(Routes.ALL_CHATS) {
             AllChatsScreen(
-                onChat = { platform, jid ->
-                    when (platform) {
-                        Platform.WHATSAPP -> navController.navigate(Routes.chat(Uri.encode(jid)))
-                        Platform.SIGNAL -> navController.navigate(Routes.signalChat(Uri.encode(jid)))
-                        Platform.SMS -> navController.navigate(Routes.smsChat(Uri.encode(jid)))
-                    }
-                },
+                onChat = ::openChat,
                 onSwitch = { navController.navigate(Routes.PLATFORMS) },
                 onSettings = { navController.navigate(Routes.SETTINGS) },
             )
         }
         composable(Routes.SMS_CHATS) {
             SmsChatListScreen(
-                onChat = { address ->
-                    navController.navigate(Routes.smsChat(Uri.encode(address)))
-                },
+                onChat = { address -> openChat(Platform.SMS, address) },
                 onSwitch = { navController.navigate(Routes.PLATFORMS) },
                 onSettings = { navController.navigate(Routes.SETTINGS) },
-            )
-        }
-        composable(
-            route = Routes.SMS_CHAT,
-            arguments = listOf(navArgument("address") { type = NavType.StringType }),
-        ) { backStackEntry ->
-            val address = Uri.decode(backStackEntry.arguments?.getString("address") ?: "")
-            SmsChatScreen(
-                address = address,
-                onContact = { phone, name ->
-                    navController.navigate(Routes.contact(Uri.encode(phone), Uri.encode(name)))
-                },
-                onBack = { navController.popBackStack() },
             )
         }
         composable(

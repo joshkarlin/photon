@@ -38,6 +38,7 @@ fun MessageActions(
     message: Message,
     canReact: Boolean,
     canDelete: Boolean,
+    canDeleteForEveryone: Boolean,
     onPick: (String) -> Unit,
     onDelete: (forEveryone: Boolean) -> Unit,
     onDismiss: () -> Unit,
@@ -46,7 +47,7 @@ fun MessageActions(
     // has acknowledged — there's a sent message out there to revoke. Anything
     // else (incoming, our own failed/sending rows, call entries) is a
     // local-only removal.
-    val forEveryone = message.isFromMe && !isCall(message) &&
+    val forEveryone = canDeleteForEveryone && message.isFromMe && !isCall(message) &&
         message.status in setOf(MessageStatus.SENT, MessageStatus.DELIVERED, MessageStatus.READ)
     var confirming by remember { mutableStateOf(false) }
 

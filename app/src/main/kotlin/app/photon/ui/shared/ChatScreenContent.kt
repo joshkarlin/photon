@@ -76,6 +76,8 @@ import kotlinx.coroutines.launch
  * @param conversationKey identifies the chat (its JID or address), so
  *   per-chat state such as the compose draft can't carry over to another
  *   chat shown in the same place
+ * @param canDeleteForEveryone whether the user's own sent messages can be
+ *   deleted for everyone, not just here
  */
 @Composable
 fun ChatScreenContent(
@@ -93,6 +95,7 @@ fun ChatScreenContent(
     onReact: ((messageId: String, senderJid: String, emoji: String) -> Unit)? = null,
     onRetry: ((messageId: String) -> Unit)? = null,
     onDelete: ((message: Message, forEveryone: Boolean) -> Unit)? = null,
+    canDeleteForEveryone: Boolean = true,
     onTitleClick: (() -> Unit)? = null,
     supportsReply: Boolean = true,
     headerContent: (@Composable () -> Unit)? = null,
@@ -119,6 +122,7 @@ fun ChatScreenContent(
         onReact = onReact,
         onRetry = onRetry,
         onDelete = onDelete,
+        canDeleteForEveryone = canDeleteForEveryone,
         onTitleClick = onTitleClick,
         supportsReply = supportsReply,
         headerContent = headerContent,
@@ -147,6 +151,7 @@ internal fun ChatThread(
     onTitleClick: (() -> Unit)?,
     supportsReply: Boolean,
     headerContent: (@Composable () -> Unit)?,
+    canDeleteForEveryone: Boolean = true,
     composeStyle: ComposeStyle? = ComposeStyle.INLINE,
     keyboardStyle: KeyboardStyle? = KeyboardStyle.SYSTEM,
     conversationKey: String? = null,
@@ -301,6 +306,7 @@ internal fun ChatThread(
                 message = msg,
                 canReact = onReact != null && !isCall(msg) && !msg.status.isUnsent,
                 canDelete = onDelete != null,
+                canDeleteForEveryone = canDeleteForEveryone,
                 onPick = { emoji ->
                     onReact?.invoke(msg.id, msg.senderJid, emoji)
                     actionsFor = null
