@@ -40,3 +40,12 @@ internal interface SignalTransport {
 
     fun upload(file: File, mimeType: String, voiceNote: Boolean): SignalServiceAttachmentPointer
 }
+
+/** A mime type for a stored row that has none, from its content type. */
+internal fun defaultMimeFor(contentType: String): String = when (contentType) {
+    "image" -> "image/jpeg"
+    "video" -> "video/mp4"
+    "audio" -> "audio/ogg"
+    "sticker" -> "image/webp"
+    else -> "application/octet-stream"
+}
