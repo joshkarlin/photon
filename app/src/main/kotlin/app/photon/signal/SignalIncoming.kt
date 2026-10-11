@@ -38,3 +38,14 @@ internal fun incomingReactionFor(reaction: DataMessage.Reaction, fallbackAuthor:
     val emoji = reaction.emoji?.takeIf { it.isNotEmpty() } ?: return null
     return IncomingReaction.Set(prefix, emoji)
 }
+
+/**
+ * Quote references are stored as the stable "{authorAci}_{sentTimestampMs}"
+ * prefix — matches our local ID scheme minus the random suffix, so
+ * hydration can find the original via findMessageByPrefix.
+ */
+internal fun replyPrefix(quote: DataMessage.Quote?): String? {
+    val author = serviceIdString(quote?.authorAci, quote?.authorAciBinary) ?: return null
+    val id = quote?.id ?: return null
+    return "${author}_$id"
+}

@@ -9,7 +9,9 @@ import app.photon.signal.receiver.CallHandler
 import app.photon.signal.receiver.Receipts
 import app.photon.signal.receiver.Attachments
 import app.photon.signal.receiver.ContactsSync
-import app.photon.signal.receiver.contentTypeForMime
+import app.photon.signal.receiver.DataMessageHandler
+import app.photon.signal.receiver.RemoteEdits
+import app.photon.signal.receiver.SyncMessageHandler
 import app.photon.signal.receiver.ContactNames
 import app.photon.signal.receiver.GroupMetadata
 import app.photon.signal.receiver.PreKeyRefill
@@ -28,7 +30,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import org.signal.core.models.ServiceId
 import org.signal.libsignal.metadata.ProtocolDuplicateMessageException
 import org.signal.libsignal.metadata.ProtocolException
 import org.signal.libsignal.metadata.certificate.CertificateValidator
@@ -44,11 +45,8 @@ import org.whispersystems.signalservice.api.messages.EnvelopeResponse
 import org.whispersystems.signalservice.api.push.SignalServiceAddress
 import org.whispersystems.signalservice.api.websocket.SignalWebSocket
 import org.whispersystems.signalservice.internal.push.Content
-import org.whispersystems.signalservice.internal.push.DataMessage
 import org.whispersystems.signalservice.internal.push.Envelope
-import org.whispersystems.signalservice.internal.push.SyncMessage
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.UUID
 
 class SignalMessageReceiver(
     private val context: android.content.Context,
@@ -76,6 +74,8 @@ class SignalMessageReceiver(
     private val config = SignalConfig.createConfiguration()
     private val contactResolver = AndroidContactResolver(context)
     private val notifier: SignalNotifier = AndroidSignalNotifier(context)
+    // Read syncs that arrived before their message (see EarlyReadCache).
+    private val earlyReads = EarlyReadCache()
     private val preKeyRefill = PreKeyRefill(protocolStore)
     private val sessionPings = SessionPings(context, credentials, messageDb, scope)
     private val contactNames = ContactNames(messageDb, contactResolver) { profileFetcher }
@@ -84,6 +84,14 @@ class SignalMessageReceiver(
     private val contactsSync = ContactsSync(context, messageDb, contactResolver) { pushSocket }
     private val calls = CallHandler(credentials, messageDb, contactNames, groupMetadata, notifier)
     private val receipts = Receipts(credentials, messageDb)
+    private val remoteEdits = RemoteEdits(messageDb, notifier)
+    private val dataMessages = DataMessageHandler(
+        messageDb, contactNames, groupMetadata, calls, remoteEdits, attachments, earlyReads, notifier, scope,
+    )
+    private val syncMessages = SyncMessageHandler(
+        credentials, protocolStore.identityStore, messageDb, contactResolver, contactNames, groupMetadata,
+        calls, remoteEdits, contactsSync, earlyReads, notifier, scope,
+    )
     private val sessionLock = SignalConfig.newSessionLock()
     private val senderKeySessionBuilder = SignalGroupSessionBuilder(
         sessionLock,
@@ -122,8 +130,6 @@ class SignalMessageReceiver(
     @Volatile private var groupManager: SignalGroupV2Manager? = null
     @Volatile private var contactsSyncRequested = false
 
-    // Read syncs that arrived before their message (see EarlyReadCache).
-    private val earlyReads = EarlyReadCache()
     // Envelopes left un-acked after a local processing failure.
     private val envelopeRetries = EnvelopeRetryTracker<DecryptedEnvelope>()
     // Their in-process retries, run by the read loop on its own thread.
@@ -581,8 +587,8 @@ class SignalMessageReceiver(
         }
 
         when {
-            content.dataMessage != null -> processDataMessage(content.dataMessage!!, metadata)
-            content.syncMessage != null -> processSyncMessage(content.syncMessage!!, metadata)
+            content.dataMessage != null -> dataMessages.processDataMessage(content.dataMessage!!, metadata)
+            content.syncMessage != null -> syncMessages.processSyncMessage(content.syncMessage!!, metadata)
             content.callMessage != null -> calls.processCallMessage(content.callMessage!!, metadata, envelopeResponse)
             content.receiptMessage != null -> receipts.processReceipt(content.receiptMessage!!, metadata)
             content.typingMessage != null -> {} // ignore
@@ -671,401 +677,6 @@ class SignalMessageReceiver(
         else -> null
     }
 
-    private fun processDataMessage(data: DataMessage, metadata: EnvelopeMetadata) {
-        val senderE164 = metadata.sourceE164
-        val senderAci = contactNames.normalizeServiceIdForConversation(
-            serviceId = metadata.sourceServiceId,
-            e164 = senderE164,
-            context = "Incoming data source",
-        )
-        val timestamp = data.timestamp ?: System.currentTimeMillis()
-
-        // Phone number is the cheapest fallback name; profile fetch (below) may upgrade it.
-        if (senderE164 != null) {
-            messageDb.updateContactPhone(senderAci, senderE164)
-        }
-
-        // DataMessages typically include the sender's profile key — capture it so we can
-        // later fetch their Signal profile (display name, avatar) via ProfileService.
-        val profileKeyBytes = data.profileKey?.toByteArray()
-        if (profileKeyBytes != null && profileKeyBytes.size == 32) {
-            messageDb.updateContactProfileKey(senderAci, profileKeyBytes)
-        }
-        // Kick off an async profile fetch whenever we haven't resolved a display name yet.
-        contactNames.maybeFetchProfile(senderAci)
-
-        // Determine conversation JID. Two sources of "this is a group":
-        // (a) libsignal extracted `metadata.groupId` during decryption (the
-        //     16-byte stable identifier), or
-        // (b) the DataMessage carries `groupV2.masterKey`, from which we
-        //     can derive the same identifier ourselves.
-        // We prefer the masterKey path because it gives us the material
-        // needed to fetch + decrypt the group's title and members.
-        val groupV2 = data.groupV2
-        val groupMasterKey = groupV2?.masterKey?.toByteArray()?.takeIf { it.size == 32 }
-        val groupRevision = groupV2?.revision ?: 0
-
-        val metaGroupId = metadata.groupId
-        val derivedGroupId = groupMasterKey?.let { mk ->
-            try { SignalGroupV2Manager.groupIdFromMasterKey(mk) } catch (_: Exception) { null }
-        }
-
-        val groupIdBytes = derivedGroupId ?: metaGroupId
-        val isGroup = groupIdBytes != null && groupIdBytes.isNotEmpty()
-        val conversationJid = if (isGroup) {
-            Base64.encodeToString(groupIdBytes, Base64.NO_WRAP or Base64.URL_SAFE)
-        } else {
-            senderAci
-        }
-
-        // Stable identity of a Signal message is (author, sentTimestamp); the
-        // "_{rand}" suffix only makes the local PK unique. The same message can
-        // be delivered more than once — the sender resends after our retry
-        // receipt / sender-key redistribution, and the server can redeliver an
-        // un-acked envelope — so dedupe on the stable prefix before inserting.
-        // Without this each redelivery minted a fresh random id and stored a
-        // duplicate row (one group message arrived 36 times).
-        val messagePrefix = "${senderAci}_${timestamp}"
-        val messageId = "${messagePrefix}_${UUID.randomUUID().toString().take(8)}"
-
-        // Seed group metadata BEFORE the body-vs-sticker early-return below.
-        // Many in-group messages have no body or sticker (sender-key
-        // distribution prelude, group state changes, typing indicators with
-        // no payload, etc.) — but they often DO carry `groupV2.masterKey`,
-        // which is the only material we need to fetch the group's name and
-        // member list. Bailing out without storing it leaves the group
-        // permanently unnamed and unable to receive outgoing sends.
-        if (isGroup && groupMasterKey != null) {
-            groupMetadata.seedGroupConversation(conversationJid, groupMasterKey, groupRevision)
-        }
-
-        // Handle reactions (and reaction removals)
-        data.reaction?.let { reaction ->
-            applyReaction(reaction, senderAci, timestamp)
-            return
-        }
-
-        // Handle deletes (remote delete-for-everyone). Key by the
-        // "{author}_{timestampMs}" prefix — the stored id has a "_{rand}" suffix
-        // the delete proto doesn't carry, so an exact-id match never matched.
-        if (data.delete != null) {
-            val targetTs = data.delete!!.targetSentTimestamp ?: return
-            applyRemoteDelete("${senderAci}_$targetTs")
-            return
-        }
-
-        // A group call started (or someone joined one). Photon can't join;
-        // record it like a message so the chat shows it. Group-call update
-        // messages have no body, so this must run before the empty check.
-        data.groupCallUpdate?.let { update ->
-            if (isGroup) {
-                val name = contactNames.displayNameFor(senderAci, senderE164)
-                calls.recordGroupCall(conversationJid, senderAci, name, update.eraId, timestamp)
-            }
-            return
-        }
-
-        // Regular message
-        val body = data.body
-        val attachment = data.attachments.firstOrNull()
-        if (body == null && data.sticker == null && attachment == null) {
-            // No displayable content (could be key update, profile key, etc.)
-            return
-        }
-
-        // Media beats text: a photo with a caption is an "image" row whose
-        // text_body carries the caption, mirroring the WhatsApp model.
-        val contentType = when {
-            attachment != null -> contentTypeForMime(attachment.contentType)
-            body != null -> "text"
-            else -> "sticker"
-        }
-
-        val senderName = contactNames.displayNameFor(senderAci, senderE164)
-
-        if (isGroup) {
-            // Master key + conversation row already seeded above (before
-            // the body check). Here we only do the per-message work:
-            // record the sender as a known participant so per-message
-            // sender labels render in group transcripts.
-            if (!senderName.isNullOrBlank()) {
-                messageDb.upsertParticipant(conversationJid, senderAci, senderName, "member")
-            }
-        } else {
-            messageDb.upsertConversation(jid = conversationJid, name = senderName, isGroup = false)
-        }
-
-        // A read sync from another device may have beaten this message here
-        // (e.g. it was resent after a decrypt failure). Then it's already
-        // read: store it without counting it unread or notifying.
-        val readElsewhere = earlyReads.consume(messagePrefix)
-
-        // Redeliveries are dropped inside the insert (same author+timestamp
-        // prefix), skipping every side effect below so a resent message
-        // doesn't appear N times, inflate the unread count, or re-notify.
-        val inserted = messageDb.insertIncomingMessage(
-            id = messageId,
-            conversationJid = conversationJid,
-            senderJid = senderAci,
-            timestamp = timestamp / 1000,
-            contentType = contentType,
-            textBody = body,
-            mediaMime = attachment?.contentType,
-            mediaSize = attachment?.size?.toLong(),
-            replyToId = replyPrefix(data.quote),
-            // Serialized pointer so the blob can be fetched on demand later
-            // (tap-to-view); images/videos aren't auto-downloaded.
-            rawProto = attachment?.encode(),
-            dedupePrefix = messagePrefix,
-            alreadyRead = readElsewhere,
-        )
-        if (!inserted) {
-            Log.d(TAG, "Skipping duplicate incoming message $messagePrefix")
-            return
-        }
-
-        // Voice notes auto-download (small, and the UI autoplays them on
-        // open) — mirrors the WhatsApp bridge's auto-download policy.
-        if (attachment != null && contentType == "audio") {
-            scope.launch { attachments.downloadAttachment(messageId) }
-        }
-
-        if (readElsewhere) {
-            Log.i(TAG, "Stored message $messagePrefix as read (read sync arrived first)")
-            return
-        }
-
-        // Show notification — for groups, title is the group name (with the
-        // sender's name woven into the body); for DMs it's the sender.
-        val notifTitle = if (isGroup) {
-            groupMetadata.groupTitle(conversationJid)
-        } else {
-            senderName ?: senderAci.take(8)
-        }
-        val preview = body ?: "[$contentType]"
-        val notifBody = if (isGroup && !senderName.isNullOrBlank()) {
-            "$senderName: $preview"
-        } else preview
-        notifier.showMessage(notifTitle, notifBody, conversationJid)
-    }
-
-    private fun applyReaction(reaction: DataMessage.Reaction, reactorAci: String, timestamp: Long) {
-        when (val update = incomingReactionFor(reaction, fallbackAuthor = reactorAci)) {
-            is IncomingReaction.Set -> messageDb.upsertReaction(update.targetPrefix, reactorAci, update.emoji, timestamp)
-            is IncomingReaction.Remove -> messageDb.removeReaction(update.targetPrefix, reactorAci)
-            null -> Log.d(TAG, "Ignoring reaction without a target or emoji")
-        }
-    }
-
-    /**
-     * Blank a message deleted for everyone. If it was still unread, the
-     * delete also takes it off the unread count; once nothing unread is
-     * left, its notification (which may show the deleted text) goes too.
-     */
-    private fun applyRemoteDelete(targetPrefix: String) {
-        val cleared = messageDb.markDeletedByPrefix(targetPrefix)
-        cleared.forEach { jid ->
-            notifier.cancelConversation(jid)
-        }
-    }
-
-    private fun processSyncMessage(sync: SyncMessage, metadata: EnvelopeMetadata) {
-        // What this sync carries that Photon acts on (docs/VERIFY.md looks for this line).
-        val kinds = listOfNotNull(
-            "sent".takeIf { sync.sent != null },
-            "read[${sync.read.size}]".takeIf { !sync.read.isNullOrEmpty() },
-            "contacts".takeIf { sync.contacts != null },
-            "verified".takeIf { sync.verified != null },
-            "callEvent".takeIf { sync.callEvent != null },
-            "callLogEvent".takeIf { sync.callLogEvent != null },
-        )
-        if (kinds.isNotEmpty()) Log.i(TAG, "Sync message kinds: ${kinds.joinToString(",")}")
-        sync.verified?.let { verified ->
-            try {
-                val applied = applySignalVerificationSync(
-                    protocolStore.identityStore, verified,
-                    metadata.sourceServiceId.toString(), credentials.aciString,
-                )
-                Log.i(TAG, "Verification sync handled=$applied")
-            } catch (e: Exception) {
-                Log.w(TAG, "Invalid verification sync", e)
-            }
-        }
-        sync.callEvent?.let { calls.processCallEventSync(it) }
-        sync.callLogEvent?.let { calls.processCallLogEvent(it) }
-        // Sent messages from our primary device
-        val sent = sync.sent
-        if (sent != null && sent.message != null) {
-            val data = sent.message!!
-            val timestamp = data.timestamp ?: System.currentTimeMillis()
-            val myAci = credentials.aciString ?: return
-            // Reactions and deletes-for-everyone the user made on another
-            // device carry no body; apply them to the target and stop.
-            data.reaction?.let { reaction ->
-                applyReaction(reaction, myAci, timestamp)
-                return
-            }
-            data.delete?.targetSentTimestamp?.let { targetTs ->
-                applyRemoteDelete("${myAci}_$targetTs")
-                return
-            }
-            // Same (author, timestamp) dedupe as incoming data messages: a sent
-            // transcript can be redelivered, and the random suffix would
-            // otherwise store a duplicate of our own outgoing message.
-            val messagePrefix = "${myAci}_${timestamp}"
-            val messageId = "${messagePrefix}_${UUID.randomUUID().toString().take(8)}"
-            val alreadyStored = messageDb.findMessageByPrefix(messagePrefix) != null
-
-            // Group case: route into the group conversation regardless of
-            // destinationServiceId (which is unset for group sends from the
-            // primary, and the existing handler used to drop them silently —
-            // that was the root cause of groups appearing missing for users
-            // who only sent into them rather than received from them).
-            val groupV2 = data.groupV2
-            val groupMasterKey = groupV2?.masterKey?.toByteArray()?.takeIf { it.size == 32 }
-            if (groupMasterKey != null) {
-                val convJid = try { SignalGroupV2Manager.jidFromMasterKey(groupMasterKey) } catch (_: Exception) { null }
-                if (convJid != null) {
-                    groupMetadata.seedGroupConversation(convJid, groupMasterKey, groupV2.revision ?: 0)
-
-                    val body = data.body
-                    val attachment = data.attachments.firstOrNull()
-                    if ((body != null || attachment != null) && !alreadyStored) {
-                        messageDb.insertMessage(
-                            id = messageId,
-                            conversationJid = convJid,
-                            senderJid = myAci,
-                            timestamp = timestamp / 1000,
-                            contentType = if (attachment != null) contentTypeForMime(attachment.contentType) else "text",
-                            textBody = body,
-                            mediaMime = attachment?.contentType,
-                            mediaSize = attachment?.size?.toLong(),
-                            replyToId = replyPrefix(data.quote),
-                            isFromMe = true,
-                            status = "sent",
-                            rawProto = attachment?.encode(),
-                        )
-                        messageDb.updateConversationLastMessage(convJid, messageId, timestamp / 1000)
-                        Log.d(TAG, "Stored sync sent message into group ${convJid.take(12)}…")
-                    }
-                    messageDb.markConversationRead(convJid)
-                    notifier.cancelConversation(convJid)
-                    return
-                }
-                Log.w(TAG, "Sync sent has an invalid groupV2 master key; falling through")
-            }
-
-            // DM case: needs a destination on the sync transcript. Normalize
-            // PNI destinations to ACI so sent-primary transcripts land in the
-            // same replyable thread Photon uses for direct sends.
-            val destinationServiceIdRaw = sent.destinationServiceId
-            val destinationServiceId = destinationServiceIdRaw?.let { ServiceId.parseOrNull(it) }
-                ?: sent.destinationServiceIdBinary?.let {
-                    try { ServiceId.parseOrNull(it.toByteArray()) }
-                    catch (_: Exception) { null }
-                }
-            val destinationAci = destinationServiceId?.let {
-                contactNames.normalizeServiceIdForConversation(it, sent.destinationE164, "Sync sent destination")
-            }
-                ?: contactNames.normalizeServiceIdStringForConversation(
-                    destinationServiceIdRaw,
-                    sent.destinationE164,
-                    "Sync sent destination",
-                )
-                ?: sent.destinationE164
-                ?: run {
-                    Log.w(TAG, "Sync sent message has no destination, skipping")
-                    return
-                }
-
-            val body = data.body
-            val attachment = data.attachments.firstOrNull()
-            if ((body != null || attachment != null) && !alreadyStored) {
-                // Capture destination phone and profile key so profile fetch can find names.
-                sent.destinationE164?.let { messageDb.updateContactPhone(destinationAci, it) }
-                val syncProfileKey = data.profileKey?.toByteArray()
-                if (syncProfileKey != null && syncProfileKey.size == 32) {
-                    messageDb.updateContactProfileKey(destinationAci, syncProfileKey)
-                }
-
-                // Resolve conversation name. Order: Android local contacts
-                // → Signal profile name → phone number. Do NOT use primary's
-                // address-book name (we ingest only phone numbers from
-                // SyncMessage.contacts, not names).
-                val phone = sent.destinationE164
-                val storedProfileName = messageDb.getContact(destinationAci)
-                    ?.profileName?.takeIf { it.isNotBlank() }
-                val convName = when {
-                    destinationAci == myAci -> "Note to Self"
-                    phone != null -> contactResolver.resolve(phone) ?: storedProfileName ?: phone
-                    else -> storedProfileName
-                }
-
-                messageDb.upsertConversation(
-                    jid = destinationAci,
-                    name = convName,
-                    isGroup = false,
-                )
-                if (destinationAci != myAci) contactNames.maybeFetchProfile(destinationAci)
-                messageDb.insertMessage(
-                    id = messageId,
-                    conversationJid = destinationAci,
-                    senderJid = myAci,
-                    timestamp = timestamp / 1000,
-                    contentType = if (attachment != null) contentTypeForMime(attachment.contentType) else "text",
-                    textBody = body,
-                    mediaMime = attachment?.contentType,
-                    mediaSize = attachment?.size?.toLong(),
-                    replyToId = replyPrefix(data.quote),
-                    isFromMe = true,
-                    status = "sent",
-                    rawProto = attachment?.encode(),
-                )
-                messageDb.updateConversationLastMessage(destinationAci, messageId, timestamp / 1000)
-            }
-            // A sent transcript means the user has seen this thread on the
-            // primary. Some primary/device combinations send sync.sent without
-            // the corresponding sync.read, so clear any stale local incoming
-            // unread state as a conservative fallback.
-            messageDb.markConversationRead(destinationAci)
-            notifier.cancelConversation(destinationAci)
-            Log.d(TAG, "Stored sync sent message to $destinationAci")
-        }
-
-        // Read receipts from primary — mark the matching messages as read AND
-        // clear their local notifications so the banner disappears as soon as
-        // the user reads elsewhere, not only when they open the chat in Photon.
-        val reads = sync.read
-        if (!reads.isNullOrEmpty()) {
-            for (read in reads) {
-                val senderAci = serviceIdString(read.senderAci, read.senderAciBinary) ?: continue
-                val timestamp = read.timestamp ?: continue
-                val prefix = "${senderAci}_$timestamp"
-                val result = messageDb.markIncomingReadByPrefix(prefix)
-                // The read beat its message here; remember it so the message
-                // lands already read instead of unread with a notification.
-                if (!result.matched) earlyReads.remember(prefix)
-                // Only conversations this read actually emptied: newer unread
-                // messages keep their notification.
-                result.clearedConversations.forEach { conversationJid ->
-                    notifier.cancelConversation(conversationJid)
-                }
-            }
-        }
-
-        // Contacts sync — download the attachment blob and ingest each
-        // DeviceContact (name + phone + ACI from the primary's address book).
-        val contacts = sync.contacts
-        if (contacts != null) {
-            val blob = contacts.blob
-            if (blob != null) {
-                scope.launch { contactsSync.processContactsBlob(blob) }
-            } else {
-                Log.d(TAG, "Contacts sync had no blob")
-            }
-        }
-    }
-
     /** Download an incoming attachment by message id; see [Attachments.downloadAttachment]. */
     fun downloadAttachment(messageId: String): String? = attachments.downloadAttachment(messageId)
 
@@ -1082,17 +693,6 @@ class SignalMessageReceiver(
         if (pruned > 0) {
             Log.i(TAG, "Pruned $pruned Signal messages (cap=$maxPerConversation/chat, maxAge=${maxAgeDays}d)")
         }
-    }
-
-    /**
-     * Quote references are stored as the stable "{authorAci}_{sentTimestampMs}"
-     * prefix — matches our local ID scheme minus the random suffix, so
-     * hydration can find the original via findMessageByPrefix.
-     */
-    private fun replyPrefix(quote: DataMessage.Quote?): String? {
-        val author = serviceIdString(quote?.authorAci, quote?.authorAciBinary) ?: return null
-        val id = quote?.id ?: return null
-        return "${author}_$id"
     }
 
 }
