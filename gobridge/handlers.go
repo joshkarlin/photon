@@ -209,7 +209,18 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 	}
 
 	row := b.buildMessageRow(msg, msgID, chatJID, senderJID, ts, isFromMe, "sent")
-	b.InsertMessage(row)
+	inserted, err := b.InsertMessage(row)
+	if err != nil {
+		b.log.Errorf("Failed to store message %s in %s: %v", msgID, chatJID, err)
+		return
+	}
+	if !inserted {
+		// A redelivery (offline queue replay, retry after a decrypt failure)
+		// of a message already stored. Counting or announcing it again would
+		// double the unread badge and re-notify.
+		b.log.Debugf("Ignoring redelivered message %s in %s", msgID, chatJID)
+		return
+	}
 	contentType, textBody := row.ContentType, row.TextBody.String
 
 	// Extract and save inline thumbnail for media messages

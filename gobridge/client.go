@@ -42,6 +42,10 @@ type Bridge struct {
 	conns     []*websocket.Conn
 	retention RetentionConfig
 
+	// emit delivers one outbound event envelope to Kotlin. NewBridge wires it
+	// to the transport; tests swap in a recorder.
+	emit func(WsMessage)
+
 	connectionStateMu sync.RWMutex
 	connectionState   string
 	connectionReason  string
@@ -56,7 +60,7 @@ type Bridge struct {
 
 // NewBridge creates a new Bridge instance.
 func NewBridge(client *whatsmeow.Client, msgDB *sql.DB, dataDir string, log waLog.Logger) *Bridge {
-	return &Bridge{
+	b := &Bridge{
 		client:          client,
 		msgDB:           msgDB,
 		dataDir:         dataDir,
@@ -69,6 +73,8 @@ func NewBridge(client *whatsmeow.Client, msgDB *sql.DB, dataDir string, log waLo
 			MediaTTLMins: 5,
 		},
 	}
+	b.emit = b.writeToConns
+	return b
 }
 
 // SetRetention updates the retention configuration.
@@ -229,10 +235,13 @@ func (b *Bridge) BroadcastEvent(eventType string, payload interface{}) {
 		return
 	}
 
-	msg := WsMessage{
-		Type:    eventType,
-		Payload: payloadBytes,
+	if b.emit != nil {
+		b.emit(WsMessage{Type: eventType, Payload: payloadBytes})
 	}
+}
+
+// writeToConns fans an event out to every connected WebSocket client.
+func (b *Bridge) writeToConns(msg WsMessage) {
 	msgBytes, err := json.Marshal(msg)
 	if err != nil {
 		b.log.Errorf("Failed to marshal event: %v", err)

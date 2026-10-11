@@ -217,10 +217,15 @@ func (m *MessageRow) insertArgs() []interface{} {
 	}
 }
 
-// InsertMessage inserts a message record.
-func (b *Bridge) InsertMessage(msg *MessageRow) error {
-	_, err := b.msgDB.Exec(insertMessageSQL, msg.insertArgs()...)
-	return err
+// InsertMessage inserts a message record. inserted is false when a row with
+// the same ID already exists — a redelivery of something already stored.
+func (b *Bridge) InsertMessage(msg *MessageRow) (inserted bool, err error) {
+	res, err := b.msgDB.Exec(insertMessageSQL, msg.insertArgs()...)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // InsertMessages inserts a batch of messages in a single transaction. Used by
