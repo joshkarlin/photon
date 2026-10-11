@@ -46,49 +46,50 @@ class WhatsAppNames(private val lp3: (String) -> String?) {
     }
 
     /**
-     * The notification for a bridge `new_message` event. [stored] is the
-     * conversation row as the bridge wrote it, for bridges that predate the
-     * event's naming fields (is_group, conversation_name, sender_jid).
+     * The notification for a bridge `new_message` event. The title comes from
+     * conversation_name (the chat's own name), the group sender from
+     * sender_jid and sender_name (the sender's own name). [stored] is the
+     * conversation row as the bridge wrote it, the fallback for an empty
+     * conversation_name and for bridges that predate these fields.
      */
     fun messageNotification(evt: BridgeEvent, stored: Conversation?): MessageNotificationText {
         val conversationJid = evt.string("conversation_jid").orEmpty()
         val preview = notificationPreview(evt.string("text_body"), evt.string("content_type"))
-        val eventIsGroup = evt.boolean("is_group")
-        val isGroup = eventIsGroup ?: stored?.isGroup ?: conversationJid.endsWith("@g.us")
         val senderName = evt.string("sender_name")?.takeIf { it.isNotBlank() }
-        val conversationName = evt.string("conversation_name")?.takeIf { it.isNotBlank() }
-
-        if (!isGroup) {
-            val title = person(conversationJid, conversationName ?: stored?.name ?: senderName)
-            return messageNotificationText(title, isGroup = false, senderName = null, preview = preview)
+        // Older bridges send no is_group, and their sender_name is the chat's
+        // name (a group's subject), with nothing about the sender.
+        val legacy = evt.boolean("is_group") == null
+        val isGroup = evt.boolean("is_group") ?: stored?.isGroup ?: conversationJid.endsWith("@g.us")
+        val chatName = if (legacy) {
+            stored?.name?.takeIf { it.isNotBlank() } ?: senderName
+        } else {
+            evt.string("conversation_name")?.takeIf { it.isNotBlank() } ?: stored?.name
         }
-        if (eventIsGroup == null) {
-            // An older bridge: its sender_name for a group is the group's name,
-            // and it says nothing of the sender.
-            val title = DisplayNames.group(Platform.WHATSAPP, senderName ?: stored?.name, conversationJid)
-            return messageNotificationText(title, isGroup = true, senderName = null, preview = preview)
+        val title = title(conversationJid, isGroup, chatName)
+        val sender = if (isGroup && !legacy) {
+            evt.string("sender_jid")?.takeIf { it.isNotBlank() }?.let { person(it, senderName) }
+                ?: senderName?.let { DisplayNames.person(Platform.WHATSAPP, addressBook = it) }
+        } else {
+            null
         }
-        val title = DisplayNames.group(Platform.WHATSAPP, conversationName ?: stored?.name, conversationJid)
-        val senderJid = evt.string("sender_jid")?.takeIf { it.isNotBlank() }
-        val sender = when {
-            senderJid != null -> person(senderJid, senderName)
-            senderName != null -> DisplayNames.person(Platform.WHATSAPP, addressBook = senderName)
-            else -> null
-        }
-        return messageNotificationText(title, isGroup = true, senderName = sender, preview = preview)
+        return messageNotificationText(title, isGroup, sender, preview)
     }
 
     /**
-     * Who a `call_incoming` / `call_missed` notification names: the group for
-     * a group call, else the caller ([caller_jid], or the chat for bridges
-     * that predate it).
+     * Who a `call_incoming` / `call_missed` notification names: the caller
+     * (caller_jid and their own caller_name), and for a group call the group
+     * too ("Alice · Climbing"). Older bridges send no caller_jid; their
+     * caller_name is the chat's name, or a number or placeholder.
      */
     fun callerTitle(evt: BridgeEvent, stored: Conversation?): String {
         val conversationJid = evt.string("conversation_jid").orEmpty()
         val isGroup = evt.boolean("is_group") ?: stored?.isGroup ?: conversationJid.endsWith("@g.us")
         val callerName = evt.string("caller_name")?.takeIf { it.isNotBlank() }
-        if (isGroup) return DisplayNames.group(Platform.WHATSAPP, callerName ?: stored?.name, conversationJid)
-        val callerJid = evt.string("caller_jid")?.takeIf { it.isNotBlank() } ?: conversationJid
-        return person(callerJid, callerName ?: stored?.name)
+        val callerJid = evt.string("caller_jid")?.takeIf { it.isNotBlank() }
+        if (callerJid == null) return title(conversationJid, isGroup, callerName ?: stored?.name)
+        val caller = person(callerJid, callerName)
+        if (!isGroup) return caller
+        val chatName = evt.string("conversation_name")?.takeIf { it.isNotBlank() } ?: stored?.name
+        return "$caller · ${DisplayNames.group(Platform.WHATSAPP, chatName, conversationJid)}"
     }
 }

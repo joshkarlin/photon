@@ -90,13 +90,34 @@ class WhatsAppNamesTest {
         )
     }
 
+    /** The title is conversation_name, never sender_name (the sender's own name). */
     @Test
     fun aGroupNotificationIsTitledWithTheGroupAndNamesTheSender() {
         val evt = event(
             "new_message", "conversation_jid" to group, "is_group" to true, "conversation_name" to "Climbing",
+            "sender_jid" to stranger, "sender_name" to "Jane", "text_body" to "see you at 8",
+        )
+        assertEquals(
+            MessageNotificationText("Climbing", "Jane: see you at 8"),
+            names.messageNotification(evt, conv(group, "Old subject", isGroup = true)),
+        )
+
+        // The LP3 contact wins for the sender too.
+        val fromAlice = event(
+            "new_message", "conversation_jid" to group, "is_group" to true, "conversation_name" to "Climbing",
             "sender_jid" to alice, "sender_name" to "Ali", "text_body" to "see you at 8",
         )
-        assertEquals(MessageNotificationText("Climbing", "Alice: see you at 8"), names.messageNotification(evt, null))
+        assertEquals(MessageNotificationText("Climbing", "Alice: see you at 8"), names.messageNotification(fromAlice, null))
+
+        // An empty conversation_name falls back to the stored subject.
+        val unnamed = event(
+            "new_message", "conversation_jid" to group, "is_group" to true, "conversation_name" to "",
+            "sender_jid" to stranger, "sender_name" to "", "text_body" to "hi",
+        )
+        assertEquals(
+            MessageNotificationText("Climbing", "+44 7700 900999: hi"),
+            names.messageNotification(unnamed, conv(group, "Climbing", isGroup = true)),
+        )
 
         val fromLid = event(
             "new_message", "conversation_jid" to group, "is_group" to true, "conversation_name" to "Climbing",
@@ -115,6 +136,12 @@ class WhatsAppNamesTest {
             "sender_jid" to mum, "sender_name" to "Jane", "text_body" to "hi",
         )
         assertEquals(MessageNotificationText("Mum", "hi"), names.messageNotification(evt, null))
+        // A stored name of "" (the bridge clears numbers) falls through to the number.
+        val unnamed = event(
+            "new_message", "conversation_jid" to stranger, "is_group" to false, "conversation_name" to "",
+            "sender_jid" to stranger, "sender_name" to "", "text_body" to "hi",
+        )
+        assertEquals(MessageNotificationText("+44 7700 900999", "hi"), names.messageNotification(unnamed, conv(stranger, "")))
     }
 
     /** Bridges before the naming fields: a group's sender_name was the group's name. */
@@ -132,17 +159,32 @@ class WhatsAppNamesTest {
     }
 
     @Test
-    fun callsNameTheCallerOrTheGroup() {
+    fun callsNameTheCallerAndForAGroupCallTheGroup() {
         assertEquals(
             "Mum",
             names.callerTitle(event("call_incoming", "conversation_jid" to mum, "caller_jid" to mum, "caller_name" to "Jane"), null),
         )
         assertEquals(
-            "Book club",
+            "Alice · Book club",
             names.callerTitle(
-                event("call_incoming", "conversation_jid" to group, "caller_jid" to alice, "caller_name" to "Book club", "is_group" to true),
+                event(
+                    "call_incoming", "conversation_jid" to group, "caller_jid" to alice, "caller_name" to "Ali",
+                    "conversation_name" to "Book club", "is_group" to true,
+                ),
                 null,
             ),
+        )
+        assertEquals(
+            "WhatsApp contact · Book club",
+            names.callerTitle(
+                event("call_missed", "conversation_jid" to group, "caller_jid" to lid, "caller_name" to "", "is_group" to true),
+                conv(group, "Book club", isGroup = true),
+            ),
+        )
+        // An older bridge named a group call by its subject.
+        assertEquals(
+            "Book club",
+            names.callerTitle(event("call_incoming", "conversation_jid" to group, "caller_name" to "Book club", "is_group" to true), null),
         )
         // Older bridges: the caller's number, or a placeholder, as caller_name.
         assertEquals("Mum", names.callerTitle(event("call_missed", "conversation_jid" to mum, "caller_name" to "+447700900123"), null))
