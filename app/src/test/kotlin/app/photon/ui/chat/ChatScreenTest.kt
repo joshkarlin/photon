@@ -7,6 +7,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import app.photon.chat.ChatBackend
 import app.photon.chat.FakeChatBackend
 import app.photon.data.model.Message
 import app.photon.data.model.MessageStatus
@@ -40,8 +41,8 @@ class ChatScreenTest {
 
     private val contacts = mutableListOf<Pair<String, String>>()
 
-    private fun show(backend: FakeChatBackend) {
-        backend.conversations.value = listOf(FakeChatBackend.conversation(JID, "Mum"))
+    private fun show(fake: FakeChatBackend, backend: ChatBackend = fake) {
+        fake.conversations.value = listOf(FakeChatBackend.conversation(JID, "Mum"))
         rule.setContent {
             PhotonTheme {
                 ChatScreen(backend, JID, onContact = { phone, name -> contacts += phone to name }, onBack = {})
@@ -76,8 +77,9 @@ class ChatScreenTest {
 
     @Test
     fun theHeaderHookShowsUnderTheTitle() {
-        show(FakeChatBackend(Platform.SIGNAL, FakeChatBackend.FULL, phone = null, header = "Safety number changed: Mum"))
-        rule.onNodeWithText("Safety number changed: Mum").performClick()
+        val fake = FakeChatBackend(Platform.SIGNAL, FakeChatBackend.FULL, phone = null)
+        show(fake, fake.withHeader("Safety number changed: Mum"))
+        rule.onNodeWithText("Safety number changed: Mum").assertExists()
     }
 
     @Test

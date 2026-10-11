@@ -10,12 +10,14 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 
-/** A platform in memory: set [conversations] and [messages], read what was asked of it. */
+/**
+ * A platform in memory: set [conversations] and [messages], read what was
+ * asked of it. It keeps the interface's empty header unless given [header].
+ */
 internal class FakeChatBackend(
     override val platform: Platform,
     override val capabilities: ChatCapabilities = FULL,
     private val phone: String? = null,
-    private val header: String? = null,
 ) : ChatBackend {
     override val conversations = MutableStateFlow<List<Conversation>?>(null)
     val messages = MutableStateFlow<List<Message>>(emptyList())
@@ -41,12 +43,15 @@ internal class FakeChatBackend(
         opened += jid to isGroup
     }
 
-    @Composable
-    override fun Header(jid: String, isGroup: Boolean, title: String, participantNames: Map<String, String>) {
-        header?.let { LightText(it, variant = LightTextVariant.Detail) }
-    }
-
     override fun contactPhone(jid: String) = phone
+
+    /** This one with a header, as Signal's safety-number notice. */
+    fun withHeader(header: String): ChatBackend = object : ChatBackend by this {
+        @Composable
+        override fun Header(jid: String, isGroup: Boolean, title: String, participantNames: Map<String, String>) {
+            LightText(header, variant = LightTextVariant.Detail)
+        }
+    }
 
     companion object {
         val FULL = ChatCapabilities(
