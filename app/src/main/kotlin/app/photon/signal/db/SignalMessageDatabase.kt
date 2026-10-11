@@ -232,11 +232,13 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         notifyChanged()
     }
 
+    /**
+     * Point the conversation at a newly stored message, unless it already
+     * shows a newer one: a late sync transcript must not drag the chat back
+     * in the list.
+     */
     fun updateConversationLastMessage(jid: String, messageId: String, timestamp: Long) {
-        writableDatabase.execSQL(
-            "UPDATE conversations SET last_message_id = ?, last_timestamp = ?, updated_at = ? WHERE jid = ?",
-            arrayOf<Any>(messageId, timestamp, System.currentTimeMillis(), jid),
-        )
+        setLastMessageIfNewer(writableDatabase, jid, messageId, timestamp)
         notifyChanged()
     }
 

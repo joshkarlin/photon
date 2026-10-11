@@ -218,6 +218,29 @@ class SignalMessageDatabaseTest {
     }
 
     /**
+     * A sent transcript for an older message (delivered late from the
+     * primary) must not move the chat back in the list. A startup repair used
+     * to paper over this by recomputing every conversation's timestamp.
+     */
+    @Test
+    fun updateConversationLastMessage_neverMovesBackwards() {
+        val aci = "late-transcript-aci"
+        db.upsertConversation(jid = aci, name = "Alice", isGroup = false)
+        db.insertIncomingMessage(
+            id = "${aci}_1800000_new", conversationJid = aci, senderJid = aci,
+            timestamp = 1800, contentType = "text", textBody = "newer",
+        )
+
+        db.updateConversationLastMessage(aci, "me_1700000_old", 1700)
+        assertEquals("${aci}_1800000_new", db.getConversation(aci)?.lastMessageId)
+        assertEquals(1800L, db.getConversation(aci)?.lastTimestamp)
+
+        db.updateConversationLastMessage(aci, "me_1900000_next", 1900)
+        assertEquals("me_1900000_next", db.getConversation(aci)?.lastMessageId)
+        assertEquals(1900L, db.getConversation(aci)?.lastTimestamp)
+    }
+
+    /**
      * A Signal message redelivered N times (sender resends after our retry
      * receipt; server redelivers un-acked envelopes) must collapse to one row.
      * Rows share the stable "{author}_{timestampMs}" prefix and differ only by
