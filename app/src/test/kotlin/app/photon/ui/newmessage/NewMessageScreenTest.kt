@@ -119,9 +119,9 @@ class NewMessageScreenTest {
     fun nothingTypedShowsNothingAndNoMatchSaysSo() {
         show()
         rule.onAllNodesWithText("Mo Salah").assertCountEquals(0)
-        rule.onAllNodesWithText("No matches").assertCountEquals(0)
+        rule.onAllNodesWithText("no matches").assertCountEquals(0)
         type("xyz")
-        rule.onNodeWithText("No matches").assertExists()
+        rule.onNodeWithText("no matches").assertExists()
     }
 
     /** Enter puts the keyboard away so the matches can be read; a tap on the field brings it back. */

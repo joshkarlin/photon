@@ -318,7 +318,7 @@ private fun SearchPage(
             when {
                 matches == null -> Unit // loading: nothing yet
                 matches.isEmpty() && text.isNotBlank() -> LightText(
-                    text = "No matches",
+                    text = "no matches",
                     variant = LightTextVariant.Paragraph,
                     lighten = true,
                     align = TextAlign.Center,
