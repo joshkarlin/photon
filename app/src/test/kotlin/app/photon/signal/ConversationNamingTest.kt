@@ -40,4 +40,14 @@ class ConversationNamingTest {
     fun blankProfileNameIsIgnored() {
         assertNull(ConversationNaming.resolveFromContact(null, "   ", ::resolve))
     }
+
+    /** Group notifications used to be titled "Signal group" even once the real name was known. */
+    @Test
+    fun groupTitleUsesStoredNameWithPlaceholderOnlyAsFallback() {
+        assertEquals("Frothers Utd", ConversationNaming.groupTitle("Frothers Utd", "grpB64"))
+        assertEquals("Signal group", ConversationNaming.groupTitle(null, "grpB64"))
+        assertEquals("Signal group", ConversationNaming.groupTitle(" ", "grpB64"))
+        // Old rows could hold the raw base64 id as the name.
+        assertEquals("Signal group", ConversationNaming.groupTitle("grpB64", "grpB64"))
+    }
 }

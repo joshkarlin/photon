@@ -63,7 +63,7 @@ class SignalMessageReceiver(
         private const val MEDIA_TTL_MS: Long = 5L * 60 * 1000
         // Conversation name used until the GroupV2 state fetch resolves the
         // real title. Also doubles as the "needs fetch" sentinel.
-        private const val PLACEHOLDER_GROUP_NAME = "Signal group"
+        private const val PLACEHOLDER_GROUP_NAME = ConversationNaming.PLACEHOLDER_GROUP_NAME
         // SignalWebSocket exposes inbound frames through a blocking long-poll
         // API. Its Object.wait() releases the socket monitor, so outbound
         // MessageApi/KeysApi requests can proceed while this waits.
@@ -884,7 +884,7 @@ class SignalMessageReceiver(
         // Show notification — for groups, title is the group name (with the
         // sender's name woven into the body); for DMs it's the sender.
         val notifTitle = if (isGroup) {
-            PLACEHOLDER_GROUP_NAME
+            groupTitle(conversationJid)
         } else {
             senderName ?: senderAci.take(8)
         }
@@ -898,6 +898,9 @@ class SignalMessageReceiver(
 
         Log.d(TAG, "Stored message from $senderAci: ${body?.take(30) ?: contentType}")
     }
+
+    private fun groupTitle(groupJid: String): String =
+        ConversationNaming.groupTitle(messageDb.getConversation(groupJid)?.name, groupJid)
 
     private fun applyReaction(reaction: DataMessage.Reaction, reactorAci: String, timestamp: Long) {
         when (val update = incomingReactionFor(reaction, fallbackAuthor = reactorAci)) {

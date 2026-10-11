@@ -6,6 +6,16 @@ package app.photon.signal
  */
 object ConversationNaming {
 
+    /** Shown until a GroupV2 state fetch resolves the real title. */
+    const val PLACEHOLDER_GROUP_NAME = "Signal group"
+
+    /**
+     * A group's display title: the stored name, with the placeholder only as
+     * a fallback. Never the raw base64 group id (old rows could store it).
+     */
+    fun groupTitle(storedName: String?, jid: String): String =
+        storedName?.takeIf { it.isNotBlank() && it != jid } ?: PLACEHOLDER_GROUP_NAME
+
     /**
      * Resolve a DM's display name from its contact row. Order: local address
      * book (via [resolveByPhone]) → Signal profile name → bare phone number.
