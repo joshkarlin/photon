@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waVnameCert"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -116,5 +118,56 @@ func TestTyping_resolvesLIDs(t *testing.T) {
 	got := sent.ofType("typing")
 	if len(got) != 1 || got[0]["jid"] != pn.String() || got[0]["sender_jid"] != pn.String() || got[0]["composing"] != true {
 		t.Errorf("typing = %v, want chat and sender as %s", got, pn)
+	}
+}
+
+// Live messages, history sync and group open name a member the same way:
+// the address book first, then the push name the message carried.
+func TestMemberName_sameOnLiveHistoryAndGroupOpen(t *testing.T) {
+	ctx := context.Background()
+	group := types.NewJID("120363000000000042", types.GroupServer)
+	carol := types.NewJID("447700900003", types.DefaultUserServer) // in the address book
+	dave := types.NewJID("447700900004", types.DefaultUserServer)  // only a push name
+
+	live := newClientBridge(t)
+	live.client.Store.Contacts.PutContactName(ctx, carol, "Carol", "Carol Smith")
+	for _, m := range []struct {
+		sender types.JID
+		id     string
+		push   string
+	}{{carol, "l1", "caz"}, {dave, "l2", "Dave G"}} {
+		evt := textEvent(group, m.sender, m.id, "hi", 100)
+		evt.Info.PushName = m.push
+		live.handleMessage(evt)
+	}
+
+	history := newClientBridge(t)
+	history.retention = RetentionConfig{MaxMessages: 50}
+	history.client.Store.Contacts.PutContactName(ctx, carol, "Carol", "Carol Smith")
+	withPush := func(m *waHistorySync.HistorySyncMsg, push string) *waHistorySync.HistorySyncMsg {
+		m.Message.PushName = s(push)
+		return m
+	}
+	history.handleHistorySync(&events.HistorySync{Data: &waHistorySync.HistorySync{
+		Conversations: []*waHistorySync.Conversation{{
+			ID: s(group.String()),
+			Messages: []*waHistorySync.HistorySyncMsg{
+				withPush(historyMsg(group, "h1", false, carol.String(), 1_900_000_000, &waE2E.Message{Conversation: s("hi")}), "caz"),
+				withPush(historyMsg(group, "h2", false, dave.String(), 1_900_000_001, &waE2E.Message{Conversation: s("hi")}), "Dave G"),
+			},
+		}},
+	}})
+
+	want := map[string]string{carol.String(): "Carol Smith", dave.String(): "Dave G"}
+	for name, b := range map[string]*Bridge{"live": live, "history": history} {
+		for _, step := range []string{"stored", "after group open"} {
+			got := participantNames(t, b, group.String())
+			for jid, n := range want {
+				if got[jid] != n {
+					t.Errorf("%s, %s: %s = %q, want %q", name, step, jid, got[jid], n)
+				}
+			}
+			b.ResolveGroupParticipants(group.String())
+		}
 	}
 }

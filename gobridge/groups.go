@@ -126,6 +126,17 @@ func (b *Bridge) forgetGroupAdmins(jid string) {
 	b.groupNameMu.Unlock()
 }
 
+// memberName is the name to store for a group member: their address-book
+// name or verified business name, else the push name their message carried,
+// else one whatsmeow has seen. "" when none is known — never their number,
+// which the UI shows by itself and which would overwrite a real name in the
+// participants table. Live messages, history sync and
+// ResolveGroupParticipants all name members with it.
+func (b *Bridge) memberName(sender types.JID, pushName string) string {
+	name, _ := bestContactName(b.lookupContact(b.resolveLIDJID(sender), sender), pushName)
+	return name
+}
+
 // ResolveGroupParticipants fills display names for every distinct sender in a
 // group's stored messages from whatsmeow's contact store (address-book name
 // preferred, observed push name as fallback). This lets historical senders —
@@ -156,14 +167,10 @@ func (b *Bridge) ResolveGroupParticipants(groupJID string) {
 		if perr != nil {
 			continue
 		}
-		resolved := b.resolveLIDJID(parsed)
-		name, _ := bestContactName(b.lookupContact(resolved, parsed), "")
-		// Only write real names. Never fall back to the phone number: this runs
-		// on every group open and overwrites existing rows, so a number fallback
-		// would clobber a good push name the live handler captured (members not
-		// in the address book have no contact-store name). When there's no real
-		// name, leave the row alone — the UI already falls back to the number.
-		if name != "" {
+		// No name: the row is left alone, keeping any push name a message
+		// taught us (members outside the address book have no contact-store
+		// name), and the UI falls back to the number on its own.
+		if name := b.memberName(parsed, ""); name != "" {
 			if upErr := b.UpsertParticipant(groupJID, sjid, name, "member"); upErr == nil {
 				updated = true
 			}

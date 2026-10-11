@@ -131,27 +131,18 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 			b.log.Errorf("Failed to store history for %s: %v", jid, err)
 		}
 		for _, e := range edits {
-			if _, text, _ := extractContent(e.edited); text != "" {
-				b.UpdateMessageEdit(e.targetID, jid, b.resolveMentions(e.edited, jid, text), &e.by)
-			}
+			b.applyEdit(jid, e.targetID, e.edited, e.by)
 		}
 		for _, r := range revokes {
 			b.applyRevoke(jid, r.info, r.targetID)
 		}
 
-		// Backfill group participant names: prefer the address-book contact
-		// name, fall back to the history push name. Done once per distinct
-		// sender so old messages render names like live ones do.
+		// Name each distinct group sender once, as live messages do.
 		for sjid, pushName := range histParticipantNames {
-			name := pushName
-			if parsed, perr := types.ParseJID(sjid); perr == nil {
-				contact := b.lookupContact(parsed, parsed)
-				if cn, _ := bestContactName(contact, pushName); cn != "" {
-					name = cn
+			if parsed, err := types.ParseJID(sjid); err == nil {
+				if member := b.memberName(parsed, pushName); member != "" {
+					b.UpsertParticipant(jid, sjid, member, "member")
 				}
-			}
-			if name != "" {
-				b.UpsertParticipant(jid, sjid, name, "member")
 			}
 		}
 

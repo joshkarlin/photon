@@ -111,18 +111,8 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 		// network fetch per group per hour, not per message)
 		name = b.groupName(evt.Info.Chat)
 
-		// Store sender as participant with their display name. Prefer the push
-		// name, then the address-book contact name — but never the phone number.
-		// A number written here is overwritten by the live push name later, but
-		// the reverse (ResolveGroupParticipants) used to clobber good names with
-		// numbers; keeping only real names in the table avoids that entirely and
-		// lets the UI fall back to the number on its own when nothing is known.
-		senderDisplayName := evt.Info.PushName
-		if senderDisplayName == "" {
-			senderDisplayName, _ = bestContactName(b.lookupContact(b.resolveLIDJID(evt.Info.Sender), evt.Info.Sender), "")
-		}
-		if senderDisplayName != "" {
-			b.UpsertParticipant(chatJID, senderJID, senderDisplayName, "member")
+		if member := b.memberName(evt.Info.Sender, evt.Info.PushName); member != "" {
+			b.UpsertParticipant(chatJID, senderJID, member, "member")
 		}
 	} else {
 		// Only use the event push/verified name from the OTHER person, not
