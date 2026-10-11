@@ -1,4 +1,5 @@
 import java.util.Properties
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
@@ -14,11 +15,13 @@ val keystoreProps = Properties().also { props ->
 
 android {
     namespace = "app.photon"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "app.photon"
-        minSdk = 29
+        // The Light SDK requires API 34; the LP3 runs it. targetSdk stays at 35
+        // to avoid opting into newer runtime behaviour changes.
+        minSdk = 34
         targetSdk = 35
         // Overridable from CI: the release workflow passes -PversionCodeOverride
         // and -PversionNameOverride derived from the git tag. Falls back to the
@@ -62,10 +65,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     buildFeatures {
         compose = true
     }
@@ -84,18 +83,32 @@ android {
 
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+    }
+}
+
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2024.06.00")
+    // Light SDK UI (LightTheme, LightText, LightTopBar, ...), substituted with
+    // the third_party/light-sdk submodule's :sdk:ui project in settings.gradle.kts.
+    implementation("com.thelightphone:sdk-ui:0.2.0")
+
+    // Versions track the Light SDK's catalog where both use a library.
+    val composeBom = platform("androidx.compose:compose-bom:2026.03.01")
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    debugImplementation("androidx.compose.ui:ui-tooling")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.activity:activity-compose:1.9.0")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.3")
+    implementation("androidx.activity:activity-compose:1.13.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
-    implementation("androidx.core:core-ktx:1.13.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-    implementation("androidx.navigation:navigation-compose:2.7.7")
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+    implementation("androidx.core:core-ktx:1.17.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation("androidx.navigation:navigation-compose:2.9.8")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("io.coil-kt:coil-compose:2.6.0")
     implementation("com.google.zxing:core:3.5.3")
@@ -110,7 +123,7 @@ dependencies {
     implementation("org.signal:libsignal-android:0.92.1")
 
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.jetbrains.kotlin:kotlin-test:2.1.0")
-    testImplementation("org.robolectric:robolectric:4.13")
+    testImplementation("org.jetbrains.kotlin:kotlin-test:2.3.20")
+    testImplementation("org.robolectric:robolectric:4.16.1")
     testImplementation("androidx.test:core:1.6.1")
 }
