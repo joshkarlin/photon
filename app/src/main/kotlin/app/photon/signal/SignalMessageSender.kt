@@ -73,22 +73,51 @@ internal fun signalReactionFor(messageId: String, emoji: String): SignalServiceD
     return SignalServiceDataMessage.Reaction(emoji, false, authorAci, timestamp)
 }
 
-class SignalMessageSender(
+class SignalMessageSender internal constructor(
     private val credentials: SignalCredentials,
     private val protocolStore: PhotonProtocolStore,
     private val messageDb: SignalMessageDatabase,
     // Phone → local address-book name, so member names written by the
     // group-send bootstrap follow the same policy as the receiver's.
     private val contactResolver: ((String) -> String?)? = null,
+    // The network side of sends; replaced in tests.
+    transport: SignalTransport? = null,
 ) {
     companion object {
         private const val TAG = "SignalMessageSender"
     }
 
-    private val config = SignalConfig.createConfiguration()
+    private val config by lazy { SignalConfig.createConfiguration() }
     private val sessionLock = SignalConfig.newSessionLock()
     val identityStore get() = protocolStore.identityStore
     private val executor = Executors.newCachedThreadPool()
+
+    private val transport: SignalTransport = transport ?: LibraryTransport()
+
+    /** Sends through signal-service-java, over the receiver's sockets when it has them. */
+    private inner class LibraryTransport : SignalTransport {
+        override fun send(recipient: Recipient, content: OutgoingContent, timestamp: Long) {
+            val message = content as? OutgoingContent.Message
+            val text = message?.text
+            val replyPrefix = message?.replyPrefix
+            val attachments = message?.attachments.orEmpty()
+            val remoteDeleteTarget = (content as? OutgoingContent.RemoteDelete)?.targetSentTimestamp
+            val reaction = (content as? OutgoingContent.Reaction)?.reaction
+            when (recipient) {
+                is Recipient.Dm -> sendDmInternal(
+                    recipient.aci, recipient.conversationJid, text, timestamp, replyPrefix,
+                    attachments, remoteDeleteTarget, reaction,
+                )
+                is Recipient.Group -> sendGroupInternal(
+                    recipient.conversationJid, recipient.meta, text, timestamp, replyPrefix,
+                    attachments, remoteDeleteTarget, reaction,
+                )
+            }
+        }
+
+        override fun upload(file: File, mimeType: String, voiceNote: Boolean) =
+            uploadAttachment(file, mimeType, voiceNote)
+    }
 
     // Lazily initialized, reused across sends
     @Volatile private var sender: SignalServiceMessageSender? = null
@@ -245,11 +274,8 @@ class SignalMessageSender(
         insertRow("sending")
 
         try {
-            if (aci != null) {
-                sendDmInternal(aci, conversationJid, text, timestamp, replyPrefix)
-            } else {
-                sendGroupInternal(conversationJid, groupMeta!!, text, timestamp, replyPrefix)
-            }
+            val recipient = if (aci != null) Recipient.Dm(conversationJid, aci) else Recipient.Group(conversationJid, groupMeta!!)
+            transport.send(recipient, OutgoingContent.Message(text, replyPrefix), timestamp)
             messageDb.updateMessageStatus(messageId, "sent")
             Log.i(TAG, "Sent $messageId to $conversationJid")
         } catch (e: Exception) {
@@ -312,12 +338,9 @@ class SignalMessageSender(
         insertRow("sending")
 
         try {
-            val pointer = uploadAttachment(file, mimeType, voiceNote = contentType == "audio")
-            if (aci != null) {
-                sendDmInternal(aci, conversationJid, caption, timestamp, replyPrefix, listOf(pointer))
-            } else {
-                sendGroupInternal(conversationJid, groupMeta!!, caption, timestamp, replyPrefix, listOf(pointer))
-            }
+            val pointer = transport.upload(file, mimeType, voiceNote = contentType == "audio")
+            val recipient = if (aci != null) Recipient.Dm(conversationJid, aci) else Recipient.Group(conversationJid, groupMeta!!)
+            transport.send(recipient, OutgoingContent.Message(caption, replyPrefix, listOf(pointer)), timestamp)
             messageDb.updateMessageStatus(messageId, "sent")
             Log.i(TAG, "Sent media $messageId ($mimeType, ${file.length()}B) to $conversationJid")
         } catch (e: Exception) {
@@ -379,11 +402,8 @@ class SignalMessageSender(
 
         val timestamp = System.currentTimeMillis()
         return try {
-            if (aci != null) {
-                sendDmInternal(aci, conversationJid, null, timestamp, null, reaction = reaction)
-            } else {
-                sendGroupInternal(conversationJid, groupMeta!!, null, timestamp, null, reaction = reaction)
-            }
+            val recipient = if (aci != null) Recipient.Dm(conversationJid, aci) else Recipient.Group(conversationJid, groupMeta!!)
+            transport.send(recipient, OutgoingContent.Reaction(reaction), timestamp)
             messageDb.upsertReaction(MessageKeys.prefixOf(messageId), myAci, emoji, timestamp)
             true
         } catch (e: Exception) {
@@ -669,13 +689,10 @@ class SignalMessageSender(
         val timestamp = MessageKeys.sentTimestampMs(messageId, row.timestamp)
         return try {
             val attachments = if (isText) emptyList() else listOf(
-                uploadAttachment(mediaFile!!, row.mediaMime ?: defaultMimeFor(row.contentType), voiceNote = row.contentType == "audio"),
+                transport.upload(mediaFile!!, row.mediaMime ?: defaultMimeFor(row.contentType), voiceNote = row.contentType == "audio"),
             )
-            if (aci != null) {
-                sendDmInternal(aci, conversationJid, text, timestamp, row.replyToId, attachments)
-            } else {
-                sendGroupInternal(conversationJid, groupMeta!!, text, timestamp, row.replyToId, attachments)
-            }
+            val recipient = if (aci != null) Recipient.Dm(conversationJid, aci) else Recipient.Group(conversationJid, groupMeta!!)
+            transport.send(recipient, OutgoingContent.Message(text, row.replyToId, attachments), timestamp)
             messageDb.updateMessageStatus(messageId, "sent")
             Log.i(TAG, "Retry succeeded for $messageId")
             true
@@ -712,8 +729,8 @@ class SignalMessageSender(
             val groupMeta = if (aci == null) messageDb.getGroupMeta(conversationJid) else null
             try {
                 when {
-                    aci != null -> sendDmInternal(aci, conversationJid, null, now, null, remoteDeleteTarget = targetTs)
-                    groupMeta != null -> sendGroupInternal(conversationJid, groupMeta, null, now, null, remoteDeleteTarget = targetTs)
+                    aci != null -> transport.send(Recipient.Dm(conversationJid, aci), OutgoingContent.RemoteDelete(targetTs), now)
+                    groupMeta != null -> transport.send(Recipient.Group(conversationJid, groupMeta), OutgoingContent.RemoteDelete(targetTs), now)
                     else -> {
                         Log.w(TAG, "deleteMessage: $conversationJid is neither ACI nor known group")
                         return false
