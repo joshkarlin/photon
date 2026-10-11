@@ -2,14 +2,11 @@ package app.photon.signal
 
 import android.util.Base64
 import android.util.Log
-import org.signal.libsignal.protocol.ecc.ECKeyPair
-import org.signal.libsignal.protocol.state.PreKeyRecord
-import org.whispersystems.signalservice.api.account.PreKeyUpload
-import org.whispersystems.signalservice.api.keys.KeysApi
-import org.whispersystems.signalservice.api.push.ServiceIdType
 import org.whispersystems.signalservice.internal.push.PushServiceSocket
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.receiver.AndroidSignalNotifier
+import app.photon.signal.receiver.PreKeyRefill
+import app.photon.signal.receiver.SessionPings
 import app.photon.signal.receiver.SignalNotifier
 import app.photon.signal.store.PhotonProtocolStore
 import kotlinx.coroutines.CoroutineScope
@@ -60,7 +57,9 @@ class SignalMessageReceiver(
     private val messageDb: SignalMessageDatabase,
 ) {
     companion object {
-        private const val TAG = "SignalMessageReceiver"
+        // Shared by the handlers in app.photon.signal.receiver, so one logcat
+        // filter (docs/VERIFY.md) still catches everything the receiver does.
+        internal const val TAG = "SignalMessageReceiver"
         // Generous cap on the contacts sync attachment (~10 MB is way more
         // than any plausible contact book).
         private const val MAX_CONTACTS_BLOB_BYTES: Long = 50L * 1024 * 1024
@@ -90,6 +89,8 @@ class SignalMessageReceiver(
     private val config = SignalConfig.createConfiguration()
     private val contactResolver = AndroidContactResolver(context)
     private val notifier: SignalNotifier = AndroidSignalNotifier(context)
+    private val preKeyRefill = PreKeyRefill(protocolStore)
+    private val sessionPings = SessionPings(context, credentials, messageDb, scope)
     private val sessionLock = SignalConfig.newSessionLock()
     private val senderKeySessionBuilder = SignalGroupSessionBuilder(
         sessionLock,
@@ -127,8 +128,6 @@ class SignalMessageReceiver(
     @Volatile private var pushSocket: PushServiceSocket? = null
     @Volatile private var groupManager: SignalGroupV2Manager? = null
     @Volatile private var contactsSyncRequested = false
-    @Volatile private var activeContactsPinged = false
-    @Volatile private var activeContactsPingInFlight = false
 
     // Read syncs that arrived before their message (see EarlyReadCache).
     private val earlyReads = EarlyReadCache()
@@ -225,12 +224,10 @@ class SignalMessageReceiver(
         }
         if (!drained) Log.w(TAG, "Reset: receiver work still running after ${RESET_DRAIN_TIMEOUT_MS}ms")
         contactsSyncRequested = false
-        activeContactsPinged = false
+        sessionPings.reset()
         earlyReads.clear()
         envelopeRetries.clearAll()
         synchronized(heldRetries) { heldRetries.clear() }
-        context.getSharedPreferences("signal_ping_state", android.content.Context.MODE_PRIVATE)
-            .edit().clear().apply()
         SignalGroupV2Manager.clearCredentialCache()
     }
 
@@ -408,16 +405,7 @@ class SignalMessageReceiver(
             }
         }
 
-        // Send a NullMessage to each active Signal ACI we know about. Without
-        // this, those contacts' apps don't know our linked deviceId exists and
-        // won't include us in their encrypted recipient list, so their messages
-        // never reach Photon. DM conversations cover direct contacts; GroupV2
-        // participants cover group-only members. Once per contact (persisted
-        // in SharedPreferences), with a 7-day refresh so sessions don't go stale.
-        if (!activeContactsPinged) {
-            activeContactsPinged = true
-            scheduleActiveContactPing(8000) // let contacts sync ingest first
-        }
+        sessionPings.onConnected()
 
         val now = System.currentTimeMillis()
         if (SignalReconnect.maintenanceDue(lastMaintenanceAt, now)) {
@@ -510,99 +498,7 @@ class SignalMessageReceiver(
         }
 
         // Upload one-time pre-keys if they haven't been uploaded yet
-        return uploadPreKeysIfNeeded(ws, unauthWs)
-    }
-
-    private fun uploadPreKeysIfNeeded(
-        ws: SignalWebSocket.AuthenticatedWebSocket,
-        unauthWs: SignalWebSocket.UnauthenticatedWebSocket,
-    ): Boolean {
-        return try {
-            val keysApi = KeysApi(ws, unauthWs)
-
-            val countResult = keysApi.getAvailablePreKeyCounts(ServiceIdType.ACI)
-            val counts = countResult.successOrThrow()
-            Log.i(
-                TAG,
-                "Server ACI pre-key counts: ec=${counts.ecCount}, kyber=${counts.kyberCount} " +
-                    "(refill threshold=10)",
-            )
-
-            if (counts.ecCount >= 10 && counts.kyberCount >= 10) {
-                Log.i(TAG, "Server has enough pre-keys")
-                return true
-            }
-            Log.w(
-                TAG,
-                "Server ACI pre-key counts low; uploading fresh signed, EC, and Kyber keys",
-            )
-
-            val identityKeyPair = protocolStore.identityKeyPair
-
-            // (1) Always rotate the signed pre-key on refill. Production clients
-            //     do this regularly. Re-uploading the original registration-time
-            //     signed pre-key was being rejected with 422 "Invalid signature"
-            //     and starving the server of one-time keys, so senders couldn't
-            //     start sessions with us — the actual cause of "no incoming msgs".
-            val signedPreKeyId = java.util.Random().nextInt(0xFFFFFF)
-            val signedKeyPair = ECKeyPair.generate()
-            val signedSignature = identityKeyPair.privateKey.calculateSignature(
-                signedKeyPair.publicKey.serialize(),
-            )
-            val signedPreKey = org.signal.libsignal.protocol.state.SignedPreKeyRecord(
-                signedPreKeyId, System.currentTimeMillis(), signedKeyPair, signedSignature,
-            )
-            protocolStore.storeSignedPreKey(signedPreKeyId, signedPreKey)
-
-            // (2) Rotate the last-resort kyber pre-key too.
-            val lastResortId = java.util.Random().nextInt(0xFFFFFF)
-            val lastResortKp = org.signal.libsignal.protocol.kem.KEMKeyPair.generate(
-                org.signal.libsignal.protocol.kem.KEMKeyType.KYBER_1024,
-            )
-            val lastResortSig = identityKeyPair.privateKey.calculateSignature(
-                lastResortKp.publicKey.serialize(),
-            )
-            val lastResortKyber = org.signal.libsignal.protocol.state.KyberPreKeyRecord(
-                lastResortId, System.currentTimeMillis(), lastResortKp, lastResortSig,
-            )
-            protocolStore.storeLastResortKyberPreKey(lastResortId, lastResortKyber)
-
-            // (3) Fresh batches of one-time EC + Kyber pre-keys.
-            val ecPreKeys = mutableListOf<PreKeyRecord>()
-            val ecStartId = (counts.ecCount + 1).coerceAtLeast(1)
-            for (i in ecStartId until (ecStartId + 100)) {
-                val keyPair = ECKeyPair.generate()
-                val rec = PreKeyRecord(i, keyPair)
-                protocolStore.storePreKey(i, rec)
-                ecPreKeys.add(rec)
-            }
-            val kyberPreKeys = mutableListOf<org.signal.libsignal.protocol.state.KyberPreKeyRecord>()
-            val kyberStartId = (counts.kyberCount + 2000).coerceAtLeast(2000)
-            for (i in kyberStartId until (kyberStartId + 100)) {
-                val kp = org.signal.libsignal.protocol.kem.KEMKeyPair.generate(
-                    org.signal.libsignal.protocol.kem.KEMKeyType.KYBER_1024,
-                )
-                val sig = identityKeyPair.privateKey.calculateSignature(kp.publicKey.serialize())
-                val rec = org.signal.libsignal.protocol.state.KyberPreKeyRecord(
-                    i, System.currentTimeMillis(), kp, sig,
-                )
-                protocolStore.storeKyberPreKey(i, rec)
-                kyberPreKeys.add(rec)
-            }
-
-            // (4) Upload over the authenticated socket. A failure returns
-            //     false, so the next connect retries with fresh keys.
-            val upload = PreKeyUpload(
-                ServiceIdType.ACI, signedPreKey, ecPreKeys, lastResortKyber, kyberPreKeys,
-            )
-            keysApi.setPreKeys(upload).successOrThrow()
-            Log.i(TAG, "Uploaded fresh keys via KeysApi: signed=$signedPreKeyId " +
-                "lastResortKyber=$lastResortId ec=${ecPreKeys.size} kyber=${kyberPreKeys.size}")
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to upload pre-keys", e)
-            false
-        }
+        return preKeyRefill.uploadPreKeysIfNeeded(ws, unauthWs)
     }
 
     private fun readMessages(gen: Long, ws: SignalWebSocket.AuthenticatedWebSocket, attempt: Attempt) {
@@ -1694,81 +1590,6 @@ class SignalMessageReceiver(
         }
     }
 
-    /**
-     * Sends a Signal NullMessage to each active ACI we know about (DM
-     * conversations plus GroupV2 participants). The recipient processes the
-     * NullMessage silently — no notification, no chat entry — but it forces
-     * their app to notice our deviceId and add us to their encrypted-recipient
-     * list. Their subsequent messages then reach Photon.
-     *
-     * Tracked per-ACI in SharedPreferences so we ping each contact at most
-     * once per refresh window (currently 7 days).
-     */
-    private suspend fun pingActiveContacts() {
-        val sender = app.photon.service.PhotonService._signalSender ?: run {
-            Log.d(TAG, "Skipping active-contact ping: sender not ready")
-            return
-        }
-        val myAci = credentials.aciString?.lowercase()
-        val prefs = context.getSharedPreferences("signal_ping_state", android.content.Context.MODE_PRIVATE)
-        val refreshCutoff = System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000
-
-        val candidates = messageDb.getSessionPingTargetAcis()
-            .filter { it.lowercase() != myAci }
-            .distinct()
-        val targets = candidates.filter { prefs.getLong(it, 0L) < refreshCutoff }
-
-        if (targets.isEmpty()) {
-            Log.d(
-                TAG,
-                "No Signal session pings due (candidates=${candidates.size}, deviceId=${credentials.deviceId})",
-            )
-            return
-        }
-        Log.i(
-            TAG,
-            "Pinging ${targets.size}/${candidates.size} active Signal contacts " +
-                "to establish deviceId=${credentials.deviceId} sessions",
-        )
-        for (jid in targets) {
-            val ok = sender.sendSessionPing(jid)
-            if (ok) {
-                prefs.edit().putLong(jid, System.currentTimeMillis()).apply()
-                Log.i(TAG, "Session ping succeeded for ${jid.take(8)}…")
-            } else {
-                Log.w(TAG, "Session ping failed for ${jid.take(8)}…")
-            }
-            // Stagger so we don't burst the server. 800ms between pings is
-            // generous; with ~10 active contacts, total wall time ~8s.
-            delay(800)
-        }
-        Log.i(TAG, "Active-contact pinging complete")
-    }
-
-    private fun scheduleActiveContactPing(delayMs: Long = 0L) {
-        val shouldStart = synchronized(this) {
-            if (activeContactsPingInFlight) {
-                false
-            } else {
-                activeContactsPingInFlight = true
-                true
-            }
-        }
-        if (!shouldStart) return
-        scope.launch {
-            try {
-                if (delayMs > 0) delay(delayMs)
-                pingActiveContacts()
-            } catch (e: Exception) {
-                Log.w(TAG, "Active contact pinging failed: ${e.message}")
-            } finally {
-                synchronized(this@SignalMessageReceiver) {
-                    activeContactsPingInFlight = false
-                }
-            }
-        }
-    }
-
     private fun ingestDeviceContact(
         contact: org.whispersystems.signalservice.api.messages.multidevice.DeviceContact,
     ) {
@@ -1858,7 +1679,7 @@ class SignalMessageReceiver(
             messageDb.upsertParticipant(conversationJid, aciString, name, "member")
         }
         Log.i(TAG, "Resolved group ${conversationJid.take(12)}…: $title (${acis.size} members)")
-        scheduleActiveContactPing()
+        sessionPings.scheduleActiveContactPing()
     }
 
     /**
