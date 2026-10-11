@@ -5,7 +5,6 @@ import android.content.Context
 import android.media.MediaPlayer
 import android.os.Environment
 import android.provider.MediaStore
-import android.widget.Toast
 import android.widget.VideoView
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -26,9 +25,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.viewinterop.AndroidView
+import app.photon.ui.theme.PhotonGrid
 import com.thelightphone.sdk.ui.LightBarButton
 import com.thelightphone.sdk.ui.LightBottomBar
 import com.thelightphone.sdk.ui.LightIcon
@@ -40,8 +42,10 @@ import com.thelightphone.sdk.ui.LightTopBar
 import com.thelightphone.sdk.ui.gridUnitsAsDp
 import com.thelightphone.sdk.ui.lightClickable
 import coil.compose.AsyncImage
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 @Composable
@@ -62,6 +66,7 @@ fun MediaViewer(
     var localPath by remember { mutableStateOf(cachedPath) }
     var loading by remember { mutableStateOf(cachedPath == null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var saved by remember { mutableStateOf(false) }
 
     // Download on open (skip if already have a valid local file)
     LaunchedEffect(messageId) {
@@ -76,12 +81,14 @@ fun MediaViewer(
         }
     }
 
+    // Back (top-left, or the system's) is the one way out. The page stops
+    // touches reaching the thread beneath.
     BackHandler(onBack = onDismiss)
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(LightThemeTokens.colors.background)
-            .lightClickable(hapticsEnabled = false, onClick = onDismiss),
+            .pointerInput(Unit) {},
     ) {
         LightTopBar(leftButton = backButton(onDismiss))
 
@@ -90,9 +97,10 @@ fun MediaViewer(
             modifier = Modifier.weight(1f).fillMaxWidth(),
             contentAlignment = Alignment.Center,
         ) {
+            val message = Modifier.padding(horizontal = PhotonGrid.MARGIN.gridUnitsAsDp())
             when {
-                loading -> LightText("Downloading…", variant = LightTextVariant.Paragraph, lighten = true)
-                error != null -> LightText(error!!, variant = LightTextVariant.Paragraph)
+                loading -> LightText("downloading…", variant = LightTextVariant.Copy, lighten = true, modifier = message)
+                error != null -> LightText(error!!, variant = LightTextVariant.Copy, align = TextAlign.Center, modifier = message)
                 localPath != null -> {
                     val file = File(localPath!!)
                     when {
@@ -111,20 +119,29 @@ fun MediaViewer(
                             AudioPlayer(file = file)
                         }
                         else -> {
-                            LightText("Downloaded: ${file.name}", variant = LightTextVariant.Paragraph)
+                            LightText("Downloaded: ${file.name}", variant = LightTextVariant.Copy, modifier = message)
                         }
                     }
                 }
             }
         }
 
-        if (localPath != null) {
+        // The bar says when it's saved, rather than a system toast.
+        localPath?.let { path ->
             LightBottomBar(
                 items = listOf(
-                    LightBarButton.Text(
-                        text = "SAVE TO DEVICE",
-                        onClick = { scope.launch { saveToDevice(context, localPath!!, mediaMime) } },
-                    ),
+                    if (saved) {
+                        LightBarButton.Text(text = "SAVED", onClick = null)
+                    } else {
+                        LightBarButton.Text(
+                            text = "SAVE TO DEVICE",
+                            onClick = {
+                                scope.launch {
+                                    saved = withContext(Dispatchers.IO) { saveToDevice(context, path, mediaMime) }
+                                }
+                            },
+                        )
+                    },
                 ),
             )
         }
@@ -211,9 +228,10 @@ private fun AudioPlayer(file: File) {
     }
 }
 
-private fun saveToDevice(context: Context, path: String, mimeType: String?) {
+/** Copies the media into the shared Pictures, Movies or Downloads folder. Returns whether it did. */
+private fun saveToDevice(context: Context, path: String, mimeType: String?): Boolean {
     val file = File(path)
-    if (!file.exists()) return
+    if (!file.exists()) return false
 
     val mime = mimeType ?: "application/octet-stream"
     val isImage = mime.startsWith("image/")
@@ -236,11 +254,12 @@ private fun saveToDevice(context: Context, path: String, mimeType: String?) {
     }
 
     val resolver = context.contentResolver
-    val uri = resolver.insert(collection, values)
-    if (uri != null) {
+    val uri = resolver.insert(collection, values) ?: return false
+    return try {
         resolver.openOutputStream(uri)?.use { out ->
             file.inputStream().use { it.copyTo(out) }
-        }
-        Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show()
+        } != null
+    } catch (_: java.io.IOException) {
+        false
     }
 }

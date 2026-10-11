@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.navigation.NavHostController
@@ -98,6 +99,25 @@ class ChatRouteTest {
         // Signal isn't linked here: pairing.
         pick("Signal")
         assertEquals(Routes.SIGNAL_PAIRING, nav.currentBackStackEntry?.destination?.route)
+    }
+
+    /** The picker is a page like any other: Back returns to the list as it was. */
+    @Test
+    fun backFromThePickerKeepsTheList() {
+        lateinit var nav: NavHostController
+        rule.setContent {
+            PhotonTheme {
+                nav = rememberNavController()
+                PhotonNavGraph(nav)
+            }
+        }
+        rule.onNodeWithText("ALL CHATS").performClick()
+        rule.onNodeWithText("WhatsApp").assertExists()
+        rule.onNodeWithContentDescription("Back").performClick()
+        rule.waitForIdle()
+        assertEquals(Routes.CHATS, nav.currentBackStackEntry?.destination?.route)
+        assertNull(nav.currentBackStackEntry?.arguments?.getString("platform"))
+        rule.onNodeWithText("ALL CHATS").assertExists()
     }
 
     /** The current list's filter, in its bottom bar, which opens the platform picker. */
