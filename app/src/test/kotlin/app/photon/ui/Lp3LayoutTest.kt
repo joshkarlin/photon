@@ -14,6 +14,7 @@ import app.photon.ui.preview.ChatListSample
 import app.photon.ui.preview.DmThreadSample
 import app.photon.ui.preview.GroupThreadSample
 import app.photon.ui.preview.PreviewSamples
+import app.photon.ui.settings.SettingsScreen
 import app.photon.ui.shared.CHAT_LIST_TAG
 import app.photon.ui.shared.ChatListLayout
 import app.photon.ui.shared.formatTimestamp
@@ -87,6 +88,16 @@ class Lp3LayoutTest {
     }
 
     private val density get() = rule.density.density
+
+    /** LightOS Settings: large labels at the margin, rows five units apart. */
+    @Test
+    fun menuRowsSitAtTheMarginFiveUnitsApart() {
+        rule.setContent { PhotonTheme { SettingsScreen(onBack = {}) } }
+        val connections = bounds("Connections")
+        val chat = bounds("Chat")
+        assertEquals(margin, connections.left, 0.5f)
+        assertEquals(5 * 360f / 27, chat.top - connections.top, 0.5f)
+    }
 
     @Test
     fun longChatTitleStaysClearOfBack() {

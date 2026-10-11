@@ -16,9 +16,9 @@ fun PlatformsScreen(
     BackHandler(enabled = true) { /* no-op */ }
 
     MenuScreen(title = null, onBack = null) {
-        MenuRow("ALL CHATS") { onPick(null) }
-        MenuRow("SMS") { onPick(Platform.SMS) }
-        MenuRow("WHATSAPP") { onPick(Platform.WHATSAPP) }
-        MenuRow("SIGNAL") { onPick(Platform.SIGNAL) }
+        MenuRow("All Chats") { onPick(null) }
+        listOf(Platform.SMS, Platform.WHATSAPP, Platform.SIGNAL).forEach { platform ->
+            MenuRow(platform.label) { onPick(platform) }
+        }
     }
 }

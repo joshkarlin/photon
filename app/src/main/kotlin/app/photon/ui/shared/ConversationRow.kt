@@ -78,7 +78,7 @@ fun ConversationRow(
 
         LightText(
             text = remember(conv.jid, conv.name, conv.isGroup, platform) { DisplayNames.title(conv, platform) },
-            variant = LightTextVariant.Copy,
+            variant = LightTextVariant.Heading,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),

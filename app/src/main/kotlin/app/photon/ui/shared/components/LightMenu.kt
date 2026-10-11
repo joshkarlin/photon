@@ -1,15 +1,17 @@
 package app.photon.ui.shared.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import app.photon.ui.shared.MenuScrollDialEffect
+import app.photon.ui.theme.PhotonColors
 import app.photon.ui.theme.PhotonGrid
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
@@ -40,33 +42,36 @@ fun MenuScreen(
         LightTopBar(
             leftButton = onBack?.let(::backButton),
             center = title?.let { LightTopBarCenter.Text(it) },
-            modifier = Modifier.padding(bottom = 1f.gridUnitsAsDp()),
         )
         PageScrollView(modifier = Modifier.weight(1f), scrollState = scrollState, content = content)
     }
 }
 
 /**
- * A LightOS menu row: large left-aligned label, no divider, with an optional
- * value beneath it in the secondary colour ([emphasizeValue] shows it in the
- * content colour, e.g. a live connection).
+ * A LightOS menu row, as in LightOS Settings: a large left-aligned label in
+ * Title Case, no divider, rows [PhotonGrid.MENU_ROW_HEIGHT] apart. An
+ * optional value sits beneath the label in the secondary colour
+ * ([emphasizeValue] shows it in the content colour, e.g. a live connection).
+ * A row that isn't [enabled] recedes and can't be tapped.
  */
 @Composable
 fun MenuRow(
     label: String,
     value: String? = null,
     emphasizeValue: Boolean = false,
+    enabled: Boolean = true,
     onClick: (() -> Unit)? = null,
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .let { if (onClick != null) it.lightClickable(onClick = onClick) else it }
-            .padding(vertical = PhotonGrid.MENU_ROW_PADDING.gridUnitsAsDp()),
+            .heightIn(min = PhotonGrid.MENU_ROW_HEIGHT.gridUnitsAsDp())
+            .let { if (onClick != null) it.lightClickable(enabled = enabled, onClick = onClick) else it },
+        verticalArrangement = Arrangement.Center,
     ) {
-        LightText(text = label, variant = LightTextVariant.Copy)
+        LightText(text = label, variant = LightTextVariant.Heading, color = if (enabled) null else PhotonColors.Faint)
         if (value != null) {
-            LightText(text = value, variant = LightTextVariant.Paragraph, lighten = !emphasizeValue)
+            LightText(text = value, variant = LightTextVariant.Detail, lighten = !emphasizeValue)
         }
     }
 }

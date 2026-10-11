@@ -58,13 +58,10 @@ fun ListScrollDialEffect(listState: LazyListState) {
     }
 }
 
-/** Steps a scrolling menu by about one menu row per [ScrollDial.listItems]. */
+/** Steps a scrolling menu by one menu row per [ScrollDial.listItems]. */
 @Composable
 fun MenuScrollDialEffect(scrollState: ScrollState) {
-    val rowPx = with(LocalDensity.current) {
-        lightTextStyle(LightTextVariant.Copy).lineHeight.toPx() +
-            (2 * PhotonGrid.MENU_ROW_PADDING).gridUnitsAsDp().toPx()
-    }
+    val rowPx = with(LocalDensity.current) { PhotonGrid.MENU_ROW_HEIGHT.gridUnitsAsDp().toPx() }
     ScrollDialEffect { event ->
         scrollState.scrollBy(event.direction * event.setting.listItems * rowPx)
     }

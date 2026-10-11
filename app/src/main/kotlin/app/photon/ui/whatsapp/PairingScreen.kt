@@ -26,10 +26,10 @@ import app.photon.data.model.string
 import app.photon.service.Sessions
 import app.photon.ui.shared.QrPanel
 import app.photon.ui.shared.components.LightInputField
+import app.photon.ui.shared.components.MenuRow
 import app.photon.ui.shared.components.PageScrollView
 import app.photon.ui.shared.components.backButton
 import app.photon.ui.shared.generateQrBitmap
-import app.photon.ui.theme.PhotonColors
 import app.photon.ui.theme.PhotonGrid
 import com.thelightphone.sdk.ui.LightBarButton
 import com.thelightphone.sdk.ui.LightBottomBar
@@ -39,7 +39,6 @@ import com.thelightphone.sdk.ui.LightThemeTokens
 import com.thelightphone.sdk.ui.LightTopBar
 import com.thelightphone.sdk.ui.LightTopBarCenter
 import com.thelightphone.sdk.ui.gridUnitsAsDp
-import com.thelightphone.sdk.ui.lightClickable
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.decodeFromJsonElement
@@ -160,14 +159,10 @@ fun PairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
                         keyboardActions = KeyboardActions(onDone = { requestCode() }),
                     )
 
-                    val canRequest = phone.isNotBlank() && !loading
-                    LightText(
-                        text = if (loading) "REQUESTING…" else "GET CODE",
-                        variant = LightTextVariant.Copy,
-                        color = if (canRequest) null else PhotonColors.Faint,
-                        modifier = Modifier
-                            .lightClickable(enabled = canRequest) { requestCode() }
-                            .padding(vertical = PhotonGrid.MENU_ROW_PADDING.gridUnitsAsDp()),
+                    MenuRow(
+                        label = if (loading) "Requesting…" else "Get Code",
+                        enabled = phone.isNotBlank() && !loading,
+                        onClick = ::requestCode,
                     )
 
                     code?.let { c ->

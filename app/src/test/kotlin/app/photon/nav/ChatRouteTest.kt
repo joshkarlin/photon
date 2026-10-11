@@ -92,11 +92,11 @@ class ChatRouteTest {
         rule.onNodeWithText("SMS ▾").assertExists()
 
         // No WhatsApp session has reported logged_out: its chats, not pairing.
-        pick("WHATSAPP")
+        pick("WhatsApp")
         assertEquals("WHATSAPP", nav.currentBackStackEntry?.arguments?.getString("platform"))
 
         // Signal isn't linked here: pairing.
-        pick("SIGNAL")
+        pick("Signal")
         assertEquals(Routes.SIGNAL_PAIRING, nav.currentBackStackEntry?.destination?.route)
     }
 

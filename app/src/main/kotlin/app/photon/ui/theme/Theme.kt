@@ -48,10 +48,10 @@ object PhotonGrid {
      */
     const val MARGIN = 2f
 
-    /** Vertical padding of a menu row, matching the SDK examples. */
-    const val MENU_ROW_PADDING = 0.75f
+    /** Height of a menu row, as LightOS Settings spaces its rows. */
+    const val MENU_ROW_HEIGHT = 5f
 
-    /** Height of a conversation-list row. */
+    /** Height of a conversation-list row, as LightOS Messages spaces its rows. */
     const val LIST_ROW_HEIGHT = 4f
 
     /** Side margins of the message thread (the LP3 thread uses two units). */
