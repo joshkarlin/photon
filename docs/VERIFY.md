@@ -331,6 +331,20 @@ sqlite3 /tmp/photon/app.db
   - When a count drops below 10, it shows `Uploaded fresh keys via KeysApi: …`.
   - `Failed to upload pre-keys` never appears. A failed refill would be retried on the next connect.
 
+#### S11. Mutes follow the primary
+- **Do:**
+  1. After upgrading, keep the primary online for a minute.
+  2. On the primary, mute a Signal DM and a group for 1 hour.
+  3. Change the mute to forever, then unmute.
+  4. Let a 1-hour mute run out.
+  5. Force-stop Photon, change a mute on the primary, then reopen Photon.
+- **Expect:**
+  1. logcat shows `Requested keys sync from primary`, then `Stored the storage key…`, then a `Storage manifest v…` line.
+  2. Within seconds a `fetchLatest(STORAGE_MANIFEST)` arrives and both chats show the muted mark. New messages raise unread but post no notification, and a group call start posts nothing. A 1:1 call in the muted DM still rings and shows as missed.
+  3. Each change applies within seconds.
+  4. Notifications resume and the mark clears within about 45s.
+  5. The change applies on connect.
+
 ### SMS
 
 #### SMS1. Sends show sent or failed, and failed ones retry
