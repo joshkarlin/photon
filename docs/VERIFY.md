@@ -4,23 +4,15 @@ Fixes that are implemented (with tests where practical) but not yet confirmed on
 
 Each check has an id (A1, W3, …) so a result can be reported in one line, for example "W3 fails: no missed-call row".
 
-## Start here (v0.4.0-rc.1)
+## Start here (v0.4.0-rc.2)
 
-These cover the riskiest changes in v0.4.0-rc.1. Run them first, in this order:
+These cover the riskiest and most important changes in v0.4.0-rc.2. Run them first, in this order. The rc.1 checks still await confirmation too, with their own [Start here](#start-here-v040-rc1) list at the top of the rc.1 section.
 
-1. [A1](#a1-upgrade-in-place-over-v034) Upgrade in place over v0.3.4 (minSdk 34, data intact)
-2. [A2](#a2-database-migrations-ran) Database migrations ran on both platforms
-3. [S1](#s1-signal-works-on-the-production-libsignal-library) Signal works on the production libsignal library
-4. [W1](#w1-the-bridge-runs-over-stdinstdout) WhatsApp bridge runs over stdin/stdout
-5. [W2](#w2-the-bridge-restarts-and-resets-cleanly) WhatsApp bridge restarts and resets cleanly
-6. [W3](#w3-calls) WhatsApp calls
-7. [S2](#s2-calls) Signal calls
-8. [D1](#d1-lp3-contacts-name-people-everywhere) LP3 contacts name people on every platform
-9. [N1](#n1-tapping-a-notification-opens-its-chat) Tapping a notification opens its chat
-10. [A3](#a3-every-platforms-chats-open-and-go-back) Every platform's chats open and go back (one chat screen for all)
-11. [SMS1](#sms1-sends-show-sent-or-failed-and-failed-ones-retry) SMS sends show sent or failed, and retry
-12. [S11](#s11-mutes-follow-the-primary) and [W7](#w7-mutes) Mutes from the primary silence chats on both platforms
-13. [N5](#n5-notification-levels) Notification levels: Sound, Vibrate, Silent and Off
+1. [W9](#w9-re-pairing-recovers-history) and [W10](#w10-first-messages-to-and-from-someone-new) Re-pair WhatsApp to recover history, then check that first messages to and from someone new appear
+2. [U6](#u6-lightos-layout-parity) LightOS layout parity: scroll bar, text size and margins, side by side with LightOS Messages and Settings
+3. [NM1](#nm1-the-to-field-and-the-keyboard)–[NM4](#nm4-a-new-chat-on-each-platform) New message
+4. [AT1](#at1-the-attachment-sheet) and [AT2](#at2-camera-photos-and-files-send) The attachment sheet, including whether Camera shows
+5. [M1](#m1-what-a-long-press-offers) and [M2](#m2-the-action-pages) The long-press menu
 
 ## Tools
 
@@ -42,18 +34,222 @@ sqlite3 /tmp/photon/app.db
 
 **Processes.** `adb shell pidof app.photon` gives Photon's pid. The bridge runs as a separate `libgobridge.so` process: `adb shell ps -A | grep libgobridge`.
 
-**Re-pair.** Go to Settings → Connections → WhatsApp (or Signal) → RESET, then link again. WhatsApp history sync only runs at pairing, so a WhatsApp fix applied when a message is stored doesn't change rows stored before the fix until you re-pair.
+**Re-pair.** Go to Settings → Connections → WhatsApp (or Signal) → Reset, then link again. WhatsApp history sync only runs at pairing, so a WhatsApp fix applied when a message is stored doesn't change rows stored before the fix until you re-pair.
 
 "Other phone" means your primary phone or a contact's phone, whichever the step needs.
 
+## v0.4.0-rc.2
+
+### WhatsApp
+
+#### W9. Re-pairing recovers history
+- **Was:** since June (v0.3.0), history sync at pairing stored empty chat rows and no messages, so a re-pair left chats missing or empty.
+- **Do:** after installing rc.2, go to Settings → Connections → WhatsApp → Reset, then link again. Watch `adb logcat -s GoBridge | grep -E "History sync|Failed to store history"` until the list stops showing "syncing".
+- **Expect:**
+  - Logcat shows `History sync complete: N conversations, M messages` with M above 0, and no `Failed to store history for …`.
+  - Your chats come back with their recent messages, within Settings › Storage (default 50 per chat, 7 days). Opening one shows its messages.
+  - `SELECT COUNT(DISTINCT conversation_jid), COUNT(*) FROM messages;` on `messages.db` (see Tools) shows the chats and messages restored.
+- **Caveats:** Reset clears Photon's WhatsApp messages before the re-sync. History only covers what WhatsApp sends at pairing, so this is the one way to recover chats lost since June.
+
+#### W10. First messages to and from someone new
+- **Was:** since June (v0.3.0), the first message of every new WhatsApp chat was dropped. A first send to someone new went out but never showed, a first message from someone new never appeared, and a missed call from a new number left no row.
+- **Do:** with numbers that have never had a WhatsApp chat with you in Photon (yours, or a willing contact's):
+  1. Start a chat from New message (NM4) and send one message.
+  2. Have someone new message you first.
+  3. Have a new number call you and let it ring out.
+- **Expect:**
+  1. The message shows as sent, and the chat is listed under their name.
+  2. Their message appears in a new chat, with a notification.
+  3. The new chat has a `Missed voice call` row.
+
+  `GoBridge` never logs `Failed to store message`, `Failed to record call` or `FOREIGN KEY constraint failed`.
+- **Caveats:** send only to yourself or a willing contact.
+
+### LightOS layout
+
+#### U6. LightOS layout parity
+- **Was:** on rc.1 the chat list's scroll bar sat too far from the screen's edge, with a gap between the times and the bar, and text was smaller than LightOS's.
+- **Do:** compare Photon's chat list and Settings side by side with LightOS Messages and Settings. Scroll a long chat list and a long menu. For exact positions, take a screenshot of each (`adb shell screencap -p /data/local/tmp/s.png && adb pull /data/local/tmp/s.png && adb shell rm /data/local/tmp/s.png`) and measure it at 1080px wide.
+- **Expect:**
+  - Chat names and menu labels are the same size as LightOS Messages names and Settings items (56–59px cap height).
+  - Content starts and ends at LightOS's margins, x 80 and x 1000.
+  - The scroll bar is at the right edge, in the margin (track at about x 1040), as in LightOS Settings.
+  - Times end at the right margin in one column, with only the margin between them and the bar. Unread counts sit just before the times.
+  - Chat-list rows are 160px apart, as in LightOS Messages. Menu rows are 200px apart, as in LightOS Settings.
+  - The main list starts below an empty top-bar height, as LightOS Messages does.
+
+#### U7. Chat list bottom bar and the platform picker
+- **Was:** the list had a top bar whose title opened the picker, with Settings at the top right. The picker had no Back and blocked the system's.
+- **Do:** on the main list, tap each bottom-bar item in turn. In the picker, press its Back, then the system Back, then pick each platform. Look at a list while Photon starts, and an empty one.
+- **Expect:**
+  - There's no top bar. The bottom bar holds Settings (left), the filter (centre: ALL CHATS, SMS, WHATSAPP or SIGNAL) and New message (right), and stays put while the list scrolls.
+  - The filter opens the picker, titled "Chats", with Back at the top left. Either Back returns to the list unchanged. Picking a platform lists its chats and shows its name in the bar.
+  - While loading, the list shows nothing. An empty list reads "no messages" (Signal: "no messages yet"; WhatsApp: "connecting", "syncing" or "no messages yet"), in lower case, and the bar stays.
+
+#### U8. Chat-list rows
+- **Was:** a muted chat's mark sat between its count and its time, so its count stood further left than other rows'.
+- **Do:** look at a list with unread chats, a muted chat with unread messages, and a chat with a very long name, in All Chats and in one platform.
+- **Expect:**
+  - Each row ends with the muted mark, the count and the time, in that order. Times form one column at the right margin, and counts line up beside them, muted or not.
+  - Names are in the large LightOS size and end in `…` before the mark, count and time.
+  - Only All Chats rows start with a platform icon.
+
+#### U9. Settings
+- **Was:** labels were in ALL CAPS and a size smaller than LightOS's, with values in capitals. Settings › Chat and Storage showed defaults (Sound, On, 50, 7 days) for a moment before the stored values.
+- **Do:** open Settings and each page under it. Cycle Notifications, Compose and Keyboard in Settings › Chat. Turn the dial on a menu. Enter a phone number on WhatsApp's pairing-code screen (during W9).
+- **Expect:**
+  - Labels are in Title Case ("Scroll Dial", "Messages per Chat", "Refresh Connection"), with values beneath in sentence case ("Full screen", "Not linked", "Connected").
+  - Rows are 5 grid units (200px) apart, starting straight under the top bar.
+  - Chat and Storage show their rows only once the stored values load. No default flashes first.
+  - Notifications, Compose and Keyboard still cycle and take effect (N5, U2, U3).
+  - The dial moves a menu by whole rows.
+  - The version line reads `Photon <version>`.
+  - On the pairing-code screen, Get Code is a menu row, faint until a number is entered.
+
+#### U10. Media viewer
+- **Was:** Save was a SAVE TO DEVICE button in a bottom bar, confirmed by a toast, and tapping anywhere closed the viewer.
+- **Do:** open a received photo, tap Save, then tap the photo, then press Back. Do the same with a video.
+- **Expect:**
+  - While it downloads, the page reads "downloading…".
+  - Save is a download-arrow icon at the top right. Tapped, it turns into the "downloaded" arrow and stops responding, with no toast. The photo is in the phone's Pictures (a video in Movies).
+  - There's no bottom bar. Tapping the media does nothing. Only Back, at the top left or the system's, closes the viewer.
+
+### New message
+
+Send only to yourself or a willing contact.
+
+#### NM1. The To field and the keyboard
+- **Do:** with Keyboard: System, tap New message (bottom right of the chat list). Type part of a name, press Enter, then tap the field. Tap the keypad button, type digits, then tap ABC. Turn the dial. Press Back twice. Repeat with Keyboard: Light.
+- **Expect:**
+  1. The page opens with Back and "New message" in the top bar, and the keyboard is already up: the installed keyboard (System), or the LP3 keyboard docked above the bottom bar (Light). The empty field reads "Name or number".
+  2. Matches change with every key. Enter puts the keyboard away and the matches stay. Tapping the field brings the keyboard back.
+  3. The keypad button switches to number entry in both modes (the phone keypad, or the LP3 keyboard's number layer). ABC switches back.
+  4. The dial scrolls the matches, putting the keyboard away first.
+  5. The first Back puts the keyboard away. The next returns to the chat list.
+  6. Nothing typed shows no matches. Text that matches nothing reads "No matches".
+
+#### NM2. Finding people and groups
+- **Do:** search for a contact by the start of their first name, by a later word of their name, and with different case or without accents ("zoe" for "Zoë"). Search for 3 or more digits of a number in national form ("07700") and in international form ("+44 7700"). Type a whole number nobody has. Search for a group. Pick a person whose chats are all on one platform, then a group.
+- **Expect:**
+  - Names match ignoring case and accents. Names that start with the query come first, then a later word, then anywhere, and within each the most recent chats first.
+  - Digits find people by any of their numbers, written either way, with the matched number under the name.
+  - A whole number gets a "Send to +44 …" row at the top.
+  - People come before groups. An LP3 contact and their chats on each platform are one row, with the platforms under the name ("WhatsApp · SMS"). Groups read "WhatsApp group" or "Signal group".
+  - A person whose chats are all on one platform opens that chat at once. A group opens.
+  - The chat opens in New message's place, so Back from it returns to the chat list.
+
+#### NM3. Send via
+- **Do:** pick a person with chats on two platforms, then a contact with no chats. Turn airplane mode on and pick a contact with no WhatsApp chat. Pick someone Signal doesn't know.
+- **Expect:**
+  - A "Send via" page titled with the person lists WhatsApp, Signal and SMS. Each has a detail line: "existing chat", "new chat" (with the number, when they have more than one), or, greyed, why not: "not on WhatsApp", "not known to Signal", "WhatsApp disconnected" or "couldn't check WhatsApp". A row reads "checking…" while its platform answers.
+  - In airplane mode, WhatsApp reads "WhatsApp disconnected". An existing WhatsApp chat still reads "existing chat".
+  - Greyed rows don't respond. Back returns to the search with the query and matches kept.
+
+#### NM4. A new chat on each platform
+- **Do:** on each of WhatsApp, Signal and SMS, start a chat with someone you have no chat with there, through Send via → "new chat" (or "Send to" a typed number). Send one message, then press Back.
+- **Expect:**
+  - Before the first message, the chat is titled with the LP3 contact's name, or the formatted number. On Signal, a contact-sync or profile name can stand in for the LP3 name.
+  - The message sends and arrives.
+  - Back returns to the chat list, where the new chat is listed under the same name.
+- **Caveats:** Signal only offers people it already knows (see README Limitations). The WhatsApp chat is also W10's first check, and the Signal one S12's.
+
+### Attachments
+
+#### AT1. The attachment sheet
+- **Was:** attach (+) opened the document picker straight away, for photos and videos only.
+- **Do:** in a WhatsApp chat and a Signal chat, with Compose: Inline and then Full screen, tap +. Close it with the down chevron, then with the Back icon, then with the system Back. Check whether an app on the LP3 can take photos for Photon: `adb shell cmd package query-activities -a android.media.action.IMAGE_CAPTURE`. Then open an SMS chat.
+- **Expect:**
+  - A full page opens with Back and the chat's title in the top bar, unlabelled Camera, Photos and Files icons in a row in the lower part of the page, and a down chevron in the bottom bar.
+  - Camera shows only if that command lists an activity. Without one, the row is Photos and Files.
+  - Each way of closing returns to the thread, with the keyboard down.
+  - The mic stays where it was, with the same icon in both styles: inline `[+] [field] [mic]` (send once there's text), full screen `[+] [mic] [compose]`.
+  - SMS chats have no +.
+
+#### AT2. Camera, Photos and Files send
+- **Do:**
+  1. If Camera shows: tap it, grant camera access when asked, take a photo and accept it. Then take another and cancel.
+  2. Tap Photos and pick a photo, then a video.
+  3. Tap Files and pick a PDF. Look for an audio file in the picker.
+- **Expect:**
+  1. The accepted photo appears in the thread and arrives on the other phone. The cancelled one sends nothing. Afterwards, `adb shell run-as app.photon ls files/camera` (debug build) lists nothing.
+  2. Android's photo picker opens, and both send and arrive.
+  3. The document picker opens, and the PDF arrives on the other phone as a document. Audio files can't be picked.
+- **Caveats:** the file name the recipient sees is AT3's check.
+
+#### AT3. Sent documents keep their file name *(placeholder)*
+- **Placeholder:** this fix is still landing on another branch. Steps to follow: a document sent from Files, and a failed one retried, arrive on WhatsApp and on Signal under their real file name.
+
+### Message actions
+
+#### M1. What a long-press offers
+- **Was:** long-press opened one page with the emoji and Delete side by side, and offered reactions on your own messages.
+- **Do:** in a WhatsApp chat and a Signal chat, long-press an incoming message, one of your sent messages, a failed one (send in airplane mode), a call row and a `[ deleted ]` message, and swipe right on each. In an SMS chat, long-press a sent message, a received one and a failed one.
+- **Expect:** a full-screen menu with Back and a one-line preview of the message in the top bar, and large rows without dividers:
+  - Incoming: Reply, React, Delete.
+  - Your sent message: Reply, Delete, Delete for Everyone. Never React.
+  - Failed: Retry, Delete.
+  - Call row or deleted message: Delete.
+  - SMS: sent and received messages have no long-press and don't buzz. A failed one offers Retry.
+
+  Swipe-to-reply works on exactly the messages that offer Reply. Opening the menu puts the keyboard away, and turning the dial doesn't move the thread behind it.
+
+#### M2. The action pages
+- **Do:** from the menu, try each action: Reply; React, then an emoji; Delete; Delete for Everyone, then Back on its page; Delete for Everyone again, then DELETE. Press Back on the menu and on the React page.
+- **Expect:**
+  - Reply returns to the thread with the quote ready. With Compose: Full screen, it opens the editor with the quote.
+  - React opens a page of emoji. Picking one returns to the thread with the reaction shown, on the other phone too.
+  - Delete removes the message at once, in Photon only. It stays on the primary (see README Limitations).
+  - Delete for Everyone opens a page that says what it does, with DELETE in the bottom bar. Back there leaves the message alone. DELETE removes it here and on the other phone.
+  - Back on any page returns to the thread.
+
+### Signal
+
+#### S12. A first DM starts its conversation
+- **Was:** a first DM to someone Photon knew only from contact sync stored the message but no conversation, so the chat wasn't listed and vanished on leaving it.
+- **Do:** from New message, start a Signal chat with someone known from contact sync who has no chat yet, send one message and go back (NM4). Then do the same with another such person in airplane mode, so the send fails.
+- **Expect:** both chats are listed after you leave them. The failed one shows `failed · tap to retry`, and the retry sends it.
+
+#### S13. The safety-number review page
+- **Was:** the review was a Material dialog with ACCEPT CHANGE and CANCEL buttons.
+- **Do:** when a contact's safety number changes (they reinstall Signal, for example), open their chat and tap the notice under the top bar ("Review" is underlined). Press Back. Open it again and tap ACCEPT CHANGE.
+- **Expect:**
+  - A full-screen page titled "Safety Number", with Back at the top left, the explanation, and ACCEPT CHANGE in the bottom bar.
+  - It appears and goes without animation, with nothing showing behind it.
+  - Its top and bottom bars sit where they do on other pages, clear of the status bar and the navigation area.
+  - Back returns to the chat with the notice still there. Accepting removes the notice and allows sending.
+- **Caveats:** needs a contact whose safety number has changed. Check it when one comes up.
+
+### App
+
+#### A7. Reset asks for confirmation *(placeholder)*
+- **Placeholder:** this fix is still landing on another branch. Steps to follow: Reset under Settings → Connections → WhatsApp and → Signal opens a LightOS page that asks before anything is cleared.
+
 ## v0.4.0-rc.1
+
+### Start here (v0.4.0-rc.1)
+
+These cover the riskiest changes in v0.4.0-rc.1. Run them after the rc.2 list, in this order:
+
+1. [A1](#a1-upgrade-in-place-over-v034) Upgrade in place over v0.3.4 (minSdk 34, data intact)
+2. [A2](#a2-database-migrations-ran) Database migrations ran on both platforms
+3. [S1](#s1-signal-works-on-the-production-libsignal-library) Signal works on the production libsignal library
+4. [W1](#w1-the-bridge-runs-over-stdinstdout) WhatsApp bridge runs over stdin/stdout
+5. [W2](#w2-the-bridge-restarts-and-resets-cleanly) WhatsApp bridge restarts and resets cleanly
+6. [W3](#w3-calls) WhatsApp calls
+7. [S2](#s2-calls) Signal calls
+8. [D1](#d1-lp3-contacts-name-people-everywhere) LP3 contacts name people on every platform
+9. [N1](#n1-tapping-a-notification-opens-its-chat) Tapping a notification opens its chat
+10. [A3](#a3-every-platforms-chats-open-and-go-back) Every platform's chats open and go back (one chat screen for all)
+11. [SMS1](#sms1-sends-show-sent-or-failed-and-failed-ones-retry) SMS sends show sent or failed, and retry
+12. [S11](#s11-mutes-follow-the-primary) and [W7](#w7-mutes) Mutes from the primary silence chats on both platforms
+13. [N5](#n5-notification-levels) Notification levels: Sound, Vibrate, Silent and Off
 
 ### Install & App
 
 #### A1. Upgrade in place over v0.3.4
 - **Do:** with v0.3.4 installed and WhatsApp and Signal linked, run `adb install -r` with the rc.1 APK, then open Photon.
 - **Expect:** it installs and opens on the chat list with every chat, unread badge and link intact. No re-pair is needed.
-- **Caveats:** `INSTALL_FAILED_OLDER_SDK` means the phone is below Android 14 (check `adb shell getprop ro.build.version.sdk`, which needs to be 34 or higher). Going back to v0.3.4 afterwards breaks Signal, because v0.3.4 can't open the upgraded Signal database. It would need a Signal RESET.
+- **Caveats:** `INSTALL_FAILED_OLDER_SDK` means the phone is below Android 14 (check `adb shell getprop ro.build.version.sdk`, which needs to be 34 or higher). Going back to v0.3.4 afterwards breaks Signal, because v0.3.4 can't open the upgraded Signal database. It would need a Signal Reset.
 
 #### A2. Database migrations ran
 - **Do:** watch logcat during A1's first start. Afterwards, open the Signal database (see Tools).
@@ -67,35 +263,35 @@ sqlite3 /tmp/photon/app.db
 - **Was:** each platform had its own chat screen, chat list and routes. There is now one chat screen and one chat list for all three.
 - **Do:**
   1. From All Chats, open a WhatsApp DM, a WhatsApp group, a Signal DM, a Signal group and an SMS chat, pressing Back after each.
-  2. Tap the title and pick SMS, WhatsApp, Signal and All Chats in turn, opening a chat from each.
-  3. In a WhatsApp chat and a Signal chat: open a photo, swipe to reply, long-press to react, delete a message for you, and delete one of yours for everyone.
+  2. Tap the filter in the bottom bar (ALL CHATS) and pick SMS, WhatsApp, Signal and All Chats in turn, opening a chat from each.
+  3. In a WhatsApp chat and a Signal chat: open a photo, swipe to reply, long-press → React, long-press → Delete, and delete one of yours for everyone (long-press → Delete for Everyone).
   4. Open an SMS chat from an alphanumeric sender (a bank, for example).
 - **Expect:**
   1. Every chat opens with its messages, and Back returns to the list you came from.
-  2. A platform's list shows only that platform's chats. Only All Chats shows platform icons. Settings (top right) opens, and Back returns to the list.
+  2. A platform's list shows only that platform's chats. Only All Chats shows platform icons. Settings (bottom left) opens, and Back returns to the list.
   3. Each action works. The delete for everyone also goes from the other phone.
-  4. SMS chats offer no attach, voice note, reply, reaction or delete. An alphanumeric sender's title isn't tappable.
+  4. SMS chats offer no attach, voice note, reply, reaction or delete, and sent or received SMS have no long-press. An alphanumeric sender's title isn't tappable.
 
 #### A4. Pairing only when unlinked
 - **Do:**
-  1. With WhatsApp linked, force-stop Photon, reopen it, and pick WhatsApp from the title picker straight away, while it's still connecting.
-  2. After a WhatsApp RESET (A5), pick WhatsApp again.
+  1. With WhatsApp linked, force-stop Photon, reopen it, and pick WhatsApp from the platform picker (the filter in the bottom bar) straight away, while it's still connecting.
+  2. After a WhatsApp Reset (A5), pick WhatsApp again.
   3. With Signal unlinked, pick Signal.
 - **Expect:**
-  1. A cold start always lands on the chat list. Picking a linked WhatsApp shows its chats (or "Connecting" while the list is empty), never the QR screen.
+  1. A cold start always lands on the chat list. Picking a linked WhatsApp shows its chats (or "connecting" while the list is empty), never the QR screen.
   2. An unlinked WhatsApp opens the WhatsApp pairing screen.
   3. An unlinked Signal opens the Signal pairing screen.
   
   After pairing, you land on that platform's chats.
 
 #### A5. Reset each platform
-- **Do:** Settings → Connections → WhatsApp → RESET, then link again. Then do the same for Signal.
+- **Do:** Settings → Connections → WhatsApp → Reset, then link again. Then do the same for Signal. (Reset is gaining a confirmation page: see A7.)
 - **Expect:**
-  - Each RESET opens that platform's pairing screen, and Back from it returns to the chat list.
-  - After the WhatsApp RESET, `adb shell ps -A | grep -c libgobridge` prints 1 and the UI stays responsive.
-  - The Signal RESET doesn't crash. It used to crash, because it navigated to pairing from a background thread.
-  - The Signal re-link is clean: messages flow both ways, and Settings shows CONNECTED.
-- **Caveats:** RESET wipes the platform's messages. WhatsApp re-syncs history at pairing, but Signal has no history. Run this check late.
+  - Each Reset opens that platform's pairing screen, and Back from it returns to the chat list.
+  - After the WhatsApp Reset, `adb shell ps -A | grep -c libgobridge` prints 1 and the UI stays responsive.
+  - The Signal Reset doesn't crash. It used to crash, because it navigated to pairing from a background thread.
+  - The Signal re-link is clean: messages flow both ways, and Settings shows Connected.
+- **Caveats:** Reset wipes the platform's messages. WhatsApp re-syncs history at pairing, but Signal has no history. The WhatsApp half can double as W9.
 
 #### A6. One status vocabulary
 - **Was:** each platform stored message status in its own words. Incoming WhatsApp messages were `sent`, and Signal and SMS ones were `received`.
@@ -127,15 +323,15 @@ sqlite3 /tmp/photon/app.db
   - A DM notification is titled with the person.
 
 #### N5. Notification levels
-- **Do:** after upgrading, open Settings › Chat. Then cycle NOTIFICATIONS through each level and receive a message, and a call, at each one.
+- **Do:** after upgrading, open Settings › Chat. Then cycle Notifications through each level and receive a message, and a call, at each one.
 - **Expect:**
-  - It shows SOUND if notifications were on before, OFF if they were off.
-  - SOUND: heads-up, sound and vibration, as before.
-  - VIBRATE: heads-up and vibration, no sound.
-  - SILENT: shade and badge only, no sound or buzz. A call still shows, silently.
-  - OFF: nothing for messages or calls.
+  - It shows Sound if notifications were on before, Off if they were off.
+  - Sound: heads-up, sound and vibration, as before.
+  - Vibrate: heads-up and vibration, no sound.
+  - Silent: shade and badge only, no sound or buzz. A call still shows, silently.
+  - Off: nothing for messages or calls.
   - Android's notification settings for Photon list "Messages", "Messages (vibrate)" and "Messages (silent)", and any changes you'd made to "Messages" are kept.
-  - After a Signal delete-for-everyone, the notification is corrected without alerting. At OFF it's removed.
+  - After a Signal delete-for-everyone, the notification is corrected without alerting. At Off it's removed.
 
 ### Display names
 
@@ -163,7 +359,7 @@ sqlite3 /tmp/photon/app.db
 - **Expect:** their sender labels change to address-book names while the group is open, and logcat shows `Backfill: updated N contact names`.
 
 #### D5. Signal names stay put
-- **Do:** open a Signal DM, send and receive a few messages, then go to Settings → Connections → Signal → REFRESH CONNECTION. Separately, take a contact saved only on the primary phone (not on the LP3) whose name there differs from their Signal profile name. Force-stop and reopen Photon, which requests a contact sync.
+- **Do:** open a Signal DM, send and receive a few messages, then go to Settings → Connections → Signal → Refresh Connection. Separately, take a contact saved only on the primary phone (not on the LP3) whose name there differs from their Signal profile name. Force-stop and reopen Photon, which requests a contact sync.
 - **Expect:**
   - The DM title never changes.
   - After logcat shows `Sync message kinds: contacts`, the primary-only contact shows the primary's name.
@@ -186,8 +382,8 @@ sqlite3 /tmp/photon/app.db
 #### W2. The bridge restarts and resets cleanly
 - **Do:**
   1. Find the bridge's pid (see Tools) and kill it: `adb shell run-as app.photon kill <pid>` (debug build).
-  2. Tap Settings → Connections → WhatsApp → REFRESH CONNECTION a few times.
-  3. RESET is checked in A5.
+  2. Tap Settings → Connections → WhatsApp → Refresh Connection a few times.
+  3. Reset is checked in A5.
 - **Expect:**
   1. Within about a second, `PhotonService` logs `WhatsApp bridge not running; restarting in 1000ms`, and WhatsApp reconnects.
   2. `adb shell ps -T -p $(adb shell pidof app.photon) | grep -c gobridge-stdout` prints 1. `ps -A | grep -c libgobridge` also prints 1.
@@ -240,7 +436,7 @@ sqlite3 /tmp/photon/app.db
   1. The chat is silent until the mute ends, then notifies again.
   2. The "always" chat stays silent.
   3. The unmuted chat stays unmuted across the restart, with no `Backfilled mute end time` line. Each change logs `Mute update: … muted_until=…`.
-  4. Muted chats show a speaker-off mark by their time in the chat list and keep their unread badge. The mark goes when the mute ends or is removed (within about 45s for a timed mute). Calls in a muted chat still ring.
+  4. Muted chats show a speaker-off mark before their unread count and time in the chat list, and keep their unread badge. The mark goes when the mute ends or is removed (within about 45s for a timed mute). Calls in a muted chat still ring.
 
 #### W8. Retention survives restarts
 - **Do:** set Settings → Storage to 200 messages and 30 days. Force-stop and reopen Photon.
@@ -279,12 +475,12 @@ sqlite3 /tmp/photon/app.db
 #### S3. Connection and reconnects
 - **Do:**
   1. Turn airplane mode on until logcat shows `Reconnecting in 160s`, then turn it off.
-  2. Tap REFRESH CONNECTION three times.
+  2. Tap Refresh Connection three times.
   3. Unlink Photon on the primary.
 - **Expect:**
   1. `Network validated; reconnecting now` within seconds, without waiting out the 160s.
   2. Each tap logs one `WebSocket opened, reading messages...`, and a new message then arrives exactly once.
-  3. Settings shows NOT LINKED, and logcat shows `Signal server rejected our credentials (HTTP 401/403) 2 times`, with no further retries.
+  3. Settings shows Not linked, and logcat shows `Signal server rejected our credentials (HTTP 401/403) 2 times`, with no further retries.
 
 #### S4. Notifications and deletes
 - **Do:**
@@ -314,7 +510,7 @@ sqlite3 /tmp/photon/app.db
   A read sync that fails while offline goes out once Signal reconnects, if the chat is still open.
 
 #### S8. Retention
-- **Do:** set Messages per chat to 25 and open a Signal chat with more than 25 messages.
+- **Do:** set Messages per Chat to 25 and open a Signal chat with more than 25 messages.
 - **Expect:** within about 5 minutes, logcat shows `Pruned N Signal messages (cap=25/chat, …)`, and the chat keeps its newest 25.
 
 #### S9. PNI conversations merge into the ACI
@@ -374,23 +570,23 @@ sqlite3 /tmp/photon/app.db
 ### UI and settings
 
 #### U1. Settings › Chat
-- **Do:** open Settings › Chat. Tap SCROLL DIAL, COMPOSE and KEYBOARD to cycle each, and use the dial at each SCROLL DIAL value.
+- **Do:** open Settings › Chat. Tap Scroll Dial, Compose and Keyboard to cycle each, and use the dial at each Scroll Dial value.
 - **Expect:**
-  - The rows read NOTIFICATIONS, THUMBNAILS, SCROLL DIAL, COMPOSE, KEYBOARD.
-  - SLOW, MEDIUM and FAST move lists and threads further per turn.
-  - OFF leaves the dial to LightOS, so turning it changes brightness.
-  - After the upgrade, SCROLL DIAL shows your old Chat scroll speed.
+  - The rows read Notifications, Thumbnails, Scroll Dial, Compose, Keyboard (Title Case since rc.2, see U9), each with its value beneath.
+  - Slow, Medium and Fast move lists and threads further per turn.
+  - Off leaves the dial to LightOS, so turning it changes brightness.
+  - After the upgrade, Scroll Dial shows your old Chat scroll speed.
 
 #### U2. Full-screen compose
-- **Do:** set COMPOSE to FULL SCREEN. In a WhatsApp chat:
-  1. Tap compose with KEYBOARD set to LIGHT, then with it set to SYSTEM.
+- **Do:** set Compose to Full screen. In a WhatsApp chat:
+  1. Tap compose with Keyboard set to Light, then with it set to System.
   2. Send.
   3. Swipe right on a message.
   4. Type, then press Back.
-  5. Record a voice note and attach a photo from the bottom bar.
+  5. Record a voice note, and attach a photo (+, then Photos) from the bottom bar.
   6. Open an SMS chat.
 - **Expect:**
-  1. A full-screen editor opens, with the LP3 keyboard and no system keyboard (LIGHT), or with Gboard (SYSTEM).
+  1. A full-screen editor opens, with the LP3 keyboard and no system keyboard (Light), or with Gboard (System).
   2. Send returns to the thread.
   3. Compose opens with the quote.
   4. The draft is kept.
@@ -398,11 +594,12 @@ sqlite3 /tmp/photon/app.db
   6. The bottom bar shows only compose.
 
 #### U3. Inline compose
-- **Do:** set COMPOSE to INLINE and KEYBOARD to LIGHT. Tap the text field, then tap the thread. Show the keyboard again and turn the dial, then press Back. Show it again, long-press a message, swipe one, and send a message.
+- **Do:** set Compose to Inline and Keyboard to Light. Tap the text field, then tap the thread. Show the keyboard again and turn the dial, then press Back. Show it again, swipe a message, send a message, then long-press a message.
 - **Expect:**
   - The LP3 keyboard docks under the field.
   - Tapping the thread, turning the dial or pressing Back hides it.
-  - A long-press or swipe leaves it up, and so does sending.
+  - A swipe leaves it up, and so does sending.
+  - A long-press opens the full-screen action menu (M1) and puts the keyboard away, as any full-screen page does.
 
 #### U4. Look and feel
 - **Was:** long chat titles overlapped the back button.
@@ -410,7 +607,7 @@ sqlite3 /tmp/photon/app.db
 - **Expect:**
   - Text is in Akkurat, the LightOS font.
   - Tapping a row or button gives a haptic tick and no ripple.
-  - Menus are large left-aligned rows without dividers.
+  - Menus are large left-aligned rows in Title Case, without dividers.
   - Long titles end in `…` clear of the Back icon.
 
 #### U5. Thread styles
@@ -470,7 +667,7 @@ Fixes from releases before v0.4.0-rc.1 that still await confirmation.
 #### Photo send silently vanished
 - **Was:** picking a photo to send could do nothing at all when the file couldn't be read. No sending message and no failed message appeared.
 - **Changed:** the picker copies the file off the main thread and only sends a non-empty file. If the copy fails, it shows a "Couldn't attach that file" toast.
-- **Verify:** tap attach (+) in a WhatsApp chat and send a photo. It appears in the thread and the recipient gets the photo. If you can find a file the picker can't read (a cloud-only item, for example), the toast appears instead of nothing happening.
+- **Verify:** in a WhatsApp chat, tap attach (+), then Photos, and send a photo. It appears in the thread and the recipient gets the photo. If you can find a file the picker can't read (a cloud-only item, for example), the toast appears instead of nothing happening.
 
 #### Unread badge stuck after opening a chat
 - **Was:** the badge only cleared if the read receipt to WhatsApp went through, so offline and `@lid` chats stayed unread.
@@ -491,7 +688,7 @@ Fixes from releases before v0.4.0-rc.1 that still await confirmation.
 #### Reactions and mark-read used unresolved `@lid` JIDs
 - **Was:** outgoing reactions, edits and mark-read used the raw JID, while incoming handlers used the resolved phone JID. As a result, group reactions could get detached from their message, edits didn't refresh, and unread badges could stick on `@lid` chats.
 - **Changed:** all three now resolve LIDs to phone JIDs the same way the incoming path does. Edits also broadcast `message_updated`.
-- **Verify:** in a group, long-press another member's message and react. The reaction shows on Photon and on the other phone. Then open a group that has unread messages: the badge clears in Photon and on the primary.
+- **Verify:** in a group, long-press another member's message, then React. The reaction shows on Photon and on the other phone. Then open a group that has unread messages: the badge clears in Photon and on the primary.
 - **Caveats:** Photon has no edit UI yet, so the edit path can't be tested on the device.
 
 ### Signal
@@ -508,7 +705,7 @@ Fixes from releases before v0.4.0-rc.1 that still await confirmation.
   - Name re-resolution never writes null.
   - Connect upkeep (at most every 10 minutes) re-fetches the title of any group whose name is blank, showing "Signal group" until the fetch succeeds.
   - Titles go through the shared naming policy, which never shows a raw id.
-- **Verify:** go to Settings → Connections → Signal → REFRESH CONNECTION. Groups show their real titles in the list and in chat headers, and logcat shows `Resolved group …: <title> (N members)`. Once the fetches succeed, `SELECT jid FROM conversations WHERE is_group = 1 AND (name IS NULL OR name = '');` returns nothing.
+- **Verify:** go to Settings → Connections → Signal → Refresh Connection. Groups show their real titles in the list and in chat headers, and logcat shows `Resolved group …: <title> (N members)`. Once the fetches succeed, `SELECT jid FROM conversations WHERE is_group = 1 AND (name IS NULL OR name = '');` returns nothing.
 
 #### Group messages from others not received
 - **Was:** in groups, Photon could send but never showed messages from other members, for two reasons:
@@ -531,7 +728,7 @@ Fixes from releases before v0.4.0-rc.1 that still await confirmation.
 - **Was:** the primary's Linked devices list showed text like "Photog==", because Photon sent the device name as plaintext.
 - **Changed:** registration encrypts the name with the identity key (`DeviceNameUtil.encryptDeviceName`).
 - **Verify:** after linking, on the primary phone go to Signal → Settings → Linked devices. Photon is listed as "Photon".
-- **Caveats:** only new links get the fix. A device linked before the fix needs Settings → Connections → Signal → RESET, then a new link.
+- **Caveats:** only new links get the fix. A device linked before the fix needs Settings → Connections → Signal → Reset, then a new link.
 
 #### Incoming media dropped
 - **Was:** Photon dropped incoming Signal attachments, so photos never appeared.
@@ -553,7 +750,7 @@ Fixes from releases before v0.4.0-rc.1 that still await confirmation.
 #### Video send untested *(partial, open in README)*
 - **Was:** Signal chats had no + attach button, so media couldn't be sent.
 - **Changed:** the attach button calls `SignalRepository.sendMedia`, and attachments upload through a REST upload-form request. Photo send was confirmed on device in v0.3.2-rc.2.
-- **Verify:** tap attach (+), pick a short video, and send it in a DM and in a group. It arrives and plays on the other phone.
+- **Verify:** tap attach (+), then Photos, pick a short video, and send it in a DM and in a group. It arrives and plays on the other phone.
 
 #### Read state not synced to the primary
 - **Was:** messages read in Photon stayed unread on the primary, because Photon never sent `SyncMessage.read`.
@@ -591,7 +788,7 @@ Fixes from releases before v0.4.0-rc.1 that still await confirmation.
 #### Voice-note button did nothing
 - **Was:** SMS chats showed a mic button, but SMS can't send audio, so recordings were thrown away.
 - **Changed:** the chat only offers what the platform supports, so SMS chats have no mic and no attach button.
-- **Verify:** with the text input empty, an SMS chat shows neither a mic nor an attach (+) icon in INLINE compose, and only compose in FULL SCREEN. WhatsApp and Signal chats still show both.
+- **Verify:** with the text input empty, an SMS chat shows neither a mic nor an attach (+) icon with Compose: Inline, and only compose with Full screen. WhatsApp and Signal chats still show both.
 
 ### App
 
@@ -606,13 +803,13 @@ Fixes from releases before v0.4.0-rc.1 that still await confirmation.
 
 #### No way to link from Settings
 - **Was:** the WhatsApp and Signal settings pages showed only a status when unlinked, with no way to link.
-- **Changed:** both pages show a LINK DEVICE row when unlinked, which opens the pairing screen. Both show the status as NOT LINKED.
-- **Verify:** the next time a platform is unlinked (during A5, for example), open Settings → Connections → WhatsApp, then Signal. Each shows STATUS NOT LINKED and a LINK DEVICE row that opens pairing.
+- **Changed:** both pages show a Link Device row when unlinked, which opens the pairing screen. Both show the status as Not linked.
+- **Verify:** the next time a platform is unlinked (during A5, for example), open Settings → Connections → WhatsApp, then Signal. Each shows Status: Not linked and a Link Device row that opens pairing.
 
 #### Voice notes untested *(partial, open in README)*
 - **State:** recording and sending are wired up for WhatsApp and Signal, but neither has been tested on device.
 - **Verify:**
-  1. In a WhatsApp chat, with the text input empty, tap the mic and grant microphone permission. A `● 0:07`-style timer appears between cancel (✕) and send icons. In FULL SCREEN compose, the bottom bar shows the same.
+  1. In a WhatsApp chat, with the text input empty, tap the mic and grant microphone permission. A `● 0:07`-style timer appears between cancel (✕) and send icons. With Compose: Full screen, the bottom bar shows the same.
   2. Tap send. The other phone receives a voice note that plays. Tapping ✕ instead discards the recording.
   3. Repeat steps 1–2 in a Signal chat.
   4. Check that incoming voice notes play on both platforms.
@@ -622,4 +819,4 @@ Fixes from releases before v0.4.0-rc.1 that still await confirmation.
 - **Fix lands**: its README Known issues line moves here with verification steps, under the release it ships in. A *(partial)* entry also keeps a one-line open entry in the README.
 - **User confirms on device**: delete the entry, and any *(partial)* README line it has. Only delete on the user's explicit confirmation. A code change or a passing test doesn't count. The fix history stays in git.
 - **Verification fails**: move it back to README Known issues as an open bug, saying what you saw.
-- When a release section empties, delete it. Entries still open when the next release is cut move under Earlier fixes.
+- When a release section empties, delete it. Each release candidate of the version in progress keeps its own section. Entries still open when the next version is released move under Earlier fixes.
