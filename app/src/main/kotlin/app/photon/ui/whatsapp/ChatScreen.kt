@@ -27,13 +27,15 @@ private fun formatJidAsPhone(jid: String): String {
 }
 
 /**
- * The read receipt to send for a chat's messages (newest first): the newest
- * incoming message's id plus up to 20 incoming ids, or null when that one is
- * already marked. Call rows are skipped — their ids are Photon's own, not
- * message ids WhatsApp can take a receipt for.
+ * The mark-read request for a chat's messages (newest first): the newest
+ * incoming row's id plus up to 20 incoming ids, or null when that one is
+ * already marked. Call rows count: a missed call is unread like a message, so
+ * a chat whose newest row is a call must still be marked read. The bridge
+ * leaves them out of the receipt it sends WhatsApp (their ids are Photon's
+ * own, or call logs WhatsApp takes no receipt for).
  */
 internal fun markReadRequest(messages: List<Message>, lastMarkedReadId: String?): Pair<String, List<String>>? {
-    val incoming = messages.filter { !it.isFromMe && it.contentType != "call" }
+    val incoming = messages.filter { !it.isFromMe }
     val newestId = incoming.firstOrNull()?.id ?: return null
     if (newestId == lastMarkedReadId) return null
     return newestId to incoming.take(20).map { it.id }
@@ -75,7 +77,7 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
         }
     }
 
-    val waState = PhotonService._wsClient?.whatsappState?.collectAsState()?.value
+    val waState = PhotonService._bridgeClient?.whatsappState?.collectAsState()?.value
     LaunchedEffect(waState) {
         if (waState == "connected") markRead()
     }
@@ -142,7 +144,7 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
             mediaMime = media.mediaMime,
             existingPath = media.mediaUrl,
             onDownloadMedia = { id ->
-                val resp = PhotonService.wsClient.downloadMedia(id)
+                val resp = PhotonService.bridgeClient.downloadMedia(id)
                 // Surface the bridge's actual error (e.g. expired CDN media)
                 // instead of letting the strict success-deserializer throw an
                 // opaque JSON parse error that hides the real cause.

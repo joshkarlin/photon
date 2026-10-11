@@ -50,7 +50,7 @@ private enum class PairingMode { CODE, QR }
 @Composable
 fun PairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
-    val ws = PhotonService._wsClient
+    val bridge = PhotonService._bridgeClient
     var mode by remember { mutableStateOf(PairingMode.QR) }
     var phone by remember { mutableStateOf("") }
     var code by remember { mutableStateOf<String?>(null) }
@@ -64,7 +64,7 @@ fun PairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
         loading = true; error = null
         scope.launch {
             try {
-                val resp = ws?.requestPairingCode(phone)
+                val resp = bridge?.requestPairingCode(phone)
                 val payload = resp?.payload
                 if (payload != null) {
                     code = Json.decodeFromJsonElement<PairingCodeResponse>(payload).code
@@ -80,8 +80,8 @@ fun PairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
         if (cached != null) qrBitmap = generateQrBitmap(cached)
     }
 
-    LaunchedEffect(ws) {
-        ws?.events?.collect { evt ->
+    LaunchedEffect(bridge) {
+        bridge?.events?.collect { evt ->
             when (evt.type) {
                 "pair_success" -> {
                     PhotonService.clearQrCache()
@@ -112,7 +112,7 @@ fun PairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
         PairingMode.QR -> {
             // QR mode — compact, no scrolling
             LaunchedEffect(Unit) {
-                try { ws?.requestQr() } catch (_: Exception) {}
+                try { bridge?.requestQr() } catch (_: Exception) {}
             }
 
             Column(

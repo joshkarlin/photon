@@ -14,7 +14,7 @@ import (
 )
 
 // Kotlin and the bridge talk over the bridge process's stdin and stdout: one
-// JSON envelope (WsMessage) per line in each direction; logs go to stderr.
+// JSON envelope (Envelope) per line in each direction; logs go to stderr.
 // Only the app that spawned the bridge holds these pipes — the localhost
 // WebSocket this replaced was open to every app on the device — and the bridge
 // exits when stdin closes, so it can't outlive the app.
@@ -26,7 +26,7 @@ type lineWriter struct {
 	w  io.Writer
 }
 
-func (lw *lineWriter) send(msg WsMessage) error {
+func (lw *lineWriter) send(msg Envelope) error {
 	// encoding/json escapes newlines inside strings, so a line is one message.
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -42,12 +42,12 @@ func (lw *lineWriter) send(msg WsMessage) error {
 // readLines calls handle with each envelope read from r, in order, until r
 // ends (nil) or fails. Lines may be any length. A malformed line is reported
 // to onBad and skipped.
-func readLines(r io.Reader, handle func(WsMessage), onBad func(error)) error {
+func readLines(r io.Reader, handle func(Envelope), onBad func(error)) error {
 	br := bufio.NewReaderSize(r, 64*1024)
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(bytes.TrimSpace(line)) > 0 {
-			var msg WsMessage
+			var msg Envelope
 			if jerr := json.Unmarshal(line, &msg); jerr != nil {
 				onBad(jerr)
 			} else {
@@ -64,7 +64,7 @@ func readLines(r io.Reader, handle func(WsMessage), onBad func(error)) error {
 }
 
 // writeEvent is the transport behind BroadcastEvent.
-func (b *Bridge) writeEvent(msg WsMessage) {
+func (b *Bridge) writeEvent(msg Envelope) {
 	if b.out == nil {
 		return
 	}
@@ -78,7 +78,7 @@ func (b *Bridge) writeEvent(msg WsMessage) {
 // freshly connected client needs it.
 func (b *Bridge) Serve(ctx context.Context, r io.Reader) error {
 	state, reason := b.currentConnectionState()
-	b.writeEvent(WsMessage{
+	b.writeEvent(Envelope{
 		Type:    "connection_state",
 		Payload: mustMarshal(ConnectionStateEvent{State: state, Reason: reason}),
 	})
@@ -91,8 +91,8 @@ func (b *Bridge) Serve(ctx context.Context, r io.Reader) error {
 // response to reply. Each request runs in its own goroutine so a slow one
 // (send_media uploads) doesn't hold up the rest; responses carry the request's
 // ID, so they may go out in any order.
-func serveRequests(ctx context.Context, r io.Reader, handle func(context.Context, WsMessage) WsMessage, reply func(WsMessage), onBad func(error)) error {
-	return readLines(r, func(msg WsMessage) {
+func serveRequests(ctx context.Context, r io.Reader, handle func(context.Context, Envelope) Envelope, reply func(Envelope), onBad func(error)) error {
+	return readLines(r, func(msg Envelope) {
 		go func() { reply(handle(ctx, msg)) }()
 	}, onBad)
 }

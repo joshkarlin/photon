@@ -5,9 +5,9 @@ import (
 	"database/sql"
 	"testing"
 
-	_ "modernc.org/sqlite"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	_ "modernc.org/sqlite"
 )
 
 // newTestBridge returns a Bridge backed by a fresh in-memory SQLite DB with the
@@ -52,52 +52,6 @@ func TestBestContactName(t *testing.T) {
 				t.Errorf("bestContactName = (%q, %v), want (%q, %v)", gotName, gotAuth, tc.wantName, tc.wantAuth)
 			}
 		})
-	}
-}
-
-func TestPurgeNumberPlaceholders(t *testing.T) {
-	b := newTestBridge(t)
-	const grp = "123@g.us"
-	// Mix of real names and number placeholders, plus a name that merely starts
-	// with a "+digit" but contains letters (must be preserved).
-	seed := []struct{ jid, name string }{
-		{"a@s.whatsapp.net", "Alice"},
-		{"b@s.whatsapp.net", "+14155550001"}, // placeholder → delete
-		{"c@s.whatsapp.net", "+1 Dad"},       // real name with digits → keep
-		{"d@s.whatsapp.net", "+447700900123"}, // placeholder → delete
-		{"e@s.whatsapp.net", "Bob"},
-	}
-	for _, s := range seed {
-		if err := b.UpsertParticipant(grp, s.jid, s.name, "member"); err != nil {
-			t.Fatalf("seed %s: %v", s.jid, err)
-		}
-	}
-	// A placeholder in a *different* group must be untouched.
-	if err := b.UpsertParticipant("999@g.us", "z@s.whatsapp.net", "+15550000000", "member"); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := b.purgeNumberPlaceholders(grp); got != 2 {
-		t.Fatalf("purged = %d, want 2", got)
-	}
-
-	got := participantNames(t, b, grp)
-	want := map[string]string{
-		"a@s.whatsapp.net": "Alice",
-		"c@s.whatsapp.net": "+1 Dad",
-		"e@s.whatsapp.net": "Bob",
-	}
-	if len(got) != len(want) {
-		t.Fatalf("remaining = %v, want %v", got, want)
-	}
-	for k, v := range want {
-		if got[k] != v {
-			t.Errorf("%s = %q, want %q", k, got[k], v)
-		}
-	}
-	// Other group's placeholder survived (purge is scoped per conversation).
-	if other := participantNames(t, b, "999@g.us"); other["z@s.whatsapp.net"] != "+15550000000" {
-		t.Errorf("cross-group purge: other group row was affected: %v", other)
 	}
 }
 
@@ -147,7 +101,7 @@ func TestCanonicalSenderJID(t *testing.T) {
 func TestSendersForMessages(t *testing.T) {
 	b := newTestBridge(t)
 	const grp = "123@g.us"
-	b.UpsertConversation(grp, "Group", true, "", 0)
+	b.UpsertConversation(grp, "Group", "", 0)
 	rows := []*MessageRow{
 		{ID: "m1", ConversationJID: grp, SenderJID: "a@s.whatsapp.net", Timestamp: 1, ContentType: "text"},
 		{ID: "m2", ConversationJID: grp, SenderJID: "b@s.whatsapp.net", Timestamp: 2, ContentType: "text"},
@@ -168,8 +122,8 @@ func TestPruneMessages_capsPerConversationAndRemovesEmptyRows(t *testing.T) {
 	b := newTestBridge(t)
 	b.retention = RetentionConfig{MaxMessages: 2, MaxDays: 0}
 
-	b.UpsertConversation("chat@s.whatsapp.net", "Alice", false, "", 0)
-	b.UpsertConversation("ghost@s.whatsapp.net", "Ghost", false, "", 0) // no messages
+	b.UpsertConversation("chat@s.whatsapp.net", "Alice", "", 0)
+	b.UpsertConversation("ghost@s.whatsapp.net", "Ghost", "", 0) // no messages
 	if err := b.InsertMessages([]*MessageRow{
 		{ID: "m1", ConversationJID: "chat@s.whatsapp.net", SenderJID: "a", Timestamp: 1, ContentType: "text"},
 		{ID: "m2", ConversationJID: "chat@s.whatsapp.net", SenderJID: "a", Timestamp: 2, ContentType: "text"},
@@ -206,74 +160,50 @@ func TestPruneMessages_capsPerConversationAndRemovesEmptyRows(t *testing.T) {
 	}
 }
 
-func TestUpsertConversation_isGroupOverwrites(t *testing.T) {
+// is_group follows the JID's server on every write, whichever path makes the
+// row: an incoming message, a send's nameless preview bump (which once flipped
+// a group to a DM), or a mute that arrives before any message.
+func TestConversation_isGroupFollowsTheJID(t *testing.T) {
 	b := newTestBridge(t)
-	// First write misclassifies a DM as a group; a later trusted upsert must
-	// be able to correct it (the old sticky-on-true made it permanent).
-	b.UpsertConversation("x@s.whatsapp.net", "Chat", true, "", 0)
-	b.UpsertConversation("x@s.whatsapp.net", "Chat", false, "", 0)
+	b.UpdateMute("123-456@g.us", -1)
+	b.UpsertConversation("123-456@g.us", "", "m1", 1000)
+	b.UpsertConversation("789@s.whatsapp.net", "Bob", "dm1", 5000)
+	b.UpsertConversation("789@s.whatsapp.net", "", "dm2", 6000)
+	b.UpdateMute("999@s.whatsapp.net", -1)
 
-	var isGroup int
-	b.msgDB.QueryRow(`SELECT is_group FROM conversations WHERE jid='x@s.whatsapp.net'`).Scan(&isGroup)
-	if isGroup != 0 {
-		t.Errorf("is_group = %d, want 0 (trusted upsert should overwrite)", isGroup)
+	isGroup := func(jid string) int {
+		return rowCount(t, b, `SELECT is_group FROM conversations WHERE jid = ?`, jid)
+	}
+	for jid, want := range map[string]int{"123-456@g.us": 1, "789@s.whatsapp.net": 0, "999@s.whatsapp.net": 0} {
+		if got := isGroup(jid); got != want {
+			t.Errorf("%s is_group = %d, want %d", jid, got, want)
+		}
+	}
+
+	// A row an older build got wrong is put right by the chat's next write.
+	b.msgDB.Exec(`UPDATE conversations SET is_group = 0 WHERE jid = '123-456@g.us'`)
+	b.UpsertConversation("123-456@g.us", "", "m2", 2000)
+	if got := isGroup("123-456@g.us"); got != 1 {
+		t.Errorf("stale is_group = %d after the next write, want 1", got)
 	}
 }
 
-func TestUpsertConversation_namelessBumpKeepsIsGroup(t *testing.T) {
+func TestDeleteMessageRow_movesThePreviewBack(t *testing.T) {
 	b := newTestBridge(t)
-	// A group, correctly classified by an incoming/history upsert (carries a name).
-	b.UpsertConversation("123-456@g.us", "Frothers Utd", true, "m1", 1000)
+	const jid = "789@s.whatsapp.net"
+	b.UpsertConversation(jid, "Bob", "m2", 200)
+	b.InsertMessages([]*MessageRow{
+		{ID: "m1", ConversationJID: jid, SenderJID: jid, Timestamp: 100, ContentType: "text"},
+		{ID: "m2", ConversationJID: jid, SenderJID: "me", Timestamp: 200, ContentType: "text", IsFromMe: true},
+	})
 
-	// Sending into the group bumps the preview with a nameless upsert. This must
-	// NOT reclassify the group as a DM — the bug switched the chat to DM view the
-	// instant the user sent a message.
-	b.UpsertConversation("123-456@g.us", "", false, "m2", 2000)
+	b.DeleteMessageRow("m2")
 
-	var isGroup int
-	b.msgDB.QueryRow(`SELECT is_group FROM conversations WHERE jid='123-456@g.us'`).Scan(&isGroup)
-	if isGroup != 1 {
-		t.Errorf("is_group = %d, want 1 (nameless preview bump must not reclassify)", isGroup)
-	}
-}
-
-func TestRepairConversationMetadata(t *testing.T) {
-	b := newTestBridge(t)
-	// A group misclassified as a DM, with a stale-old preview timestamp set from
-	// an older message (the history-tail bug). Newer message also present.
-	b.UpsertConversation("123-456@g.us", "Group", false, "old1", 1000)
-	if err := b.InsertMessages([]*MessageRow{
-		{ID: "old1", ConversationJID: "123-456@g.us", SenderJID: "a", Timestamp: 1000, ContentType: "text"},
-		{ID: "new1", ConversationJID: "123-456@g.us", SenderJID: "a", Timestamp: 9000, ContentType: "text"},
-	}); err != nil {
-		t.Fatalf("insert group msgs: %v", err)
-	}
-	// A DM misclassified as a group.
-	b.UpsertConversation("789@s.whatsapp.net", "Bob", true, "dm1", 5000)
-	if err := b.InsertMessages([]*MessageRow{
-		{ID: "dm1", ConversationJID: "789@s.whatsapp.net", SenderJID: "789@s.whatsapp.net", Timestamp: 5000, ContentType: "text"},
-	}); err != nil {
-		t.Fatalf("insert dm msg: %v", err)
-	}
-
-	b.RepairConversationMetadata()
-
-	// Group: reclassified, preview points at the newest message (not the tail).
-	var ig int
-	var lts int64
-	var lmid string
-	b.msgDB.QueryRow(`SELECT is_group, last_timestamp, last_message_id FROM conversations WHERE jid='123-456@g.us'`).Scan(&ig, &lts, &lmid)
-	if ig != 1 {
-		t.Errorf("group is_group = %d, want 1", ig)
-	}
-	if lts != 9000 || lmid != "new1" {
-		t.Errorf("group preview = (%d,%q), want (9000,new1)", lts, lmid)
-	}
-	// DM: reclassified to non-group.
-	var dmIg int
-	b.msgDB.QueryRow(`SELECT is_group FROM conversations WHERE jid='789@s.whatsapp.net'`).Scan(&dmIg)
-	if dmIg != 0 {
-		t.Errorf("dm is_group = %d, want 0", dmIg)
+	var ts int64
+	var last string
+	b.msgDB.QueryRow(`SELECT last_timestamp, last_message_id FROM conversations WHERE jid = ?`, jid).Scan(&ts, &last)
+	if ts != 100 || last != "m1" {
+		t.Errorf("preview = (%d, %q), want (100, m1)", ts, last)
 	}
 }
 

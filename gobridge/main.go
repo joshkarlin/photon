@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"database/sql/driver"
 
@@ -57,6 +58,15 @@ func registerFKDriver() {
 	}
 	fkDriverRegistered = true
 	sql.Register("sqlite_fk", &fkDriver{inner: &sqliteDriver.Driver{}})
+}
+
+// messageDBDSN is messages.db (a plain path, not a file: URI) with write
+// transactions that take the write lock as they begin (BEGIN IMMEDIATE). A
+// deferred transaction that reads first and writes after another connection
+// has committed fails with SQLITE_BUSY_SNAPSHOT, which no busy timeout
+// retries; revokes and LID merges both read first.
+func messageDBDSN(dataDir string) string {
+	return filepath.Join(dataDir, "messages.db") + "?_txlock=immediate"
 }
 
 // bridgeConfig is the bridge's command line.
@@ -128,15 +138,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize message database (use plain path, not file: URI). The
-	// sqlite_fk driver applies the WAL/foreign keys/busy timeout pragmas.
-	msgDSN := filepath.Join(cfg.dataDir, "messages.db")
-	msgDB, err := sql.Open("sqlite_fk", msgDSN)
+	// The sqlite_fk driver applies the WAL/foreign keys/busy timeout pragmas.
+	msgDB, err := sql.Open("sqlite_fk", messageDBDSN(cfg.dataDir))
 	if err != nil {
 		logger.Errorf("Failed to open message DB: %v", err)
 		os.Exit(1)
 	}
-	defer msgDB.Close()
 
 	// Get or create device
 	device, err := container.GetFirstDevice(ctx)
@@ -166,9 +173,6 @@ func main() {
 	if err := bridge.InitMessageDB(ctx); err != nil {
 		logger.Errorf("Failed to init message DB: %v", err)
 		os.Exit(1)
-	}
-	if client.Store.ID != nil {
-		bridge.BackfillMutedUntil(ctx)
 	}
 
 	// Register event handler
@@ -206,5 +210,34 @@ func main() {
 		logger.Infof("Received %s, shutting down", sig)
 	}
 	cancel()
-	client.Disconnect()
+	// Exit promptly whatever whatsmeow's Disconnect is doing — it can block
+	// for most of a minute. The app may be starting this bridge's replacement
+	// (a reset, say), and two bridges must never share the session. Committed
+	// writes are safe in the WAL either way.
+	if !runWithin(shutdownGrace, func() {
+		client.Disconnect()
+		msgDB.Close()
+	}) {
+		logger.Warnf("Still disconnecting after %s; exiting anyway", shutdownGrace)
+	}
+}
+
+// shutdownGrace is how long the bridge waits for a clean disconnect once
+// told to stop. Kotlin kills it if it's still running a little later.
+const shutdownGrace = time.Second
+
+// runWithin runs fn and waits at most limit for it to return; false if it
+// was still running.
+func runWithin(limit time.Duration, fn func()) bool {
+	done := make(chan struct{})
+	go func() {
+		fn()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(limit):
+		return false
+	}
 }

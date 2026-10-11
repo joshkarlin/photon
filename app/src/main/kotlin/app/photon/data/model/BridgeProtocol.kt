@@ -10,14 +10,14 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 
 @Serializable
-data class WsRequest(
+data class BridgeRequest(
     val id: String,
     val type: String,
     val payload: JsonObject = buildJsonObject {},
 )
 
 @Serializable
-data class WsEvent(
+data class BridgeEvent(
     val id: String? = null,
     val type: String,
     val payload: JsonObject = buildJsonObject {},
@@ -25,13 +25,13 @@ data class WsEvent(
 
 // Typed payload accessors — use these instead of payload[key]?.toString()?.trim('"'),
 // which corrupts values containing quotes and turns JSON null into "null".
-fun WsEvent.string(key: String): String? =
+fun BridgeEvent.string(key: String): String? =
     try { payload[key]?.jsonPrimitive?.contentOrNull } catch (_: Exception) { null }
 
-fun WsEvent.int(key: String): Int? =
+fun BridgeEvent.int(key: String): Int? =
     try { payload[key]?.jsonPrimitive?.intOrNull } catch (_: Exception) { null }
 
-fun WsEvent.boolean(key: String): Boolean? =
+fun BridgeEvent.boolean(key: String): Boolean? =
     try { payload[key]?.jsonPrimitive?.booleanOrNull } catch (_: Exception) { null }
 
 @Serializable

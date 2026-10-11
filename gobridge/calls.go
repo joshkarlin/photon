@@ -138,9 +138,17 @@ func callText(c *pendingCall, outcome callOutcome) string {
 
 func callRowID(callID string) string { return "call_" + callID }
 
-func isGroupJID(jid string) bool {
-	parsed, err := types.ParseJID(jid)
-	return err == nil && parsed.Server == types.GroupServer
+// row is the call's row in its chat.
+func (c *pendingCall) row(callID string, outcome callOutcome, status string) *MessageRow {
+	return &MessageRow{
+		ID:              callRowID(callID),
+		ConversationJID: c.chatJID,
+		SenderJID:       c.senderJID,
+		Timestamp:       c.ts,
+		ContentType:     "call",
+		TextBody:        sql.NullString{String: callText(c, outcome), Valid: true},
+		Status:          status,
+	}
 }
 
 func (b *Bridge) isOwnUser(jid types.JID) bool {
@@ -323,24 +331,15 @@ func (b *Bridge) recordCall(callID string, c *pendingCall, outcome callOutcome) 
 	if outcome == callMissed {
 		status = "sent" // counts as unread until the chat is read
 	}
-	text := callText(c, outcome)
-	inserted, err := b.InsertMessage(&MessageRow{
-		ID:              callRowID(callID),
-		ConversationJID: c.chatJID,
-		SenderJID:       c.senderJID,
-		Timestamp:       c.ts,
-		ContentType:     "call",
-		TextBody:        sql.NullString{String: text, Valid: true},
-		Status:          status,
-	})
+	inserted, err := b.InsertMessage(c.row(callID, outcome, status))
 	if err != nil {
 		b.log.Errorf("Failed to record call %s: %v", callID, err)
 		return false
 	}
 	if inserted {
-		// Creates the chat for a call from a new number. is_group follows the
-		// chat (an ad-hoc group call lives in the caller's DM).
-		b.UpsertConversation(c.chatJID, c.chatName, isGroupJID(c.chatJID), callRowID(callID), c.ts)
+		// Creates the chat for a call from a new number (an ad-hoc group call
+		// lives in the caller's DM).
+		b.UpsertConversation(c.chatJID, c.chatName, callRowID(callID), c.ts)
 	}
 	return inserted
 }
@@ -349,7 +348,7 @@ func (b *Bridge) recordCall(callID string, c *pendingCall, outcome callOutcome) 
 // only a stub type) into the same row a live missed call gets. ok is false
 // for every other stub.
 func historyCallRow(wm *waWeb.WebMessageInfo, chatJID, senderJID string) (row *MessageRow, ok bool) {
-	c := &pendingCall{}
+	c := &pendingCall{chatJID: chatJID, senderJID: senderJID, ts: int64(wm.GetMessageTimestamp())}
 	switch wm.GetMessageStubType() {
 	case waWeb.WebMessageInfo_CALL_MISSED_VOICE:
 	case waWeb.WebMessageInfo_CALL_MISSED_VIDEO:
@@ -361,13 +360,5 @@ func historyCallRow(wm *waWeb.WebMessageInfo, chatJID, senderJID string) (row *M
 	default:
 		return nil, false
 	}
-	return &MessageRow{
-		ID:              callRowID(wm.GetKey().GetID()),
-		ConversationJID: chatJID,
-		SenderJID:       senderJID,
-		Timestamp:       int64(wm.GetMessageTimestamp()),
-		ContentType:     "call",
-		TextBody:        sql.NullString{String: callText(c, callMissed), Valid: true},
-		Status:          "read",
-	}, true
+	return c.row(wm.GetKey().GetID(), callMissed, "read"), true
 }

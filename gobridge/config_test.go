@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
@@ -33,5 +34,20 @@ func TestParseConfig_retention(t *testing.T) {
 	}
 	if _, err := parseConfig([]string{"--max-days", "lots"}); err == nil {
 		t.Error("a malformed flag should be an error")
+	}
+}
+
+func TestRunWithin(t *testing.T) {
+	if !runWithin(time.Second, func() {}) {
+		t.Error("a quick fn reported as still running")
+	}
+	block := make(chan struct{})
+	defer close(block)
+	start := time.Now()
+	if runWithin(50*time.Millisecond, func() { <-block }) {
+		t.Error("a blocked fn reported as done")
+	}
+	if waited := time.Since(start); waited > time.Second {
+		t.Errorf("waited %s for a blocked fn, want about 50ms", waited)
 	}
 }

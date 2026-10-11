@@ -2,9 +2,9 @@ package main
 
 import "encoding/json"
 
-// WsMessage is the envelope for every request, response and event exchanged
+// Envelope is the wrapper around every request, response and event exchanged
 // with Kotlin (one per line; see transport.go).
-type WsMessage struct {
+type Envelope struct {
 	ID      string          `json:"id,omitempty"`
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload,omitempty"`

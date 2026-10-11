@@ -7,6 +7,7 @@ import (
 
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waCommon"
+	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
@@ -59,7 +60,7 @@ func TestOfferIsVideo(t *testing.T) {
 func TestCall_missed(t *testing.T) {
 	b := newClientBridge(t)
 	sent := captureEvents(b)
-	b.UpsertConversation(caller.String(), "Alice", false, "", 0)
+	b.UpsertConversation(caller.String(), "Alice", "", 0)
 
 	b.HandleEvent(&events.CallOffer{BasicCallMeta: callMeta("c1", caller, caller), Data: voiceOffer()})
 
@@ -170,7 +171,7 @@ func TestCall_LIDCallerResolvesToPhoneChat(t *testing.T) {
 func TestCall_groupCall(t *testing.T) {
 	b := newClientBridge(t)
 	sent := captureEvents(b)
-	b.UpsertConversation(group.String(), "Book club", true, "", 0)
+	b.UpsertConversation(group.String(), "Book club", "", 0)
 	other := types.NewJID("447700900002", types.DefaultUserServer)
 	meta := func(from types.JID) types.BasicCallMeta {
 		m := callMeta("g1", from, caller)
@@ -243,7 +244,7 @@ func TestHistorySync_missedCallStubs(t *testing.T) {
 
 func TestWithoutCallRows(t *testing.T) {
 	b := newTestBridge(t)
-	b.UpsertConversation(caller.String(), "Alice", false, "", 0)
+	b.UpsertConversation(caller.String(), "Alice", "", 0)
 	b.InsertMessages([]*MessageRow{
 		{ID: "m1", ConversationJID: caller.String(), SenderJID: caller.String(), Timestamp: 1, ContentType: "text"},
 		{ID: "log1", ConversationJID: caller.String(), SenderJID: caller.String(), Timestamp: 2, ContentType: "call"},
@@ -251,5 +252,61 @@ func TestWithoutCallRows(t *testing.T) {
 	got := b.WithoutCallRows([]string{"m1", "log1", "call_c1"})
 	if len(got) != 1 || got[0] != "m1" {
 		t.Errorf("WithoutCallRows = %v, want [m1]", got)
+	}
+}
+
+// A chat whose only unread rows are missed calls is marked read like any
+// other, without asking WhatsApp for a receipt on Photon's own call ids.
+func TestMarkRead_callsOnlyChat(t *testing.T) {
+	b := newClientBridge(t)
+	b.HandleEvent(&events.CallOffer{BasicCallMeta: callMeta("c1", caller, caller), Data: voiceOffer()})
+	b.HandleEvent(&events.CallTerminate{BasicCallMeta: callMeta("c1", caller, caller)})
+	if got := unreadCount(t, b, caller.String()); got != 1 {
+		t.Fatalf("unread = %d, want 1 missed call", got)
+	}
+
+	resp, err := b.handleMarkRead(context.Background(), mustMarshal(MarkReadPayload{
+		JID: caller.String(), MessageIDs: []string{callRowID("c1")},
+	}))
+	if err != nil {
+		t.Fatalf("mark_read: %v (no receipt should have been attempted)", err)
+	}
+	if string(resp) != "{}" {
+		t.Errorf("response = %s", resp)
+	}
+	if got := unreadCount(t, b, caller.String()); got != 0 {
+		t.Errorf("unread = %d, want 0", got)
+	}
+	if got := messageStatus(t, b, callRowID("c1")); got != "read" {
+		t.Errorf("call row status = %q, want read", got)
+	}
+}
+
+func callLogEvent(chat, sender types.JID, id string, ts int64) *events.Message {
+	return messageEvent(chat, sender, id, ts, &waE2E.Message{
+		CallLogMesssage: &waE2E.CallLogMessage{CallOutcome: waE2E.CallLogMessage_MISSED.Enum()},
+	})
+}
+
+// A call seen ring and end, then logged in the chat by the phone, is one row.
+func TestCall_logMessageForARecordedCallIsNotADuplicate(t *testing.T) {
+	b := newClientBridge(t)
+	b.HandleEvent(&events.CallOffer{BasicCallMeta: callMeta("c1", caller, caller), Data: voiceOffer()})
+	b.HandleEvent(&events.CallTerminate{BasicCallMeta: callMeta("c1", caller, caller)})
+	b.handleMessage(callLogEvent(caller, caller, "c1", callTime.Unix()+30))
+
+	if n := rowCount(t, b, `SELECT COUNT(*) FROM messages WHERE content_type = 'call'`); n != 1 {
+		t.Errorf("call rows = %d, want 1", n)
+	}
+	if got := unreadCount(t, b, caller.String()); got != 1 {
+		t.Errorf("unread = %d, want the one missed call", got)
+	}
+
+	// The log entry first (Photon missed the ringing), then the call events.
+	b.handleMessage(callLogEvent(caller, caller, "c2", callTime.Unix()+100))
+	b.HandleEvent(&events.CallOffer{BasicCallMeta: callMeta("c2", caller, caller), Data: voiceOffer()})
+	b.HandleEvent(&events.CallTerminate{BasicCallMeta: callMeta("c2", caller, caller)})
+	if n := rowCount(t, b, `SELECT COUNT(*) FROM messages WHERE content_type = 'call'`); n != 2 {
+		t.Errorf("call rows = %d, want 2 (one per call)", n)
 	}
 }

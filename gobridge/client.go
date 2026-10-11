@@ -15,6 +15,7 @@ import (
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	"google.golang.org/protobuf/proto"
 )
 
 // RetentionConfig controls how long messages and media are kept.
@@ -22,13 +23,6 @@ type RetentionConfig struct {
 	MaxMessages  int // Max messages per conversation (0 = unlimited)
 	MaxDays      int // Max age in days (0 = unlimited)
 	MediaTTLMins int // Minutes before temp media files are deleted
-}
-
-// cachedGroupName is a groupNames cache entry; see Bridge.groupEntry.
-type cachedGroupName struct {
-	name    string
-	admins  map[string]bool // user parts (phone and LID) of admins; nil = not fetched
-	fetched time.Time
 }
 
 // Bridge holds the whatsmeow client, the message DB, and the line to Kotlin.
@@ -45,7 +39,7 @@ type Bridge struct {
 	out *lineWriter
 	// emit delivers one outbound event envelope to Kotlin. NewBridge wires it
 	// to the transport; tests swap in a recorder.
-	emit func(WsMessage)
+	emit func(Envelope)
 
 	connectionStateMu sync.RWMutex
 	connectionState   string
@@ -60,6 +54,10 @@ type Bridge struct {
 
 	calls      callTracker
 	reconciler coalescer
+
+	// retryDelay is the first wait before retrying a database write that
+	// failed (see applyRevoke).
+	retryDelay time.Duration
 }
 
 // NewBridge creates a new Bridge instance.
@@ -70,6 +68,7 @@ func NewBridge(client *whatsmeow.Client, msgDB *sql.DB, dataDir string, log waLo
 		dataDir:         dataDir,
 		log:             log,
 		connectionState: "disconnected",
+		retryDelay:      time.Second,
 		groupNames:      make(map[string]cachedGroupName),
 		retention: RetentionConfig{
 			MaxMessages:  50,
@@ -221,7 +220,7 @@ func (b *Bridge) BroadcastEvent(eventType string, payload interface{}) {
 	}
 
 	if b.emit != nil {
-		b.emit(WsMessage{Type: eventType, Payload: payloadBytes})
+		b.emit(Envelope{Type: eventType, Payload: payloadBytes})
 	}
 }
 
@@ -239,7 +238,7 @@ func (b *Bridge) markMessageFailed(jid, id string) {
 // correctly relative to messages that arrived during the send.
 func (b *Bridge) markMessageSent(jid, id string, ts int64) {
 	b.UpdateMessageStatusAndTimestamp(id, "sent", ts)
-	b.UpsertConversation(jid, "", strings.HasSuffix(jid, "@"+types.GroupServer), id, ts)
+	b.UpsertConversation(jid, "", id, ts)
 	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
 		ConversationJID: jid, MessageID: id,
 	})
@@ -311,7 +310,7 @@ func (b *Bridge) SendTextMessage(ctx context.Context, jid string, text string, r
 		IsFromMe:        true,
 		Status:          "sending",
 	})
-	b.UpsertConversation(jid, "", targetJID.Server == types.GroupServer, id, ts)
+	b.UpsertConversation(jid, "", id, ts)
 	b.BroadcastEvent("new_message", NewMessageEvent{
 		ConversationJID: jid, MessageID: id, TextBody: text,
 		ContentType: "text", IsFromMe: true,
@@ -489,4 +488,21 @@ func (b *Bridge) MarkRead(ctx context.Context, jid string, messageIDs []string) 
 // Logout disconnects and removes the device from WhatsApp.
 func (b *Bridge) Logout() error {
 	return b.client.Logout(context.Background())
+}
+
+func (b *Bridge) buildTextMessage(text string, replyToID string) *waE2E.Message {
+	if replyToID == "" {
+		return &waE2E.Message{
+			Conversation: proto.String(text),
+		}
+	}
+
+	return &waE2E.Message{
+		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text: proto.String(text),
+			ContextInfo: &waE2E.ContextInfo{
+				StanzaID: proto.String(replyToID),
+			},
+		},
+	}
 }

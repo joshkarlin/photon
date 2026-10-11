@@ -74,10 +74,7 @@ fun PhotonNavGraph(
                     val target = when (pick) {
                         PlatformPick.ALL -> Routes.ALL_CHATS
                         PlatformPick.SMS -> Routes.SMS_CHATS
-                        PlatformPick.WHATSAPP -> {
-                            val state = PhotonService._wsClient?.whatsappState?.value
-                            if (state == "connected") Routes.WHATSAPP_CHATS else Routes.WHATSAPP_PAIRING
-                        }
+                        PlatformPick.WHATSAPP -> whatsappRoute(PhotonService._bridgeClient?.whatsappState?.value)
                         PlatformPick.SIGNAL -> Routes.SIGNAL
                     }
                     lateralSwitch(target)
@@ -230,3 +227,11 @@ fun PhotonNavGraph(
         }
     }
 }
+
+/**
+ * Where picking WhatsApp goes. Pairing only once the bridge reports there's
+ * no session ("logged_out"): a paired account that is connecting, reconnecting
+ * or not yet reported on belongs in its chats, which show the connection state.
+ */
+internal fun whatsappRoute(state: String?): String =
+    if (state == "logged_out") Routes.WHATSAPP_PAIRING else Routes.WHATSAPP_CHATS

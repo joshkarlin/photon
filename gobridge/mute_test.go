@@ -66,14 +66,16 @@ func TestHandleMute_storesEndTime(t *testing.T) {
 	}
 }
 
-func TestMigrateMessageDB_addsMutedUntilInPlace(t *testing.T) {
+// legacyMessageDB is a messages.db as builds before muted_until and
+// versioned migrations left it: a conversations table with only a mute flag.
+func legacyMessageDB(t *testing.T) *sql.DB {
+	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
-	// A conversations table as shipped before muted_until, with real data.
 	if _, err := db.Exec(`CREATE TABLE conversations (
 		jid TEXT PRIMARY KEY, name TEXT, is_group INTEGER NOT NULL DEFAULT 0,
 		last_message_id TEXT, last_timestamp INTEGER NOT NULL DEFAULT 0,
@@ -81,6 +83,11 @@ func TestMigrateMessageDB_addsMutedUntilInPlace(t *testing.T) {
 		avatar_url TEXT, updated_at INTEGER NOT NULL DEFAULT 0)`); err != nil {
 		t.Fatal(err)
 	}
+	return db
+}
+
+func TestMigrateMessageDB_addsMutedUntilInPlace(t *testing.T) {
+	db := legacyMessageDB(t)
 	db.Exec(`INSERT INTO conversations (jid, name, is_muted, unread_count) VALUES ('m@s.whatsapp.net', 'Muted', 1, 3), ('u@s.whatsapp.net', 'Open', 0, 0)`)
 
 	b := &Bridge{msgDB: db, log: waLog.Noop}
@@ -90,7 +97,7 @@ func TestMigrateMessageDB_addsMutedUntilInPlace(t *testing.T) {
 		}
 	}
 	if got := mutedUntilColumn(t, b, "m@s.whatsapp.net"); got != -1 {
-		t.Errorf("previously muted chat: muted_until = %d, want -1 until backfilled", got)
+		t.Errorf("previously muted chat: muted_until = %d, want -1 (no session to backfill from)", got)
 	}
 	if got := mutedUntilColumn(t, b, "u@s.whatsapp.net"); got != 0 {
 		t.Errorf("unmuted chat: muted_until = %d, want 0", got)
@@ -98,30 +105,53 @@ func TestMigrateMessageDB_addsMutedUntilInPlace(t *testing.T) {
 	if got := unreadCount(t, b, "m@s.whatsapp.net"); got != 3 {
 		t.Errorf("migration lost data: unread = %d", got)
 	}
+	if v := rowCount(t, b, `PRAGMA user_version`); v != len(migrations) {
+		t.Errorf("user_version = %d, want %d", v, len(migrations))
+	}
 }
 
-func TestBackfillMutedUntil(t *testing.T) {
+// The mute end times come from whatsmeow's chat settings once, when
+// muted_until is added — never again at startup, where a stale entry under
+// the chat's other JID form would undo an unmute.
+func TestMigrateMutedUntil_backfillsOnce(t *testing.T) {
 	ctx := context.Background()
-	b := newClientBridge(t)
 	timed := types.NewJID("447700900001", types.DefaultUserServer)
 	timedLID := types.NewJID("11223344", types.HiddenUserServer)
 	always := types.NewJID("447700900002", types.DefaultUserServer)
-	b.client.Store.LIDs.PutLIDMapping(ctx, timedLID, timed)
 
-	// An old build stored the 8h mute as a bare flag (now -1), keyed the
-	// mute event by LID, and stored an "always" mute as unmuted.
-	b.UpdateMute(timed.String(), -1)
-	b.UpdateMute(always.String(), 0)
+	// An old build stored the 8h mute as a bare flag and an "always" mute as
+	// unmuted; whatsmeow recorded both properly, the 8h one under the LID.
+	db := legacyMessageDB(t)
+	db.Exec(`INSERT INTO conversations (jid, is_muted) VALUES (?, 1), (?, 0)`, timed.String(), always.String())
+	b := &Bridge{msgDB: db, log: waLog.Noop, client: newTestClient(t)}
+	b.client.Store.LIDs.PutLIDMapping(ctx, timedLID, timed)
 	b.client.Store.ChatSettings.PutPinned(ctx, timed, true) // a settings row without the mute
 	b.client.Store.ChatSettings.PutMutedUntil(ctx, timedLID, time.Unix(1_900_000_000, 0))
 	b.client.Store.ChatSettings.PutMutedUntil(ctx, always, store.MutedForever)
 
-	b.BackfillMutedUntil(ctx)
-
+	if err := b.InitMessageDB(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if got := mutedUntilColumn(t, b, timed.String()); got != 1_900_000_000 {
 		t.Errorf("timed mute = %d, want its real end", got)
 	}
 	if got := mutedUntilColumn(t, b, always.String()); got != -1 {
 		t.Errorf("always mute = %d, want -1", got)
+	}
+
+	// Unmuted on the phone; whatsmeow's LID entry still says muted.
+	b.HandleEvent(&events.Mute{JID: timed, Action: &waSyncAction.MuteAction{Muted: proto.Bool(false)}})
+	if err := b.InitMessageDB(ctx); err != nil { // the next start
+		t.Fatal(err)
+	}
+	if got := mutedUntilColumn(t, b, timed.String()); got != 0 {
+		t.Errorf("muted_until after restart = %d: a stale whatsmeow entry re-muted the chat", got)
+	}
+}
+
+func TestMigrateMessageDB_freshDatabase(t *testing.T) {
+	b := newTestBridge(t)
+	if v := rowCount(t, b, `PRAGMA user_version`); v != len(migrations) {
+		t.Errorf("user_version = %d, want %d", v, len(migrations))
 	}
 }

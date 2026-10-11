@@ -24,7 +24,7 @@ func TestLineWriter_concurrentSendsStayWholeLines(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			lw.send(WsMessage{Type: "new_message", Payload: mustMarshal(map[string]string{
+			lw.send(Envelope{Type: "new_message", Payload: mustMarshal(map[string]string{
 				"text_body": "line one\nline two", // embedded newline must not split the line
 				"pad":       big,
 			})})
@@ -36,7 +36,7 @@ func TestLineWriter_concurrentSendsStayWholeLines(t *testing.T) {
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	lines := 0
 	for sc.Scan() {
-		var msg WsMessage
+		var msg Envelope
 		if err := json.Unmarshal(sc.Bytes(), &msg); err != nil || msg.Type != "new_message" {
 			t.Fatalf("line %d is not a whole envelope: %v", lines, err)
 		}
@@ -55,9 +55,9 @@ func TestReadLines(t *testing.T) {
 		`{"id":"2","type":"send_message","payload":{"text":"` + long + `"}}` + "\n" +
 		`{"id":"3","type":"logout"}` // final line without a newline
 
-	var got []WsMessage
+	var got []Envelope
 	var bad int
-	err := readLines(strings.NewReader(input), func(m WsMessage) { got = append(got, m) }, func(error) { bad++ })
+	err := readLines(strings.NewReader(input), func(m Envelope) { got = append(got, m) }, func(error) { bad++ })
 	if err != nil {
 		t.Fatalf("readLines: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestReadLines(t *testing.T) {
 
 func TestReadLines_returnsReadError(t *testing.T) {
 	boom := errors.New("boom")
-	err := readLines(io.MultiReader(strings.NewReader(`{"type":"x"}`+"\n"), errReader{boom}), func(WsMessage) {}, func(error) {})
+	err := readLines(io.MultiReader(strings.NewReader(`{"type":"x"}`+"\n"), errReader{boom}), func(Envelope) {}, func(error) {})
 	if !errors.Is(err, boom) {
 		t.Errorf("err = %v, want boom", err)
 	}
@@ -97,13 +97,13 @@ func TestServe_answersUntilStdinCloses(t *testing.T) {
 	go func() { served <- b.Serve(context.Background(), inR) }()
 
 	out := bufio.NewReader(outR)
-	readMsg := func() WsMessage {
+	readMsg := func() Envelope {
 		t.Helper()
 		line, err := out.ReadBytes('\n')
 		if err != nil {
 			t.Fatalf("read: %v", err)
 		}
-		var m WsMessage
+		var m Envelope
 		if err := json.Unmarshal(line, &m); err != nil {
 			t.Fatalf("bad line %q: %v", line, err)
 		}
@@ -188,7 +188,7 @@ func TestRetryMessage_refusesUnstagedPath(t *testing.T) {
 	b := newClientBridge(t)
 	b.dataDir = t.TempDir()
 	const jid = "447700900001@s.whatsapp.net"
-	b.UpsertConversation(jid, "Alice", false, "", 0)
+	b.UpsertConversation(jid, "Alice", "", 0)
 	b.InsertMessage(&MessageRow{
 		ID: "f1", ConversationJID: jid, SenderJID: ownJID.String(), Timestamp: 1, ContentType: "document",
 		MediaURL: nullString("/data/data/app.photon/databases/signal_protocol.db"), IsFromMe: true, Status: "failed",
@@ -205,18 +205,18 @@ func TestRetryMessage_refusesUnstagedPath(t *testing.T) {
 
 func TestServeRequests_slowRequestDoesNotBlockOthers(t *testing.T) {
 	release := make(chan struct{})
-	handle := func(_ context.Context, msg WsMessage) WsMessage {
+	handle := func(_ context.Context, msg Envelope) Envelope {
 		if msg.Type == "send_media" {
 			<-release // an upload that takes a while
 		}
-		return WsMessage{ID: msg.ID, Type: msg.Type + "_response"}
+		return Envelope{ID: msg.ID, Type: msg.Type + "_response"}
 	}
-	replies := make(chan WsMessage, 2)
+	replies := make(chan Envelope, 2)
 	input := `{"id":"slow","type":"send_media"}` + "\n" + `{"id":"fast","type":"mark_read"}` + "\n"
 
 	done := make(chan error, 1)
 	go func() {
-		done <- serveRequests(context.Background(), strings.NewReader(input), handle, func(m WsMessage) { replies <- m }, func(error) {})
+		done <- serveRequests(context.Background(), strings.NewReader(input), handle, func(m Envelope) { replies <- m }, func(error) {})
 	}()
 
 	select {

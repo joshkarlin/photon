@@ -4,14 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 )
 
 // handleRequest runs one request from Kotlin and builds its response.
-func (b *Bridge) handleRequest(ctx context.Context, msg WsMessage) WsMessage {
+func (b *Bridge) handleRequest(ctx context.Context, msg Envelope) Envelope {
 	var payload json.RawMessage
 	var err error
 
@@ -52,7 +51,7 @@ func (b *Bridge) handleRequest(ctx context.Context, msg WsMessage) WsMessage {
 		err = fmt.Errorf("unknown request type: %s", msg.Type)
 	}
 
-	resp := WsMessage{
+	resp := Envelope{
 		ID:   msg.ID,
 		Type: msg.Type + "_response",
 	}
@@ -165,18 +164,17 @@ func (b *Bridge) handleMarkRead(ctx context.Context, raw json.RawMessage) (json.
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, err
 	}
-	// Clear the local unread badge unconditionally: the user has read these
-	// messages on-device, which is independent of whether the network
-	// read-receipt (blue ticks to the sender) goes through. Coupling the two
-	// meant any MarkRead failure (offline, LID-chat quirks) left the badge
-	// stuck. The receipt is still best-effort below.
-	// Resolve LID → phone so the badge clears on the same conversation row the
-	// message/receipt handlers write (handleReceipt resolves for this reason).
+	// Clear the local unread badge whether or not the network read receipt
+	// (blue ticks to the sender) goes through: coupling the two meant any
+	// MarkRead failure (offline, LID-chat quirks) left the badge stuck. The
+	// listed ids are the newest incoming rows the UI showed, newest first;
+	// everything up to the newest of them is read, older rows included (a
+	// later revoke must not think one was still unread), and anything that
+	// arrived after the UI loaded its list stays unread. The rows' own chat is
+	// marked, so it works before an @lid chat is merged into its phone JID.
+	b.MarkReadThrough(p.MessageIDs)
+	// The receipt goes to the LID-resolved chat, like every other send.
 	jid := b.resolveLIDString(p.JID)
-	// Every incoming row is now read, not just the IDs listed (the UI sends
-	// the newest few): a later revoke of an older message must not think it
-	// was still unread.
-	b.MarkChatReadUpTo(jid, math.MaxInt64)
 	ids := b.WithoutCallRows(p.MessageIDs)
 	if len(ids) == 0 {
 		return mustMarshal(struct{}{}), nil
@@ -209,7 +207,7 @@ func (b *Bridge) handleEditMessage(ctx context.Context, raw json.RawMessage) (js
 
 	b.UpdateMessageEdit(p.MessageID, targetJID.String(), p.NewText, &author{isMe: true})
 	// Tell connected UIs to refresh, mirroring the live edit path which
-	// broadcasts message_updated (ws request responses don't flow through the
+	// broadcasts message_updated (request responses don't flow through the
 	// event stream).
 	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
 		ConversationJID: targetJID.String(),

@@ -76,8 +76,8 @@ private fun SettingsHomeContent(version: String?, onBack: () -> Unit, onNav: (Pa
 
 @Composable
 private fun ConnectionsPage(onBack: () -> Unit, onNav: (Page) -> Unit) {
-    val ws = PhotonService._wsClient
-    val waState by (ws?.whatsappState ?: MutableStateFlow("disconnected")).collectAsState()
+    val bridge = PhotonService._bridgeClient
+    val waState by (bridge?.whatsappState ?: MutableStateFlow("disconnected")).collectAsState()
     val sigState by (PhotonService._signalReceiver?.state ?: MutableStateFlow("disconnected")).collectAsState()
     val sigRegistered = PhotonService._signalCredentials?.isRegistered() == true
 
@@ -94,8 +94,8 @@ private fun ConnectionsPage(onBack: () -> Unit, onNav: (Page) -> Unit) {
 private fun WhatsAppPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val ws = PhotonService._wsClient
-    val waState by (ws?.whatsappState ?: MutableStateFlow("disconnected")).collectAsState()
+    val bridge = PhotonService._bridgeClient
+    val waState by (bridge?.whatsappState ?: MutableStateFlow("disconnected")).collectAsState()
 
     BackHandler { onBack() }
     MenuScreen("WhatsApp", onBack) {
@@ -108,7 +108,7 @@ private fun WhatsAppPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
             MenuRow("REFRESH CONNECTION", onClick = {
                 scope.launch {
                     try {
-                        ws?.reconnectWhatsApp()
+                        bridge?.reconnectWhatsApp()
                     } catch (_: Exception) {}
                 }
             })
@@ -217,7 +217,7 @@ private fun StoragePage(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val prefs = remember { PhotonPreferences(context) }
-    val ws = PhotonService._wsClient
+    val bridge = PhotonService._bridgeClient
 
     val maxMessages by prefs.maxMessages.collectAsState(initial = 50)
     val maxDays by prefs.maxDays.collectAsState(initial = 7)
@@ -225,10 +225,10 @@ private fun StoragePage(onBack: () -> Unit) {
     BackHandler { onBack() }
     MenuScreen("Storage", onBack) {
         ValueCycleRow("MESSAGES PER CHAT", maxMessages.toString(), listOf(25, 50, 100, 200), maxMessages) { v ->
-            scope.launch { prefs.setMaxMessages(v); syncRetention(ws, v, maxDays) }
+            scope.launch { prefs.setMaxMessages(v); syncRetention(bridge, v, maxDays) }
         }
         ValueCycleRow("MESSAGE HISTORY", "$maxDays DAYS", listOf(1, 3, 7, 14, 30), maxDays) { v ->
-            scope.launch { prefs.setMaxDays(v); syncRetention(ws, maxMessages, v) }
+            scope.launch { prefs.setMaxDays(v); syncRetention(bridge, maxMessages, v) }
         }
     }
 }
@@ -249,9 +249,9 @@ private fun formatState(state: String) = when (state) {
     else -> state.uppercase()
 }
 
-private suspend fun syncRetention(ws: app.photon.service.WsClient?, maxMessages: Int, maxDays: Int) {
+private suspend fun syncRetention(bridge: app.photon.service.BridgeClient?, maxMessages: Int, maxDays: Int) {
     try {
-        ws?.request("set_retention", buildJsonObject {
+        bridge?.request("set_retention", buildJsonObject {
             put("max_messages", maxMessages)
             put("max_days", maxDays)
             put("media_ttl_mins", 5)
