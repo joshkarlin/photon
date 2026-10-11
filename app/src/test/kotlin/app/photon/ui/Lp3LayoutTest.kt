@@ -1,10 +1,5 @@
 package app.photon.ui
 
-import android.content.ComponentName
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import androidx.activity.ComponentActivity
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
@@ -14,7 +9,6 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.unit.DpRect
-import androidx.test.core.app.ApplicationProvider
 import app.photon.ui.preview.ChatListSample
 import app.photon.ui.preview.DmThreadSample
 import app.photon.ui.preview.GroupThreadSample
@@ -22,11 +16,9 @@ import app.photon.ui.preview.PreviewSamples
 import app.photon.ui.theme.PhotonTheme
 import org.junit.Rule
 import org.junit.Test
-import org.junit.rules.ExternalResource
 import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
-import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import kotlin.test.assertTrue
@@ -42,24 +34,7 @@ import kotlin.test.assertTrue
 class Lp3LayoutTest {
     private val rule = createComposeRule()
 
-    // The compose rule hosts content in a bare ComponentActivity. Register it
-    // with Robolectric rather than shipping ui-test-manifest's activity in an
-    // APK, so the test runs against both debug and release variants.
-    private val registerHostActivity = object : ExternalResource() {
-        override fun before() {
-            val app = ApplicationProvider.getApplicationContext<Context>()
-            val host = ComponentName(app, ComponentActivity::class.java)
-            shadowOf(app.packageManager).apply {
-                addActivityIfNotPresent(host)
-                addIntentFilterForActivity(
-                    host,
-                    IntentFilter(Intent.ACTION_MAIN).apply { addCategory(Intent.CATEGORY_LAUNCHER) },
-                )
-            }
-        }
-    }
-
-    @get:Rule val rules: RuleChain = RuleChain.outerRule(registerHostActivity).around(rule)
+    @get:Rule val rules: RuleChain = RuleChain.outerRule(RegisterComposeHostActivity()).around(rule)
 
     private fun DpRect.toRect() = Rect(left.value, top.value, right.value, bottom.value)
 

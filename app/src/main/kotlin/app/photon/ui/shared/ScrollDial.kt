@@ -73,14 +73,15 @@ fun MenuScrollDialEffect(scrollState: ScrollState) {
 /**
  * Scrolls a message list by [ScrollDial.chatLines] message-body lines per
  * detent. The thread uses `reverseLayout`, so clockwise (down, towards newer
- * messages) is a negative scroll.
+ * messages) is a negative scroll. [onTurn] runs first on every detent.
  */
 @Composable
-fun ChatScrollDialEffect(listState: LazyListState) {
+fun ChatScrollDialEffect(listState: LazyListState, onTurn: () -> Unit = {}) {
     val linePx = with(LocalDensity.current) {
         lightTextStyle(LightTextVariant.Paragraph).lineHeight.toPx()
     }
     ScrollDialEffect { event ->
+        onTurn()
         listState.scrollBy(-event.direction * event.setting.chatLines * linePx)
     }
 }

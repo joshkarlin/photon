@@ -27,11 +27,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
 import androidx.core.content.ContextCompat
 import app.photon.ui.theme.PhotonColors
@@ -63,12 +60,9 @@ fun MessageInputBar(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val keyboardController = LocalSoftwareKeyboardController.current
-    val focusRequester = remember { FocusRequester() }
 
     var state by remember { mutableStateOf<InputState>(InputState.Default) }
     var text by remember { mutableStateOf("") }
-    var keyboardVisible by remember { mutableStateOf(false) }
     var recordingSeconds by remember { mutableIntStateOf(0) }
     var recorder by remember { mutableStateOf<MediaRecorder?>(null) }
     var recordingPath by remember { mutableStateOf<String?>(null) }
@@ -183,7 +177,9 @@ fun MessageInputBar(
                     }
                 }
 
-                // Text input (always visible)
+                // Text input (always visible). Tapping it brings up the
+                // keyboard; tapping the thread or turning the dial puts it
+                // away (ChatThread). Sending leaves it up to keep typing.
                 BasicTextField(
                     value = text,
                     onValueChange = { text = it },
@@ -211,9 +207,7 @@ fun MessageInputBar(
                             inner()
                         }
                     },
-                    modifier = Modifier
-                        .weight(1f)
-                        .focusRequester(focusRequester),
+                    modifier = Modifier.weight(1f),
                 )
 
                 if (text.isNotBlank()) {
@@ -226,23 +220,6 @@ fun MessageInputBar(
                     // can't, so the mic is hidden rather than a dead control).
                     InputIcon(LightIcons.MICROPHONE, "Voice note") { doRecord() }
                 }
-
-                // Keyboard toggle
-                LightText(
-                    text = "⌨",
-                    variant = LightTextVariant.Paragraph,
-                    lighten = true,
-                    modifier = Modifier.lightClickable {
-                        if (keyboardVisible) {
-                            keyboardController?.hide()
-                            keyboardVisible = false
-                        } else {
-                            focusRequester.requestFocus()
-                            keyboardController?.show()
-                            keyboardVisible = true
-                        }
-                    },
-                )
             }
         }
 

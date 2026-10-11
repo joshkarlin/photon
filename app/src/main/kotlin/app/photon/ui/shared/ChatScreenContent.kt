@@ -22,6 +22,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.style.TextOverflow
 import app.photon.data.model.Message
@@ -114,6 +115,16 @@ internal fun ChatThread(
     headerContent: (@Composable () -> Unit)?,
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    // LightOS has no navigation bar to put the keyboard away, so tapping the
+    // thread or turning the dial does it.
+    val dismissKeyboard = remember(focusManager, keyboardController) {
+        {
+            focusManager.clearFocus()
+            keyboardController?.hide()
+            Unit
+        }
+    }
     val listState = rememberLazyListState()
     val scrollScope = rememberCoroutineScope()
     var actionsFor by remember { mutableStateOf<Message?>(null) }
@@ -135,7 +146,7 @@ internal fun ChatThread(
         }
     }
 
-    ChatScrollDialEffect(listState)
+    ChatScrollDialEffect(listState, onTurn = dismissKeyboard)
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -156,7 +167,8 @@ internal fun ChatThread(
             LazyColumn(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth(),
+                    .fillMaxWidth()
+                    .observeTaps(dismissKeyboard),
                 state = listState,
                 reverseLayout = true,
                 contentPadding = PaddingValues(
@@ -177,10 +189,7 @@ internal fun ChatThread(
                             participantNames = participantNames,
                             supportsReply = supportsReply,
                             onReply = { replyingTo = msg },
-                            onMediaTap = {
-                                keyboardController?.hide()
-                                onMediaTap?.invoke(msg)
-                            },
+                            onMediaTap = { onMediaTap?.invoke(msg) },
                             onLongPress = { actionsFor = msg },
                             onReplyPreviewTap = msg.replyToPreview?.let { quoted ->
                                 {
