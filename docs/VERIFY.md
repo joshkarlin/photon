@@ -19,6 +19,8 @@ These cover the riskiest changes in v0.4.0-rc.1. Run them first, in this order:
 9. [N1](#n1-tapping-a-notification-opens-its-chat) Tapping a notification opens its chat
 10. [A3](#a3-every-platforms-chats-open-and-go-back) Every platform's chats open and go back (one chat screen for all)
 11. [SMS1](#sms1-sends-show-sent-or-failed-and-failed-ones-retry) SMS sends show sent or failed, and retry
+12. [S11](#s11-mutes-follow-the-primary) and [W7](#w7-mutes) Mutes from the primary silence chats on both platforms
+13. [N5](#n5-notification-levels) Notification levels: Sound, Vibrate, Silent and Off
 
 ## Tools
 
@@ -58,7 +60,7 @@ sqlite3 /tmp/photon/app.db
 - **Expect:**
   - `GoBridge` logs `Applied message DB migration 1`, `2` and `3`, once each, on the first start only.
   - Each WhatsApp chat's badge matches its unread messages, and opening the chat clears it.
-  - `PRAGMA user_version;` on `signal_messages.db` returns 5. Signal unread badges survived the upgrade, and opening a Signal chat clears it on the primary too.
+  - `PRAGMA user_version;` on `signal_messages.db` returns 6. Signal unread badges survived the upgrade, and opening a Signal chat clears it on the primary too.
 - **Caveats:** migration 1 also logs `Backfilled mute end time for N chats` when WhatsApp is paired. That line must not appear on later starts.
 
 #### A3. Every platform's chats open and go back
@@ -123,6 +125,17 @@ sqlite3 /tmp/photon/app.db
   - A group message is titled `<Group> · WhatsApp` (or `· Signal`), and its body reads `Alice: …`.
   - A WhatsApp group call is titled `Alice · <Group> · WhatsApp`.
   - A DM notification is titled with the person.
+
+#### N5. Notification levels
+- **Do:** after upgrading, open Settings › Chat. Then cycle NOTIFICATIONS through each level and receive a message, and a call, at each one.
+- **Expect:**
+  - It shows SOUND if notifications were on before, OFF if they were off.
+  - SOUND: heads-up, sound and vibration, as before.
+  - VIBRATE: heads-up and vibration, no sound.
+  - SILENT: shade and badge only, no sound or buzz. A call still shows, silently.
+  - OFF: nothing for messages or calls.
+  - Android's notification settings for Photon list "Messages", "Messages (vibrate)" and "Messages (silent)", and any changes you'd made to "Messages" are kept.
+  - After a Signal delete-for-everyone, the notification is corrected without alerting. At OFF it's removed.
 
 ### Display names
 
@@ -227,6 +240,7 @@ sqlite3 /tmp/photon/app.db
   1. The chat is silent until the mute ends, then notifies again.
   2. The "always" chat stays silent.
   3. The unmuted chat stays unmuted across the restart, with no `Backfilled mute end time` line. Each change logs `Mute update: … muted_until=…`.
+  4. Muted chats show a speaker-off mark by their time in the chat list and keep their unread badge. The mark goes when the mute ends or is removed (within about 45s for a timed mute). Calls in a muted chat still ring.
 
 #### W8. Retention survives restarts
 - **Do:** set Settings → Storage to 200 messages and 30 days. Force-stop and reopen Photon.

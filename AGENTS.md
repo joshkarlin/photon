@@ -137,7 +137,7 @@ One chat screen and one chat list serve every platform, over its `ChatBackend`:
   - One draft per conversation, shared by both input styles.
 - `ui/shared/components/MessageLayouts.kt`: `MessageRow` lays out DMs and groups (groups pass `senderName`), and `CallRow` is the single centred call line. It also has the burst rule (`startsBurst`: a sender change or a gap over 15 minutes), `formatContent` and `quoteLabel`.
 - `ui/shared/components/MediaInput.kt`: attaching media and recording voice notes, shared by both input styles (`rememberMediaInput`).
-- `ui/shared/ChatListContent.kt` and `ConversationRow.kt`: the list's top bar, loading and empty states, and rows. `ChatListContent` also reconciles notifications.
+- `ui/shared/ChatListContent.kt` and `ConversationRow.kt`: the list's top bar, loading and empty states, and rows. A muted chat shows `LightIcons.SPEAKER_MUTED` by its time and keeps its unread badge. `ChatListContent` also reconciles notifications.
 - `ui/preview/DesignPreviews.kt`: LP3-sized (360×413dp) previews. `PreviewSamples` covers bursts, a call, a failed send, reactions, a reply, a deleted message and long titles. The layout tests use them too.
 
 ## Display names
@@ -197,7 +197,11 @@ A group shows its subject, else `WhatsApp group` / `Signal group`. Raw JIDs, LID
 - **Reconnect**: backoff from 5s, doubling to 300s. `NetworkMonitor` resets it when a validated network appears, which needs `ACCESS_NETWORK_STATE` in the manifest. Two credential rejections (401/403) stop the receiver as `logged_out`.
 - **PNI**: a conversation keyed by a contact's PNI is merged into their ACI conversation (`SignalServiceIdMerge`). The merge runs at receiver start, after a contacts sync, and when an envelope's PNI resolves.
 - **Message ids** are `{authorAci}_{timestampMs}_{rand}`. Reactions, deletes and read syncs match by the `{author}_{timestamp}` prefix.
-- **DB migrations**: v4 added per-row read state (`received` = unread, `seen` = read here but not synced, `read`, `deleted`). v5 cleared stored resolved names. There's no `onDowngrade`, so an older build can't open the database.
+- **DB migrations**: v4 added per-row read state (`received` = unread, `seen` = read here but not synced, `read`, `deleted`). v5 cleared stored resolved names. v6 added `conversations.muted_until` and the storage-sync tables. There's no `onDowngrade`, so an older build can't open the database.
+- **Mutes** (`signal/storage/`): read-only from the primary's Storage Service. Photon never writes storage records.
+  - **Key**: `AccountEntropyPool.deriveMasterKey().deriveStorageServiceKey()`. The pool is stored at link time from the provisioning message. Existing installs send one KEYS sync request and store the pool from the primary's `Keys` reply. It's never logged.
+  - **Reads**: on connect (inside the 10-minute upkeep throttle) and on `FetchLatest(STORAGE_MANIFEST)`. The manifest is downloaded only when its version changes, and then only new contact and GroupV2 records are read.
+  - **Storage**: `muted_until` uses WhatsApp's encoding (0 / -1 / unix seconds), so `isMutedAt` serves both. PNI-only records reach the ACI chat after a contacts sync.
 - **Held envelopes**: an envelope that fails processing is acked only after it's handled, and is retried in-process (`EnvelopeRetryTracker`). The tracker is memory-only.
 - **Sync message destinations**: Use `destinationServiceIdBinary` field, not the string `destinationServiceId`.
 - **AccountAttributes.Capabilities**: All must be `true` for linked device registration.
@@ -237,7 +241,7 @@ Lifecycle:
 
 ## Notifications
 
-- **Channels** (`PhotonApp`): `photon_messages` (IMPORTANCE_HIGH) for messages and calls, and `photon_service_v3` (IMPORTANCE_NONE) for the foreground service, hidden by default. The old `photon_service_v2` channel is deleted at startup.
+- **Channels** (`PhotonApp`): one per notification level for messages and calls: `photon_messages` (SOUND, IMPORTANCE_HIGH), `photon_messages_vibrate` (VIBRATE, high, no sound) and `photon_messages_silent` (SILENT, IMPORTANCE_LOW). Channel sound and importance are fixed once created, so the level picks the channel at post time. Also `photon_service_v3` (IMPORTANCE_NONE) for the foreground service, hidden by default. The old `photon_service_v2` channel is deleted at startup.
 - **Ids**: `NotificationHelper` tags each notification with its conversation JID and gives each kind its own id (message, incoming call, missed call). A chat's notifications replace each other rather than stacking, and can be cancelled after a restart.
 - **Tap**: opens the chat. The intent carries `EXTRA_PLATFORM` and `EXTRA_CONVERSATION`, which `ChatDeepLink` turns into `chat/{platform}/{jid}` over the chat list.
 - **Visible chat**: `VisibleConversationEffect` marks the chat on screen while it's resumed and clears its notifications. Message and missed-call notifications aren't posted for it, but a ringing call is.
@@ -245,9 +249,9 @@ Lifecycle:
 - **Text**: one formatter, `messageNotificationText` (`service/MessageNotificationText.kt`). A DM is titled with the person, and a group with the group, with a body of "Sender: text". The platform label is appended to the title (`· WhatsApp`).
 - **Corrections** (`update = true`, e.g. after a delete-for-everyone) use `setOnlyAlertOnce`, so they don't sound again.
 - **WhatsApp**: `WhatsAppSession` subscribes losslessly to the bridge events `new_message`, `read_self`, `message_revoked`, `call_incoming`, `call_ended` and `call_missed`. Muted chats don't notify messages. Calls ring regardless of mute.
-- **Signal**: `signal/receiver/MessageNotifications` handles messages and corrections, and `CallHandler` handles calls, both through `SignalNotifier`. Signal mutes aren't synced, so they aren't honoured.
+- **Signal**: `signal/receiver/MessageNotifications` handles messages and corrections, and `CallHandler` handles calls, both through `SignalNotifier`. Muted chats (see Signal › Mutes) don't notify messages or group-call starts. Calls ring regardless of mute.
 - **SMS**: not notified. The system SMS app handles notifications.
-- Configurable via Settings › Chat › NOTIFICATIONS (ON/OFF).
+- Configurable via Settings › Chat › NOTIFICATIONS (SOUND / VIBRATE / SILENT / OFF, migrated from the old ON/OFF). `NotificationHelper` caches the level through a collector `PhotonApp` starts, and chooses the channel on each post. At OFF nothing is posted, and a correction cancels its notification instead.
 
 ## Logs
 

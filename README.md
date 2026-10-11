@@ -121,12 +121,13 @@ Organized into sub-pages:
 ### Chat
 | Setting | Options | Default |
 |---|---|---|
-| Notifications | On / Off | On |
+| Notifications | Sound / Vibrate / Silent / Off | Sound |
 | Thumbnails | On / Off | On |
 | Scroll dial | Off / Slow / Medium / Fast | Medium |
 | Compose | Inline / Full screen | Inline |
 | Keyboard | System / Light | System |
 
+- **Notifications** sets how messages and calls alert. Sound, Vibrate and Silent each post through their own Android channel ("Messages", "Messages (vibrate)", "Messages (silent)"), so any system settings you made for "Messages" still apply. Upgrading turns On into Sound.
 - **Scroll dial** sets how far one turn of the dial scrolls chats and menus. Off hands the dial back to LightOS, which uses it for brightness.
 - **Compose: Full screen** follows LightOS Messages: the thread has a bottom bar with attach, voice note and compose, and compose opens a full-screen editor. Inline keeps a text field under the thread.
 - **Keyboard: Light** is the LP3 keyboard from the Light SDK. System is the phone's installed keyboard (Gboard, for example). Tap the text field to show the keyboard; tap the thread or turn the dial to hide it.
@@ -157,7 +158,7 @@ Per-platform status, refresh connection, and reset (clear data + re-pair). An un
 - [x] Voice notes: record and send on WhatsApp and Signal; incoming voice notes autoplay on open
 - [x] In-app contact editor: tap a DM's title → save/update directly via `ContactsContract` (no AOSP handoff)
 - [x] Ephemeral retention (configurable count + days) on WhatsApp and Signal, kept across bridge restarts
-- [x] Message notifications (WhatsApp + Signal, configurable, respects WhatsApp mutes). Tapping one opens that chat, and the chat on screen never gets one.
+- [x] Message notifications (WhatsApp + Signal; Sound, Vibrate, Silent or Off). Chats muted on your primary stay silent on both platforms, with a muted mark in the chat list. Tapping one opens that chat, and the chat on screen never gets one.
 - [x] Connection status in settings
 - [x] Reset/refresh per connection
 - [x] Light SDK look: Akkurat font, LightOS menus and top bars, haptics, monochrome
@@ -179,7 +180,8 @@ This section lists open bugs and by-design limitations, one line each. Fixes wai
 
 - **Calls can't be answered**: Photon has no voice or video stack, so calls only show as notifications and call rows.
 - **Signal call edge cases**: a hangup that arrives without its offer is ignored, outgoing calls placed on the primary aren't recorded, and clearing the call log on the primary doesn't clear Photon's call rows.
-- **Signal mute state isn't synced**: Signal keeps mutes in Storage Service records, which the library doesn't expose.
+- **Mutes are read-only**: Photon follows mutes set on your primary (WhatsApp and Signal) but can't mute a chat itself. Calls still ring and missed calls still show in muted chats, and an @-mention doesn't break through a muted Signal group.
+- **Signal mutes need the primary online once after upgrading**: Photon asks the primary for the storage key it needs to read mutes, and the primary answers when it's online.
 - **Signal held envelopes are memory-only**: if Photon is killed after a message fails to process, the redelivered copy can't be decrypted again.
 - **Signal message ids keep their random suffix**: Photon matches Signal messages by author and timestamp, and the rewrite of stored ids that would drop the suffix was deferred.
 - **Signal chats drop off the list when all their messages age out**, as on WhatsApp.
