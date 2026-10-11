@@ -98,7 +98,7 @@ object DisplayNames {
      */
     fun contactPrefill(displayName: String?): String {
         val name = asName(displayName) ?: return ""
-        return if (name in NOT_NAMES) "" else name
+        return if (name == YOU || name == NOTE_TO_SELF) "" else name
     }
 
     /** [phone] formatted for [country] ("+44 7700 900123"), or as given if it won't parse. */
@@ -127,10 +127,13 @@ object DisplayNames {
         return t.count(Char::isDigit) in 3..15
     }
 
-    /** [s] as a name: not blank, not [jid] itself, not an id and not a number. */
+    /**
+     * [s] as a name: not blank, not [jid] itself, not an id, not a number and
+     * not a placeholder (older bridges sent "WhatsApp contact" as a caller's name).
+     */
     private fun asName(s: String?, jid: String? = null): String? {
         val t = s?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-        if (t == jid || isRawId(t) || looksLikePhone(t)) return null
+        if (t == jid || isRawId(t) || looksLikePhone(t) || t in PLACEHOLDERS) return null
         return t
     }
 
@@ -144,11 +147,7 @@ object DisplayNames {
     )
     private val BASE64_ID = Regex("""^[A-Za-z0-9+/_\-]{40,}={0,2}$""")
 
-    private val NOT_NAMES = setOf(
-        YOU, NOTE_TO_SELF,
-        placeholder(Platform.WHATSAPP), placeholder(Platform.SIGNAL), placeholder(Platform.SMS),
-        groupPlaceholder(Platform.WHATSAPP), groupPlaceholder(Platform.SIGNAL),
-    )
+    private val PLACEHOLDERS = Platform.entries.flatMap { listOf(placeholder(it), groupPlaceholder(it)) }.toSet()
 }
 
 /** The device's country for number formatting: the SIM's, else the network's, else the locale's. */

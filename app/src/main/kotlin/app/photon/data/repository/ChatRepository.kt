@@ -4,6 +4,7 @@ import app.photon.data.db.PhotonDatabase
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
 import app.photon.data.model.BridgeEvent
+import app.photon.data.names.LocalContacts
 import app.photon.service.BridgeClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -22,15 +23,23 @@ import kotlinx.coroutines.withContext
 // after each DB write, so these replace the old 500ms poll.
 private val REFRESH_EVENTS = setOf(
     "new_message", "message_updated", "conversation_updated", "receipt", "read_self",
-    "call_ended", "call_missed",
+    "call_ended", "call_missed", "names_changed",
     "history_sync_progress", "history_sync_complete", "connection_state",
 )
 
+/**
+ * WhatsApp chats and messages, read from the bridge's database. Names are
+ * resolved as they're read ([WhatsAppNames]): the LP3 contact over what the
+ * bridge stored, so a change on either side shows on the next refresh.
+ */
 class ChatRepository(
     private val db: PhotonDatabase,
     private val bridge: BridgeClient,
     scope: CoroutineScope,
+    localContacts: LocalContacts,
 ) {
+    val names = WhatsAppNames(localContacts::nameFor)
+
     // Self-nudge after our own request-based mutations (markRead, reactions):
     // not every bridge request handler broadcasts an event, and the request's
     // response doesn't flow through bridge.events.
@@ -42,10 +51,12 @@ class ChatRepository(
         // on every reconnect.
         bridge.isConnected.drop(1).filter { it }.map { },
         localChanges,
+        // An LP3 contact saved or edited.
+        localContacts.changes,
     )
 
     val conversations: StateFlow<List<Conversation>?> =
-        conversationsFlow(scope, "ChatRepository", changes) { db.getConversations() }
+        conversationsFlow(scope, "ChatRepository", changes) { db.getConversations().map(names::resolve) }
 
     fun messages(conversationJid: String, limit: Int = 50): Flow<List<Message>> =
         messagesFlow(
@@ -55,20 +66,23 @@ class ChatRepository(
             lookupReply = { db.getMessage(it) },
         )
 
-    fun getConversation(jid: String): Conversation? = db.getConversation(jid)
+    /** The conversation, its name resolved. */
+    fun getConversation(jid: String): Conversation? = db.getConversation(jid)?.let(names::resolve)
 
-    // Group participant display names, re-read on every refresh signal. Can't
-    // ride the conversations StateFlow: participant-name changes don't alter the
+    /** The conversation row as the bridge stored it (name unresolved), for notifications. */
+    fun storedConversation(jid: String): Conversation? = db.getConversation(jid)
+
+    // Group sender names, re-read on every refresh signal. Can't ride the
+    // conversations StateFlow: participant-name changes don't alter the
     // Conversation rows, so its distinctUntilChanged swallows them. This flow
     // dedupes on the name map itself, so names show as soon as they resolve
-    // (e.g. after resolve_participants runs on group open). Empty for DMs.
+    // (e.g. after resolve_participants runs on group open).
     fun participantNames(jid: String): Flow<Map<String, String>> =
         changes
             .onStart { emit(Unit) }
             .map {
                 withContext(Dispatchers.IO) {
-                    db.getParticipants(jid)
-                        .associate { p -> p.jid to (p.displayName ?: p.jid.substringBefore("@")) }
+                    names.participantNames(db.getParticipants(jid), db.getMessageSenders(jid))
                 }
             }
             .distinctUntilChanged()

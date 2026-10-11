@@ -133,6 +133,14 @@ class PhotonDatabase(context: Context) {
         } ?: emptyMap()
     }
 
+    /** Everyone other than the user who has a message stored in the conversation. */
+    fun getMessageSenders(conversationJid: String): List<String> = query { d ->
+        d.rawQuery(
+            "SELECT DISTINCT sender_jid FROM messages WHERE conversation_jid = ? AND is_from_me = 0",
+            arrayOf(conversationJid),
+        ).use { c -> buildList { while (c.moveToNext()) c.getString(0)?.let(::add) } }
+    } ?: emptyList()
+
     fun getParticipants(conversationJid: String): List<Participant> = query { d ->
         d.rawQuery(
             "SELECT * FROM participants WHERE conversation_jid = ?",

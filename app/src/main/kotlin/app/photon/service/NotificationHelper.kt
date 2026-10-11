@@ -26,6 +26,9 @@ object NotificationHelper {
     // up well before this, and the terminate event replaces it as "missed".
     private const val INCOMING_CALL_TIMEOUT_MS = 60_000L
 
+    /** A message notification's body when there's nothing of the message to show. */
+    const val NEW_MESSAGE = "New message"
+
     const val EXTRA_PLATFORM = "app.photon.extra.PLATFORM"
     const val EXTRA_CONVERSATION = "app.photon.extra.CONVERSATION"
 
@@ -56,7 +59,7 @@ object NotificationHelper {
             context, conversationJid, MESSAGE_NOTIF_ID,
             builder(context, platform, conversationJid)
                 .setContentTitle("$senderName · ${platform.label}")
-                .setContentText(body ?: "New message")
+                .setContentText(body ?: NEW_MESSAGE)
                 .setCategory(NotificationCompat.CATEGORY_MESSAGE),
         )
     }
