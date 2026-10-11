@@ -15,6 +15,7 @@ import (
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	"google.golang.org/protobuf/proto"
 )
 
 // RetentionConfig controls how long messages and media are kept.
@@ -22,13 +23,6 @@ type RetentionConfig struct {
 	MaxMessages  int // Max messages per conversation (0 = unlimited)
 	MaxDays      int // Max age in days (0 = unlimited)
 	MediaTTLMins int // Minutes before temp media files are deleted
-}
-
-// cachedGroupName is a groupNames cache entry; see Bridge.groupEntry.
-type cachedGroupName struct {
-	name    string
-	admins  map[string]bool // user parts (phone and LID) of admins; nil = not fetched
-	fetched time.Time
 }
 
 // Bridge holds the whatsmeow client, the message DB, and the line to Kotlin.
@@ -489,4 +483,21 @@ func (b *Bridge) MarkRead(ctx context.Context, jid string, messageIDs []string) 
 // Logout disconnects and removes the device from WhatsApp.
 func (b *Bridge) Logout() error {
 	return b.client.Logout(context.Background())
+}
+
+func (b *Bridge) buildTextMessage(text string, replyToID string) *waE2E.Message {
+	if replyToID == "" {
+		return &waE2E.Message{
+			Conversation: proto.String(text),
+		}
+	}
+
+	return &waE2E.Message{
+		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text: proto.String(text),
+			ContextInfo: &waE2E.ContextInfo{
+				StanzaID: proto.String(replyToID),
+			},
+		},
+	}
 }
