@@ -587,43 +587,13 @@ class SignalMessageReceiver(
                 kyberPreKeys.add(rec)
             }
 
-            // (4) Try the canonical websocket KeysApi first. The reflection-via-
-            //     PushServiceSocket fallback is only used if that path 4xx's.
+            // (4) Upload over the authenticated socket. A failure returns
+            //     false, so the next connect retries with fresh keys.
             val upload = PreKeyUpload(
                 ServiceIdType.ACI, signedPreKey, ecPreKeys, lastResortKyber, kyberPreKeys,
             )
-            val result = keysApi.setPreKeys(upload)
-            try {
-                result.successOrThrow()
-                Log.i(TAG, "Uploaded fresh keys via KeysApi: signed=$signedPreKeyId " +
-                    "lastResortKyber=$lastResortId ec=${ecPreKeys.size} kyber=${kyberPreKeys.size}")
-                return true
-            } catch (e: Exception) {
-                Log.w(TAG, "KeysApi.setPreKeys failed (${e.message}); trying PushServiceSocket fallback")
-            }
-
-            // Fallback: HTTP PUT via reflection. Reuse the socket built on
-            // connect when available; only the pre-connect path builds fresh.
-            val push = pushSocket ?: PushServiceSocket(config, credentials, SignalConfig.USER_AGENT, false)
-            val preKeyState = org.whispersystems.signalservice.internal.push.PreKeyState(
-                org.whispersystems.signalservice.api.push.SignedPreKeyEntity(
-                    signedPreKey.id.toLong(), signedPreKey.keyPair.publicKey, signedPreKey.signature,
-                ),
-                ecPreKeys.map {
-                    org.whispersystems.signalservice.internal.push.PreKeyEntity(it.id.toLong(), it.keyPair.publicKey)
-                },
-                org.whispersystems.signalservice.internal.push.KyberPreKeyEntity(
-                    lastResortKyber.id.toLong(), lastResortKyber.keyPair.publicKey, lastResortKyber.signature,
-                ),
-                kyberPreKeys.map {
-                    org.whispersystems.signalservice.internal.push.KyberPreKeyEntity(
-                        it.id.toLong(), it.keyPair.publicKey, it.signature,
-                    )
-                },
-            )
-            val json = org.whispersystems.signalservice.internal.util.JsonUtil.toJson(preKeyState)
-            push.serviceRequest("/v2/keys?identity=aci", "PUT", json)
-            Log.i(TAG, "Uploaded fresh keys via PushServiceSocket fallback: signed=$signedPreKeyId " +
+            keysApi.setPreKeys(upload).successOrThrow()
+            Log.i(TAG, "Uploaded fresh keys via KeysApi: signed=$signedPreKeyId " +
                 "lastResortKyber=$lastResortId ec=${ecPreKeys.size} kyber=${kyberPreKeys.size}")
             true
         } catch (e: Exception) {
