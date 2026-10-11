@@ -3,6 +3,7 @@ package app.photon.signal.receiver
 import android.util.Log
 import app.photon.signal.EnvelopeRetryTracker
 import app.photon.signal.SignalMessageReceiver
+import app.photon.signal.SignalMessageSender
 import app.photon.signal.envelopeRetryKey
 import org.signal.libsignal.metadata.ProtocolDuplicateMessageException
 import org.signal.libsignal.metadata.ProtocolException
@@ -35,6 +36,7 @@ internal class EnvelopeProcessor(
     private val dataMessages: DataMessageHandler,
     private val syncMessages: SyncMessageHandler,
     private val calls: CallHandler,
+    private val messageSender: SignalMessageSender,
 ) {
     /** A decrypted envelope, held across redeliveries if processing fails. */
     private class DecryptedEnvelope(val content: Content, val metadata: EnvelopeMetadata)
@@ -215,14 +217,14 @@ internal class EnvelopeProcessor(
 
         val timestamp = env.clientTimestamp ?: env.serverTimestamp ?: System.currentTimeMillis()
         val groupId = unidentified?.groupId?.orElse(null) ?: error.groupId.orElse(null)
-        val sent = app.photon.service.PhotonService._signalSender?.sendRetryReceiptForDecryptionFailure(
+        val sent = messageSender.sendRetryReceiptForDecryptionFailure(
             senderServiceId = sender,
             senderDeviceId = error.senderDevice,
             groupId = groupId,
             originalContent = originalContent,
             originalType = originalType,
             originalTimestamp = timestamp,
-        ) ?: false
+        )
         if (!sent) {
             Log.w(TAG, "Retry receipt not sent for failed decrypt from ${sender.take(8)}…")
         }

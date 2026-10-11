@@ -30,12 +30,17 @@ internal fun signalReactionFor(messageId: String, emoji: String): SignalServiceD
     return SignalServiceDataMessage.Reaction(emoji, false, authorAci, timestamp)
 }
 
+/**
+ * @param groupManager the receiver's GroupV2 manager while it's connected,
+ *   for a first send into a group whose members aren't stored yet
+ */
 class SignalMessageSender internal constructor(
     private val credentials: SignalCredentials,
     private val protocolStore: PhotonProtocolStore,
     private val messageDb: SignalMessageDatabase,
     // The network side of sends; replaced in tests.
     transport: SignalTransport? = null,
+    groupManager: () -> SignalGroupV2Manager? = { null },
 ) {
     companion object {
         private const val TAG = "SignalMessageSender"
@@ -49,6 +54,7 @@ class SignalMessageSender internal constructor(
         credentials, messageDb, protocolStore.identityStore,
         config = { config },
         sender = { connection.getOrCreateSender() },
+        groupManager = groupManager,
     )
 
     /**

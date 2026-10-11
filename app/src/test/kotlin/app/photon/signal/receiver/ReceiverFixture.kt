@@ -67,7 +67,7 @@ internal class ReceiverFixture(localAci: String, localDeviceId: Int = 3) {
     private val lp3: (String) -> String? = { addressBook[it] }
     val names = SignalNames(db, lp3) { localAci }
     val contactNames = ContactNames(db, Any(), notifier, profileFetcher = { null })
-    val groupMetadata = GroupMetadata(db, scope, { null }, SessionPings(context, credentials, db, scope))
+    val groupMetadata = GroupMetadata(db, scope, { null }, SessionPings(context, credentials, db, scope) { false })
 
     fun close() {
         scope.cancel()

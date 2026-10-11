@@ -68,6 +68,8 @@ internal class LibraryTransport(
     private val config: () -> SignalServiceConfiguration,
     // The library sender, over the receiver's sockets when it has them.
     private val sender: () -> SignalServiceMessageSender,
+    // The receiver's, while it's connected.
+    private val groupManager: () -> SignalGroupV2Manager?,
 ) : SignalTransport {
 
     override fun send(recipient: Recipient, content: OutgoingContent, timestamp: Long) = when (recipient) {
@@ -264,7 +266,7 @@ internal class LibraryTransport(
         val members = if (cachedMembers.isNotEmpty()) {
             cachedMembers.filter { it != myAci }
         } else {
-            val groupManager = app.photon.service.PhotonService._signalGroupManager
+            val groupManager = groupManager()
                 ?: throw IllegalStateException("Group manager not ready — receiver not connected?")
             val group = groupManager.fetchGroup(recipient.meta.masterKey)
                 ?: throw IllegalStateException("Couldn't fetch group state for $conversationJid")

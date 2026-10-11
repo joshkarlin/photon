@@ -32,13 +32,16 @@ import kotlinx.coroutines.withContext
  * ([SignalNames]), so they follow both the stored sources and the LP3
  * address book.
  *
+ * @param downloadAttachment fetches an incoming attachment by message id
+ *   (the receiver's), returning its local path
  * @param selfAci the account's own ACI, whose DM is "Note to Self"
  */
 class SignalRepository(
     private val db: SignalMessageDatabase,
-    var sender: SignalMessageSender? = null,
+    val sender: SignalMessageSender?,
     scope: CoroutineScope,
     localContacts: LocalContacts,
+    private val downloadAttachment: (messageId: String) -> String? = { null },
     selfAci: () -> String?,
 ) {
     companion object {
@@ -136,6 +139,6 @@ class SignalRepository(
     }
 
     suspend fun downloadMedia(messageId: String): String? = withContext(Dispatchers.IO) {
-        app.photon.service.PhotonService._signalReceiver?.downloadAttachment(messageId)
+        downloadAttachment(messageId)
     }
 }

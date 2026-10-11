@@ -84,11 +84,17 @@ class PhotonService : Service() {
         _signalManager = SignalAccountManager(signalProtocolStore, signalCreds, signalProtocolDb)
         val signalMessageDb = SignalMessageDatabase(this)
         _signalMessageDb = signalMessageDb
-        _signalSender = SignalMessageSender(signalCreds, signalProtocolStore, signalMessageDb)
+        val signalSender = SignalMessageSender(
+            signalCreds, signalProtocolStore, signalMessageDb,
+            groupManager = { _signalReceiver?.groupManager },
+        )
+        _signalSender = signalSender
+        val signalReceiver = SignalMessageReceiver(this, signalCreds, signalProtocolStore, signalMessageDb, signalSender)
+        _signalReceiver = signalReceiver
         _signalRepository = SignalRepository(
-            signalMessageDb, _signalSender, scope, LocalContacts.get(this),
+            signalMessageDb, signalSender, scope, LocalContacts.get(this),
+            downloadAttachment = signalReceiver::downloadAttachment,
         ) { signalCreds.aciString }
-        _signalReceiver = SignalMessageReceiver(this, signalCreds, signalProtocolStore, signalMessageDb)
 
         // Start Signal message receiver if already paired
         Log.i("PhotonService", "Signal registered: ${signalCreds.isRegistered()}")
@@ -385,8 +391,6 @@ class PhotonService : Service() {
         // Held only so resetSignal can close them before deleting their files.
         private var _signalProtocolDb: SignalProtocolDatabase? = null
         private var _signalMessageDb: SignalMessageDatabase? = null
-        /** Lifecycle: set by the receiver when the auth WS comes up; cleared on stop. */
-        @Volatile var _signalGroupManager: app.photon.signal.SignalGroupV2Manager? = null
         var _goBridge: GoBridge? = null
             private set
 
