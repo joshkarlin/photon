@@ -47,20 +47,31 @@ object NotificationHelper {
 
     fun isVisible(conversationJid: String): Boolean = visibleConversation == conversationJid
 
+    /**
+     * Post (or replace) the conversation's message notification.
+     *
+     * @param update true when this corrects the notification already showing
+     *   (e.g. a delete-for-everyone took away the message it showed) rather
+     *   than announcing a new message: it then replaces it without sounding
+     *   or buzzing again. A new message always alerts, even over an
+     *   existing notification.
+     */
     fun showMessageNotification(
         context: Context,
-        senderName: String,
+        title: String,
         body: String?,
         platform: Platform,
         conversationJid: String,
+        update: Boolean = false,
     ) {
         if (isVisible(conversationJid)) return
         post(
             context, conversationJid, MESSAGE_NOTIF_ID,
             builder(context, platform, conversationJid)
-                .setContentTitle("$senderName · ${platform.label}")
+                .setContentTitle("$title · ${platform.label}")
                 .setContentText(body ?: NEW_MESSAGE)
-                .setCategory(NotificationCompat.CATEGORY_MESSAGE),
+                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                .setOnlyAlertOnce(update),
         )
     }
 

@@ -42,7 +42,8 @@ internal class MessageNotifications(
 ) {
     /**
      * For groups, the title is the group name (with the sender's name woven
-     * into the body); for DMs it's the sender.
+     * into the body); for DMs it's the sender. [update]: a correction of the
+     * showing notification, which mustn't alert again.
      */
     fun showMessage(
         conversationJid: String,
@@ -50,6 +51,7 @@ internal class MessageNotifications(
         senderAci: String,
         text: String?,
         contentType: String,
+        update: Boolean = false,
     ) {
         val notification = messageNotificationText(
             conversationTitle = names.title(conversationJid, isGroup),
@@ -57,7 +59,7 @@ internal class MessageNotifications(
             senderName = if (isGroup) names.person(senderAci) else null,
             preview = notificationPreview(text, contentType),
         )
-        notifier.showMessage(notification.title, notification.body, conversationJid)
+        notifier.showMessage(notification.title, notification.body, conversationJid, update)
     }
 
     /** A delete-for-everyone took an unread message out of the conversation. */
@@ -72,10 +74,11 @@ internal class MessageNotifications(
                 val conversation = messageDb.getConversation(jid)
                 val isGroup = conversation?.isGroup == true
                 val newest = next.newest
+                // A correction, not a new message: no second alert.
                 if (newest != null) {
-                    showMessage(jid, isGroup, newest.senderJid, newest.textBody, newest.contentType)
+                    showMessage(jid, isGroup, newest.senderJid, newest.textBody, newest.contentType, update = true)
                 } else {
-                    notifier.showMessage(names.title(jid, isGroup), null, jid)
+                    notifier.showMessage(names.title(jid, isGroup), null, jid, update = true)
                 }
             }
         }

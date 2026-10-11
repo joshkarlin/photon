@@ -87,7 +87,7 @@ class RemoteDeleteNotificationTest {
 
         edits.applyRemoteDelete("${alice}_1700000100000")
 
-        assertEquals(listOf("message:$alice:Alice:see you at 8"), fx.notifier.events)
+        assertEquals(listOf("update:$alice:Alice:see you at 8"), fx.notifier.events)
     }
 
     @Test
@@ -99,7 +99,7 @@ class RemoteDeleteNotificationTest {
 
         edits.applyRemoteDelete("${bob}_1700000100000")
 
-        assertEquals(listOf("message:$group:Climbing:Ally: first"), fx.notifier.events)
+        assertEquals(listOf("update:$group:Climbing:Ally: first"), fx.notifier.events)
     }
 
     /** The user swiped the notification away: a delete mustn't bring it back. */
@@ -141,6 +141,6 @@ class RemoteDeleteNotificationTest {
 
         edits.applyRemoteDelete("${alice}_1700000000000")
 
-        assertEquals(listOf("message:$alice:Alice:null"), fx.notifier.events)
+        assertEquals(listOf("update:$alice:Alice:null"), fx.notifier.events)
     }
 }

@@ -23,8 +23,9 @@ internal class RecordingNotifier : SignalNotifier {
 
     override fun isShowingMessage(conversationJid: String) = conversationJid in showing
 
-    override fun showMessage(title: String, body: String?, conversationJid: String) {
-        events += "message:$conversationJid:$title:$body"
+    /** A new message is "message:…"; a correction of the showing one is "update:…". */
+    override fun showMessage(title: String, body: String?, conversationJid: String, update: Boolean) {
+        events += "${if (update) "update" else "message"}:$conversationJid:$title:$body"
     }
 
     override fun showIncomingCall(callerName: String, conversationJid: String, isVideo: Boolean) {
