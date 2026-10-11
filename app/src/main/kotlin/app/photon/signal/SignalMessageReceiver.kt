@@ -78,12 +78,15 @@ class SignalMessageReceiver(
         pushSocket = { pushSocket },
         onSynced = { contactNames.mergeResolvableServiceIds() },
     )
-    private val calls = CallHandler(credentials, messageDb, contactNames, groupMetadata, notifier, { delayMs, task ->
-        scope.launch {
-            delay(delayMs)
-            task()
-        }
-    })
+    private val calls = CallHandler(
+        credentials, messageDb, contactNames, groupMetadata, notifier,
+        schedule = { delayMs, task ->
+            scope.launch {
+                delay(delayMs)
+                task()
+            }
+        },
+    )
     private val receipts = Receipts(credentials, messageDb)
     private val messageNotifications = MessageNotifications(messageDb, contactNames, groupMetadata, notifier)
     private val remoteEdits = RemoteEdits(messageDb, messageNotifications)
