@@ -52,8 +52,8 @@ android {
             // Minify disabled: Signal's libsignal/Jackson code relies on
             // reflection and field-name serialization that R8 would strip or
             // rename, breaking the protocol at runtime (see AndroidRecordFix and
-            // the PushServiceSocket reflection workaround). APK size is dominated
-            // by native libs anyway.
+            // the reflective serviceRequest calls in SignalConfig). APK size is
+            // dominated by native libs anyway.
             isMinifyEnabled = false
             isShrinkResources = false
         }
