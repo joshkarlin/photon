@@ -638,8 +638,9 @@ class SignalMessageSender(
         messageDb.updateMessageStatus(messageId, "sending")
         // Keep the same wire timestamp by reusing the original — a retry
         // that actually went through the first time would otherwise bypass
-        // recipient-side dedupe and produce a duplicate.
-        val timestamp = row.timestamp * 1000
+        // recipient-side dedupe and produce a duplicate. The exact ms value
+        // lives in the id; the timestamp column only has seconds.
+        val timestamp = MessageKeys.sentTimestampMs(messageId, row.timestamp)
         return try {
             val attachments = if (isText) emptyList() else listOf(
                 uploadAttachment(mediaFile!!, row.mediaMime ?: defaultMimeFor(row.contentType), voiceNote = row.contentType == "audio"),
@@ -671,7 +672,7 @@ class SignalMessageSender(
      */
     fun deleteMessage(conversationJid: String, messageId: String, forEveryone: Boolean): Boolean {
         if (forEveryone) {
-            val targetTs = messageId.split("_").getOrNull(1)?.toLongOrNull()
+            val targetTs = MessageKeys.parse(messageId)?.second
                 ?: messageDb.getMessage(messageId)?.let { it.timestamp * 1000 }
                 ?: run {
                     Log.w(TAG, "deleteMessage: can't derive target timestamp for $messageId")
