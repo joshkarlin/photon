@@ -505,9 +505,11 @@ func (b *Bridge) applyReceipt(chatJID string, ids []string, t types.ReceiptType,
 
 func (b *Bridge) handleChatPresence(evt *events.ChatPresence) {
 	composing := evt.State == types.ChatPresenceComposing
+	// Keyed like messages, so the indicator matches the open conversation
+	// (and the sender's participant name) in @lid chats too.
 	b.BroadcastEvent("typing", TypingEvent{
-		JID:       evt.Chat.String(),
-		SenderJID: evt.Sender.String(),
+		JID:       b.resolveLIDJID(evt.Chat).String(),
+		SenderJID: b.canonicalSenderJID(evt.Sender),
 		Composing: composing,
 	})
 }

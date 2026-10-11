@@ -98,3 +98,23 @@ func TestBackfillContactNames_namesLIDChats(t *testing.T) {
 		t.Errorf("@lid chat name = %q, want Bob from the contact store", got)
 	}
 }
+
+func TestTyping_resolvesLIDs(t *testing.T) {
+	b := newClientBridge(t)
+	sent := captureEvents(b)
+	pn := types.NewJID("447700900001", types.DefaultUserServer)
+	lid := types.NewJID("11223344", types.HiddenUserServer)
+	b.client.Store.LIDs.PutLIDMapping(context.Background(), lid, pn)
+	lidDevice := lid
+	lidDevice.Device = 2
+
+	b.HandleEvent(&events.ChatPresence{
+		MessageSource: types.MessageSource{Chat: lid, Sender: lidDevice},
+		State:         types.ChatPresenceComposing,
+	})
+
+	got := sent.ofType("typing")
+	if len(got) != 1 || got[0]["jid"] != pn.String() || got[0]["sender_jid"] != pn.String() || got[0]["composing"] != true {
+		t.Errorf("typing = %v, want chat and sender as %s", got, pn)
+	}
+}
