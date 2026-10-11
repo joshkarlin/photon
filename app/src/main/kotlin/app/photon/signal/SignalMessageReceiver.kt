@@ -5,6 +5,9 @@ import android.util.Log
 import org.whispersystems.signalservice.internal.push.PushServiceSocket
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.receiver.AndroidSignalNotifier
+import app.photon.signal.receiver.Attachments
+import app.photon.signal.receiver.ContactsSync
+import app.photon.signal.receiver.contentTypeForMime
 import app.photon.signal.receiver.ContactNames
 import app.photon.signal.receiver.GroupMetadata
 import app.photon.signal.receiver.PreKeyRefill
@@ -32,23 +35,17 @@ import org.signal.libsignal.protocol.ecc.ECPublicKey
 import org.signal.libsignal.protocol.groups.GroupSessionBuilder
 import org.signal.libsignal.protocol.message.CiphertextMessage
 import org.signal.libsignal.protocol.message.SenderKeyDistributionMessage
-import org.whispersystems.signalservice.api.SignalServiceMessageReceiver
-import org.whispersystems.signalservice.api.crypto.AttachmentCipherInputStream
 import org.whispersystems.signalservice.api.crypto.EnvelopeMetadata
 import org.whispersystems.signalservice.api.crypto.SignalGroupSessionBuilder
 import org.whispersystems.signalservice.api.crypto.SignalServiceCipher
 import org.whispersystems.signalservice.api.messages.EnvelopeResponse
-import org.whispersystems.signalservice.api.messages.multidevice.DeviceContactsInputStream
 import org.whispersystems.signalservice.api.push.SignalServiceAddress
-import org.whispersystems.signalservice.api.util.AttachmentPointerUtil
 import org.whispersystems.signalservice.api.websocket.SignalWebSocket
-import org.whispersystems.signalservice.internal.push.AttachmentPointer
 import org.whispersystems.signalservice.internal.push.CallMessage
 import org.whispersystems.signalservice.internal.push.Content
 import org.whispersystems.signalservice.internal.push.DataMessage
 import org.whispersystems.signalservice.internal.push.Envelope
 import org.whispersystems.signalservice.internal.push.SyncMessage
-import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.UUID
 
@@ -62,16 +59,6 @@ class SignalMessageReceiver(
         // Shared by the handlers in app.photon.signal.receiver, so one logcat
         // filter (docs/VERIFY.md) still catches everything the receiver does.
         internal const val TAG = "SignalMessageReceiver"
-        // Generous cap on the contacts sync attachment (~10 MB is way more
-        // than any plausible contact book).
-        private const val MAX_CONTACTS_BLOB_BYTES: Long = 50L * 1024 * 1024
-        // Cap on incoming media downloads (Signal's own attachment limit is
-        // ~100 MB).
-        private const val MAX_ATTACHMENT_BYTES: Long = 100L * 1024 * 1024
-        // Downloaded media TTL — matches the WhatsApp bridge's ephemeral
-        // policy (viewed, then auto-deleted; re-downloadable on tap while
-        // the CDN pointer is still valid).
-        private const val MEDIA_TTL_MS: Long = 5L * 60 * 1000
         // SignalWebSocket exposes inbound frames through a blocking long-poll
         // API. Its Object.wait() releases the socket monitor, so outbound
         // MessageApi/KeysApi requests can proceed while this waits.
@@ -92,6 +79,8 @@ class SignalMessageReceiver(
     private val sessionPings = SessionPings(context, credentials, messageDb, scope)
     private val contactNames = ContactNames(messageDb, contactResolver) { profileFetcher }
     private val groupMetadata = GroupMetadata(messageDb, contactResolver, scope, { groupManager }, sessionPings)
+    private val attachments = Attachments(context, messageDb) { pushSocket }
+    private val contactsSync = ContactsSync(context, messageDb, contactResolver) { pushSocket }
     private val sessionLock = SignalConfig.newSessionLock()
     private val senderKeySessionBuilder = SignalGroupSessionBuilder(
         sessionLock,
@@ -850,7 +839,7 @@ class SignalMessageReceiver(
         // Voice notes auto-download (small, and the UI autoplays them on
         // open) — mirrors the WhatsApp bridge's auto-download policy.
         if (attachment != null && contentType == "audio") {
-            scope.launch { downloadAttachment(messageId) }
+            scope.launch { attachments.downloadAttachment(messageId) }
         }
 
         if (readElsewhere) {
@@ -1291,106 +1280,18 @@ class SignalMessageReceiver(
         if (contacts != null) {
             val blob = contacts.blob
             if (blob != null) {
-                scope.launch { processContactsBlob(blob) }
+                scope.launch { contactsSync.processContactsBlob(blob) }
             } else {
                 Log.d(TAG, "Contacts sync had no blob")
             }
         }
     }
 
-    /**
-     * Map an attachment mime type to our content_type column vocabulary.
-     */
-    private fun contentTypeForMime(mime: String?): String = when {
-        mime == null -> "document"
-        mime.startsWith("image/") -> "image"
-        mime.startsWith("video/") -> "video"
-        mime.startsWith("audio/") -> "audio"
-        else -> "document"
-    }
+    /** Download an incoming attachment by message id; see [Attachments.downloadAttachment]. */
+    fun downloadAttachment(messageId: String): String? = attachments.downloadAttachment(messageId)
 
-    private fun extensionForMime(mime: String?): String = when {
-        mime == null -> ""
-        mime.startsWith("image/png") -> ".png"
-        mime.startsWith("image/webp") -> ".webp"
-        mime.startsWith("image/gif") -> ".gif"
-        mime.startsWith("image/") -> ".jpg"
-        mime.startsWith("video/") -> ".mp4"
-        mime.startsWith("audio/") -> ".ogg"
-        else -> ""
-    }
-
-    /**
-     * Download an incoming attachment by message id. The serialized
-     * AttachmentPointer was stored in raw_proto at receive time; this fetches
-     * and decrypts the blob from Signal's CDN, writes it under
-     * filesDir/signal_media, and records the path on the message row so the
-     * UI renders it directly next time. Returns the local path, or null when
-     * the pointer is missing/expired (Signal CDN attachments expire after
-     * ~45 days) or the download fails. Safe to call repeatedly — an existing
-     * downloaded file short-circuits.
-     */
-    fun downloadAttachment(messageId: String): String? {
-        val push = pushSocket ?: run {
-            Log.w(TAG, "downloadAttachment: pushSocket not initialised")
-            return null
-        }
-        val row = messageDb.getMessage(messageId) ?: return null
-        row.mediaUrl?.let { existing ->
-            if (File(existing).exists()) return existing
-        }
-        val pointerBytes = messageDb.getMessageRawProto(messageId) ?: run {
-            Log.w(TAG, "downloadAttachment: no stored pointer for $messageId")
-            return null
-        }
-        return try {
-            val proto = AttachmentPointer.ADAPTER.decode(pointerBytes)
-            val pointer = AttachmentPointerUtil.createSignalAttachmentPointer(proto)
-            val digest = pointer.digest.orElse(null) ?: run {
-                Log.w(TAG, "downloadAttachment: pointer has no digest for $messageId")
-                return null
-            }
-            val mediaDir = File(context.filesDir, "signal_media").apply { mkdirs() }
-            val cipherFile = File(context.cacheDir, "sig_att_$messageId.bin")
-            try {
-                val messageReceiver = SignalServiceMessageReceiver(push)
-                val plain = messageReceiver.retrieveAttachment(
-                    pointer,
-                    cipherFile,
-                    MAX_ATTACHMENT_BYTES,
-                    AttachmentCipherInputStream.IntegrityCheck.forEncryptedDigest(digest),
-                )
-                val outFile = File(mediaDir, messageId + extensionForMime(row.mediaMime))
-                plain.use { input -> outFile.outputStream().use { input.copyTo(it) } }
-                messageDb.updateMediaUrl(messageId, outFile.absolutePath)
-                Log.i(TAG, "Downloaded attachment for $messageId (${outFile.length()}B)")
-                outFile.absolutePath
-            } finally {
-                cipherFile.delete()
-            }
-        } catch (t: Throwable) {
-            Log.w(TAG, "Attachment download failed for $messageId: ${t.javaClass.simpleName}: ${t.message}")
-            null
-        }
-    }
-
-    /**
-     * Delete downloaded Signal media older than the TTL and clear the
-     * media_url on the affected rows (the stored AttachmentPointer keeps
-     * tap-to-redownload working). Called periodically by PhotonService.
-     */
-    fun pruneMedia() {
-        val mediaDir = File(context.filesDir, "signal_media")
-        val cutoff = System.currentTimeMillis() - MEDIA_TTL_MS
-        var pruned = 0
-        mediaDir.listFiles()?.forEach { f ->
-            if (f.isFile && f.lastModified() < cutoff && f.delete()) {
-                messageDb.clearMediaUrlByPath(f.absolutePath)
-                pruned++
-            }
-        }
-        if (pruned > 0) Log.i(TAG, "Pruned $pruned downloaded Signal media files")
-    }
+    /** Delete downloaded media past its TTL. Called periodically by PhotonService. */
+    fun pruneMedia() = attachments.pruneMedia()
 
     /**
      * Enforce the ephemeral message window (per-chat cap and max age from
@@ -1401,107 +1302,6 @@ class SignalMessageReceiver(
         val pruned = messageDb.pruneMessages(maxPerConversation, maxAgeDays)
         if (pruned > 0) {
             Log.i(TAG, "Pruned $pruned Signal messages (cap=$maxPerConversation/chat, maxAge=${maxAgeDays}d)")
-        }
-    }
-
-    /**
-     * Downloads, decrypts, and parses a sync.contacts attachment.
-     * Each DeviceContact in the stream gets its name + phone stored as a
-     * contact record, and any conversation with that ACI gets its display
-     * name updated to the primary device's local contact name.
-     */
-    private fun processContactsBlob(blob: AttachmentPointer) {
-        val push = pushSocket
-        if (push == null) {
-            Log.w(TAG, "processContactsBlob: pushSocket not initialised")
-            return
-        }
-        val publicPointer = try {
-            AttachmentPointerUtil.createSignalAttachmentPointer(blob)
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to build attachment pointer: ${e.message}")
-            return
-        }
-        val digest = publicPointer.digest.orElse(null)
-        if (digest == null) {
-            Log.w(TAG, "Contacts blob has no digest, can't verify; skipping")
-            return
-        }
-        val tempDir = File(context.cacheDir, "signal_sync").apply { mkdirs() }
-        val cipherFile = File(tempDir, "contacts_${System.currentTimeMillis()}.bin")
-        try {
-            val messageReceiver = SignalServiceMessageReceiver(push)
-            val plain = messageReceiver.retrieveAttachment(
-                publicPointer,
-                cipherFile,
-                MAX_CONTACTS_BLOB_BYTES,
-                AttachmentCipherInputStream.IntegrityCheck.forEncryptedDigest(digest),
-            )
-            val stream = DeviceContactsInputStream(plain)
-            var count = 0
-            while (true) {
-                // Catch Throwable (not just Exception) — a malformed/truncated
-                // stream can produce nonsense length prefixes that trigger
-                // OutOfMemoryError when the parser tries to allocate a buffer.
-                // OOM is Error not Exception, so a plain Exception catch lets
-                // it escape and crashes the process.
-                val contact = try {
-                    stream.read()
-                } catch (t: Throwable) {
-                    Log.w(TAG, "DeviceContactsInputStream.read threw after $count contacts: ${t.javaClass.simpleName}: ${t.message}")
-                    break
-                } ?: break
-                try {
-                    ingestDeviceContact(contact)
-                    count++
-                } catch (t: Throwable) {
-                    Log.w(TAG, "ingestDeviceContact threw: ${t.message}")
-                }
-                // DeviceContactsInputStream returns each contact with a
-                // LimitedInputStream wrapping its avatar bytes. If we don't
-                // drain it, the underlying stream is still pointing inside
-                // the avatar payload when read() is called for the next
-                // contact — and the parser will interpret avatar bytes as a
-                // varint length, leading to OOM on the bogus allocation.
-                contact.avatar.orElse(null)?.inputStream?.let { avatarStream ->
-                    try {
-                        val buf = ByteArray(8192)
-                        while (avatarStream.read(buf) >= 0) { /* discard */ }
-                    } catch (_: Throwable) { /* ignore */ }
-                }
-            }
-            Log.i(TAG, "Contacts sync: ingested $count contacts")
-        } catch (t: Throwable) {
-            Log.w(TAG, "Contacts sync download/parse failed: ${t.javaClass.simpleName}: ${t.message}", t)
-        } finally {
-            cipherFile.delete()
-        }
-    }
-
-    private fun ingestDeviceContact(
-        contact: org.whispersystems.signalservice.api.messages.multidevice.DeviceContact,
-    ) {
-        val aci = contact.aci.orElse(null)?.toString() ?: return
-        val phone = contact.e164.orElse(null)
-
-        // We intentionally do NOT ingest the name from the primary's address
-        // book. The user wants this device's local contacts to be the source
-        // of truth — names get resolved via AndroidContactResolver at the
-        // point of writing the conversation row. We only persist the
-        // ACI<->phone mapping here so that resolution can happen on
-        // incoming messages even before the contact has messaged us.
-        if (phone != null) {
-            messageDb.updateContactPhone(aci, phone)
-            // Pre-resolve a name from local contacts and upsert the
-            // conversation row. If there's no local match the conversation
-            // stays nameless (UI will show the phone number).
-            val androidName = contactResolver.resolve(phone)
-            if (androidName != null) {
-                messageDb.upsertConversation(jid = aci, name = androidName, isGroup = false)
-                Log.d(TAG, "Synced contact $aci: phone=$phone, local name=$androidName")
-            } else {
-                Log.d(TAG, "Synced contact $aci: phone=$phone (no local name)")
-            }
         }
     }
 
