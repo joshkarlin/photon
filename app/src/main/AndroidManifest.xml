@@ -1,10 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Package visibility for speech recognition services. -->
+    <!-- Package visibility for speech recognition services, and for a camera
+         app to take a photo with (the attachment sheet hides Camera without one). -->
     <queries>
         <intent>
             <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE" />
         </intent>
     </queries>
 
@@ -53,6 +57,18 @@
             android:name=".service.PhotonService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Hands the camera app one file to write a photo into: files/camera/
+             only (camera_paths.xml). The photo is then staged as a send_media_* file. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.camera"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/camera_paths" />
+        </provider>
 
         <receiver
             android:name=".service.BootReceiver"

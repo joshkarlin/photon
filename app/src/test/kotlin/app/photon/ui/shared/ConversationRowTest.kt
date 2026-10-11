@@ -20,6 +20,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /** A chat-list row marks a muted chat beside its time. */
@@ -75,12 +76,19 @@ class ConversationRowTest {
         assertTrue(count.right <= time.left, "count $count should sit left of time $time")
     }
 
+    /** Muted mark, count, time: the count stays beside the time whether or not a chat is muted. */
     @Test
-    fun theMutedIconSitsJustBeforeTheTime() {
+    fun theMutedIconSitsBeforeTheCount() {
         showRows()
         val icon = rule.onNodeWithContentDescription("Muted", useUnmergedTree = true).getBoundsInRoot()
+        val count = rule.onNodeWithText("3", useUnmergedTree = true).getBoundsInRoot()
         val time = rule.onNodeWithText(formatTimestamp(mutedAt), useUnmergedTree = true).getBoundsInRoot()
-        assertTrue(icon.right <= time.left, "icon $icon should sit left of time $time")
+        assertTrue(icon.right <= count.left, "icon $icon should sit left of count $count")
+        assertTrue(count.right <= time.left, "count $count should sit left of time $time")
         assertTrue(icon.top >= time.top && icon.bottom <= time.bottom, "icon $icon should fit the time's line $time")
+        // The same gap from count to time as in a row that isn't muted.
+        val otherCount = rule.onNodeWithText("2", useUnmergedTree = true).getBoundsInRoot()
+        val otherTime = rule.onNodeWithText(formatTimestamp(now - 1800), useUnmergedTree = true).getBoundsInRoot()
+        assertEquals((time.left - count.right).value, (otherTime.left - otherCount.right).value, 0.5f)
     }
 }

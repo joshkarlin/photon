@@ -45,12 +45,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 // bottom bar of actions, and writing happens in a full-screen editor.
 
 /**
- * The thread's bottom bar: attach on the left and voice note in the middle
- * where the platform supports them, compose on the right. While a voice note
- * records it becomes cancel, timer, send.
+ * The thread's bottom bar: attach on the left (opening the attachment sheet,
+ * [onAttach]) and voice note in the middle where the platform supports them,
+ * compose on the right. While a voice note records it becomes cancel, timer,
+ * send.
  */
 @Composable
-internal fun ThreadBottomBar(media: MediaInput, onCompose: () -> Unit) {
+internal fun ThreadBottomBar(media: MediaInput, onAttach: () -> Unit, onCompose: () -> Unit) {
     val items = if (media.isRecording) {
         listOf(
             LightBarButton.LightIcon(LightIcons.CLOSE, onClick = media::cancelRecording, contentDescription = "Cancel recording"),
@@ -60,9 +61,9 @@ internal fun ThreadBottomBar(media: MediaInput, onCompose: () -> Unit) {
     } else {
         // Missing actions stay as empty slots so compose stays on the right.
         listOf(
-            LightBarButton.LightIcon(LightIcons.ADD, onClick = media::attach, contentDescription = "Attach")
+            LightBarButton.LightIcon(LightIcons.ADD, onClick = onAttach, contentDescription = "Attach")
                 .takeIf { media.canAttach },
-            LightBarButton.LightIcon(LightIcons.MICROPHONE, onClick = media::record, contentDescription = "Voice note")
+            LightBarButton.LightIcon(VoiceNoteIcon, onClick = media::record, contentDescription = VOICE_NOTE)
                 .takeIf { media.canRecord },
             LightBarButton.LightIcon(LightIcons.COMPOSE_MESSAGE, onClick = onCompose, contentDescription = "Compose"),
         )
