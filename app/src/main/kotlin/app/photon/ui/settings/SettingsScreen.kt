@@ -64,12 +64,12 @@ private fun HomePage(onBack: () -> Unit, onNav: (Page) -> Unit) {
 @Composable
 private fun SettingsHomeContent(version: String?, onBack: () -> Unit, onNav: (Page) -> Unit) {
     MenuScreen("Settings", onBack) {
-        MenuRow("CONNECTIONS") { onNav(Page.CONNECTIONS) }
-        MenuRow("CHAT") { onNav(Page.CHAT) }
-        MenuRow("STORAGE") { onNav(Page.STORAGE) }
+        MenuRow("Connections") { onNav(Page.CONNECTIONS) }
+        MenuRow("Chat") { onNav(Page.CHAT) }
+        MenuRow("Storage") { onNav(Page.STORAGE) }
         if (version != null) {
             LightText(
-                text = "PHOTON $version",
+                text = "Photon $version",
                 variant = LightTextVariant.Detail,
                 lighten = true,
                 modifier = Modifier.padding(vertical = 1f.gridUnitsAsDp()),
@@ -89,8 +89,8 @@ private fun ConnectionsPage(onBack: () -> Unit, onNav: (Page) -> Unit) {
 
     BackHandler { onBack() }
     MenuScreen("Connections", onBack) {
-        MenuRow("WHATSAPP", formatState(waState)) { onNav(Page.WHATSAPP) }
-        MenuRow("SIGNAL", if (sigRegistered) formatState(sigState) else "NOT LINKED") { onNav(Page.SIGNAL) }
+        MenuRow("WhatsApp", formatState(waState)) { onNav(Page.WHATSAPP) }
+        MenuRow("Signal", if (sigRegistered) formatState(sigState) else NOT_LINKED) { onNav(Page.SIGNAL) }
     }
 }
 
@@ -105,20 +105,20 @@ private fun WhatsAppPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
 
     BackHandler { onBack() }
     MenuScreen("WhatsApp", onBack) {
-        MenuRow("STATUS", formatState(waState), emphasizeValue = waState == "connected")
+        MenuRow("Status", formatState(waState), emphasizeValue = waState == "connected")
 
         if (waState == "logged_out") {
             // Not paired: the only useful action is to start the pairing flow.
-            MenuRow("LINK DEVICE", onClick = onReset)
+            MenuRow("Link Device", onClick = onReset)
         } else {
-            MenuRow("REFRESH CONNECTION", onClick = {
+            MenuRow("Refresh Connection", onClick = {
                 scope.launch {
                     try {
                         bridge?.reconnectWhatsApp()
                     } catch (_: Exception) {}
                 }
             })
-            MenuRow("RESET", onClick = {
+            MenuRow("Reset", onClick = {
                 scope.launch {
                     session?.reset()
                     onReset()
@@ -142,20 +142,20 @@ private fun SignalPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
     BackHandler { onBack() }
     MenuScreen("Signal", onBack) {
         MenuRow(
-            "STATUS",
-            if (sigRegistered) formatState(sigState) else "NOT LINKED",
+            "Status",
+            if (sigRegistered) formatState(sigState) else NOT_LINKED,
             emphasizeValue = sigRegistered && sigState == "connected",
         )
-        if (phone != null) MenuRow("PHONE", phone)
-        if (deviceId != null && sigRegistered) MenuRow("DEVICE", deviceId.toString())
+        if (phone != null) MenuRow("Phone", phone)
+        if (deviceId != null && sigRegistered) MenuRow("Device", deviceId.toString())
 
         if (sigRegistered) {
-            MenuRow("REFRESH CONNECTION") {
+            MenuRow("Refresh Connection") {
                 scope.launch {
                     session?.refresh()
                 }
             }
-            MenuRow("RESET") {
+            MenuRow("Reset") {
                 scope.launch {
                     // Unlinking waits on the network; navigating must happen on the main thread.
                     withContext(Dispatchers.IO) { session?.reset() }
@@ -164,7 +164,7 @@ private fun SignalPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
             }
         } else {
             // Not linked: offer the pairing flow directly from settings.
-            MenuRow("LINK DEVICE", onClick = onReset)
+            MenuRow("Link Device", onClick = onReset)
         }
     }
 }
@@ -177,13 +177,20 @@ private fun ChatPage(onBack: () -> Unit) {
     val context = LocalContext.current
     val prefs = remember { PhotonPreferences(context) }
 
-    val showThumbnails by prefs.showThumbnails.collectAsState(initial = true)
-    val notificationLevel by prefs.notificationLevel.collectAsState(initial = NotificationLevel.DEFAULT)
-    val scrollDial by prefs.scrollDial.collectAsState(initial = ScrollDial.DEFAULT)
-    val composeStyle by prefs.composeStyle.collectAsState(initial = ComposeStyle.DEFAULT)
-    val keyboardStyle by prefs.keyboardStyle.collectAsState(initial = KeyboardStyle.DEFAULT)
+    // Null until read, so no default flashes before the stored value.
+    val showThumbnails = prefs.showThumbnails.collectAsState(initial = null).value
+    val notificationLevel = prefs.notificationLevel.collectAsState(initial = null).value
+    val scrollDial = prefs.scrollDial.collectAsState(initial = null).value
+    val composeStyle = prefs.composeStyle.collectAsState(initial = null).value
+    val keyboardStyle = prefs.keyboardStyle.collectAsState(initial = null).value
 
     BackHandler { onBack() }
+    if (showThumbnails == null || notificationLevel == null || scrollDial == null ||
+        composeStyle == null || keyboardStyle == null
+    ) {
+        MenuScreen("Chat", onBack) {}
+        return
+    }
     ChatSettingsContent(
         notificationLevel = notificationLevel,
         showThumbnails = showThumbnails,
@@ -214,11 +221,11 @@ private fun ChatSettingsContent(
     onCycleKeyboardStyle: () -> Unit,
 ) {
     MenuScreen("Chat", onBack) {
-        MenuRow("NOTIFICATIONS", notificationLevel.label, onClick = onCycleNotifications)
-        MenuRow("THUMBNAILS", if (showThumbnails) "ON" else "OFF", onClick = onToggleThumbnails)
-        MenuRow("SCROLL DIAL", scrollDial.label, onClick = onCycleScrollDial)
-        MenuRow("COMPOSE", composeStyle.label, onClick = onCycleComposeStyle)
-        MenuRow("KEYBOARD", keyboardStyle.label, onClick = onCycleKeyboardStyle)
+        MenuRow("Notifications", sentenceCase(notificationLevel.label), onClick = onCycleNotifications)
+        MenuRow("Thumbnails", if (showThumbnails) "On" else "Off", onClick = onToggleThumbnails)
+        MenuRow("Scroll Dial", sentenceCase(scrollDial.label), onClick = onCycleScrollDial)
+        MenuRow("Compose", sentenceCase(composeStyle.label), onClick = onCycleComposeStyle)
+        MenuRow("Keyboard", sentenceCase(keyboardStyle.label), onClick = onCycleKeyboardStyle)
     }
 }
 
@@ -231,16 +238,19 @@ private fun StoragePage(onBack: () -> Unit) {
     val prefs = remember { PhotonPreferences(context) }
     val bridge = Sessions.whatsapp?.bridge
 
-    val maxMessages by prefs.maxMessages.collectAsState(initial = 50)
-    val maxDays by prefs.maxDays.collectAsState(initial = 7)
+    // Null until read, so no default flashes before the stored value.
+    val maxMessages = prefs.maxMessages.collectAsState(initial = null).value
+    val maxDays = prefs.maxDays.collectAsState(initial = null).value
 
     BackHandler { onBack() }
     MenuScreen("Storage", onBack) {
-        ValueCycleRow("MESSAGES PER CHAT", maxMessages.toString(), listOf(25, 50, 100, 200), maxMessages) { v ->
-            scope.launch { prefs.setMaxMessages(v); syncRetention(bridge, v, maxDays) }
+        val messages = maxMessages ?: return@MenuScreen
+        val days = maxDays ?: return@MenuScreen
+        ValueCycleRow("Messages per Chat", messages.toString(), listOf(25, 50, 100, 200), messages) { v ->
+            scope.launch { prefs.setMaxMessages(v); syncRetention(bridge, v, days) }
         }
-        ValueCycleRow("MESSAGE HISTORY", "$maxDays DAYS", listOf(1, 3, 7, 14, 30), maxDays) { v ->
-            scope.launch { prefs.setMaxDays(v); syncRetention(bridge, maxMessages, v) }
+        ValueCycleRow("Message History", if (days == 1) "1 day" else "$days days", listOf(1, 3, 7, 14, 30), days) { v ->
+            scope.launch { prefs.setMaxDays(v); syncRetention(bridge, messages, v) }
         }
     }
 }
@@ -253,13 +263,19 @@ private fun <T> ValueCycleRow(label: String, display: String, options: List<T>, 
     MenuRow(label, display) { onSelect(options[next]) }
 }
 
+private const val NOT_LINKED = "Not linked"
+
+/** A connection state as a setting's value. */
 private fun formatState(state: String) = when (state) {
-    "connected" -> "CONNECTED"
-    "connecting" -> "CONNECTING"
-    "logged_out" -> "NOT LINKED"
-    "disconnected" -> "DISCONNECTED"
-    else -> state.uppercase()
+    "logged_out" -> NOT_LINKED
+    else -> sentenceCase(state.replace('_', ' '))
 }
+
+/**
+ * A setting's value in sentence case, as LightOS shows values ("Full
+ * screen"); the preference enums name theirs in capitals.
+ */
+internal fun sentenceCase(label: String): String = label.lowercase().replaceFirstChar { it.titlecase() }
 
 private suspend fun syncRetention(bridge: BridgeClient?, maxMessages: Int, maxDays: Int) {
     try {

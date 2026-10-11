@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Icon
@@ -38,10 +39,14 @@ private val weekdayFormat = SimpleDateFormat("EEE", Locale.getDefault())
 private val dayMonthFormat = SimpleDateFormat("dd/MM", Locale.getDefault())
 
 /**
- * One conversation in a chat list: name, last-activity time, a muted mark
- * and an unread count. A muted chat still shows its count, as in WhatsApp.
+ * One conversation in a chat list: name, an unread count, a muted mark and
+ * the last-activity time. A muted chat still shows its count, as in WhatsApp.
  * Fixed height ([PhotonGrid.LIST_ROW_HEIGHT]) so the list can use the
  * SDK's uniform-row scroll bar.
+ *
+ * The row spans the list's full width, so all of it can be tapped, and
+ * insets its content by the page margin. The time always ends the row, so
+ * times form one column down the list; the count sits before it.
  *
  * @param platform whose naming rules the title follows
  * @param icon platform icon, shown in All Chats
@@ -57,7 +62,8 @@ fun ConversationRow(
         modifier = Modifier
             .fillMaxWidth()
             .height(PhotonGrid.LIST_ROW_HEIGHT.gridUnitsAsDp())
-            .lightClickable(onClick = onClick),
+            .lightClickable(onClick = onClick)
+            .padding(horizontal = PhotonGrid.MARGIN.gridUnitsAsDp()),
         horizontalArrangement = Arrangement.spacedBy(0.75f.gridUnitsAsDp()),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -72,11 +78,15 @@ fun ConversationRow(
 
         LightText(
             text = remember(conv.jid, conv.name, conv.isGroup, platform) { DisplayNames.title(conv, platform) },
-            variant = LightTextVariant.Copy,
+            variant = LightTextVariant.Heading,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
+
+        if (conv.unreadCount > 0) {
+            UnreadBadge(conv.unreadCount)
+        }
 
         Row(
             horizontalArrangement = Arrangement.spacedBy(0.375f.gridUnitsAsDp()),
@@ -96,10 +106,6 @@ fun ConversationRow(
                 lighten = true,
                 maxLines = 1,
             )
-        }
-
-        if (conv.unreadCount > 0) {
-            UnreadBadge(conv.unreadCount)
         }
     }
 }

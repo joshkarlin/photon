@@ -127,7 +127,7 @@ fun ContactScreen(
         Column(
             modifier = Modifier
                 .weight(1f)
-                .padding(horizontal = PhotonGrid.MENU_MARGIN.gridUnitsAsDp()),
+                .padding(horizontal = PhotonGrid.MARGIN.gridUnitsAsDp()),
             verticalArrangement = Arrangement.spacedBy(1f.gridUnitsAsDp()),
         ) {
             // Phone number (read-only display).
@@ -140,7 +140,7 @@ fun ContactScreen(
             // Name field — editable. Pre-filled with existing name if the number
             // is already saved, otherwise with whatever display name we knew.
             Column {
-                LightText("NAME", variant = LightTextVariant.Detail, lighten = true)
+                LightText("Name", variant = LightTextVariant.Detail)
                 LightInputField(
                     value = nameInput,
                     onValueChange = { nameInput = it; status = null },

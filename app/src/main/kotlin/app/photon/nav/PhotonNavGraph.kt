@@ -86,6 +86,7 @@ fun PhotonNavGraph(
                         ),
                     )
                 },
+                onBack = { navController.popBackStack() },
             )
         }
         composable(Routes.WHATSAPP_PAIRING) {

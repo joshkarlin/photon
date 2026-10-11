@@ -26,6 +26,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import app.photon.data.KeyboardStyle
+import app.photon.ui.theme.PhotonGrid
 import app.photon.ui.theme.lightTextStyle
 import com.thelightphone.sdk.ui.LightBarButton
 import com.thelightphone.sdk.ui.LightBottomBar
@@ -149,7 +150,7 @@ private fun SystemComposeEditor(draft: TextFieldState, onSubmit: () -> Unit) {
     // A Surface, like the SDK editor's, so touches don't reach the thread.
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize().imePadding()) {
-            Spacer(Modifier.height((TOP_BAR_UNITS + 1f).gridUnitsAsDp()))
+            Spacer(Modifier.height((PhotonGrid.TOP_BAR_HEIGHT + 1f).gridUnitsAsDp()))
             Column(
                 modifier = Modifier
                     .weight(1f)
@@ -182,6 +183,3 @@ private fun SystemComposeEditor(draft: TextFieldState, onSubmit: () -> Unit) {
         }
     }
 }
-
-/** Height of the SDK's LightTopBar, in grid units. */
-private const val TOP_BAR_UNITS = 3f

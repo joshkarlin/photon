@@ -39,13 +39,25 @@ object PhotonColors {
 
 /** Layout measurements in LP3 grid units (`gridUnitsAsDp()`), kept together for tuning. */
 object PhotonGrid {
-    /** Start margin of menus and lists, matching the SDK examples. */
-    const val MENU_MARGIN = 1f
+    /**
+     * Side margins of every page's content, as LightOS lays out Messages,
+     * Settings and Search: on the LP3's 1080px, content spans x 80–1000.
+     * Scroll views span the full width and inset their content by this on
+     * both sides, so the SDK's scroll bar sits in the right margin, by the
+     * screen's edge ([PageScrollView][app.photon.ui.shared.components.PageScrollView]).
+     */
+    const val MARGIN = 2f
 
-    /** Vertical padding of a menu row, matching the SDK examples. */
-    const val MENU_ROW_PADDING = 0.75f
+    /**
+     * Height of the SDK's `LightTopBar`. LightOS Messages, which has no top
+     * bar, leaves this much empty above its list.
+     */
+    const val TOP_BAR_HEIGHT = 3f
 
-    /** Height of a conversation-list row. */
+    /** Height of a menu row, as LightOS Settings spaces its rows. */
+    const val MENU_ROW_HEIGHT = 5f
+
+    /** Height of a conversation-list row, as LightOS Messages spaces its rows. */
     const val LIST_ROW_HEIGHT = 4f
 
     /** Side margins of the message thread (the LP3 thread uses two units). */

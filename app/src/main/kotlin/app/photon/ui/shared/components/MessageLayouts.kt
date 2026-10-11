@@ -130,11 +130,12 @@ fun quoteLabel(quoted: Message, quotedSenderName: String?): String {
 /**
  * Tap and long-press without a press indication, like `lightClickable`. The
  * haptic fires on long-press only: message rows are touched constantly while
- * scrolling, so a finger-down buzz would be noise.
+ * scrolling, so a finger-down buzz would be noise. No [onLongClick], no
+ * long-press (and no buzz for nothing).
  */
 internal fun Modifier.lightCombinedClickable(
     onClick: () -> Unit,
-    onLongClick: () -> Unit,
+    onLongClick: (() -> Unit)?,
 ): Modifier = composed {
     val context = LocalContext.current
     val hapticsEnabled = LocalHapticsEnabled.current
@@ -142,9 +143,11 @@ internal fun Modifier.lightCombinedClickable(
         interactionSource = null,
         indication = null,
         onClick = onClick,
-        onLongClick = {
-            if (hapticsEnabled) LightHapticFeedback.click(context)
-            onLongClick()
+        onLongClick = onLongClick?.let { longClick ->
+            {
+                if (hapticsEnabled) LightHapticFeedback.click(context)
+                longClick()
+            }
         },
     )
 }
@@ -256,7 +259,7 @@ fun ReplyQuoteLine(
  * reply or reaction; long-press offers delete only.
  */
 @Composable
-fun CallRow(msg: Message, onLongPress: () -> Unit = {}) {
+fun CallRow(msg: Message, onLongPress: (() -> Unit)? = null) {
     LightText(
         text = "${formatContent(msg)} · ${formatMessageTime(msg.timestamp)}",
         variant = LightTextVariant.Detail,
@@ -282,7 +285,7 @@ fun MessageRow(
     msg: Message,
     startsBurst: Boolean,
     onMediaTap: () -> Unit,
-    onLongPress: () -> Unit = {},
+    onLongPress: (() -> Unit)? = null,
     senderName: String? = null,
     quotedSenderName: String? = null,
     onReplyPreviewTap: (() -> Unit)? = null,

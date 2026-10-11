@@ -50,11 +50,11 @@ internal fun WhatsAppSyncStatus() {
         ) {
             LightText(
                 text = when {
-                    syncDone -> "No messages yet"
-                    waState == "connected" -> "Syncing"
-                    waState == "connecting" -> "Connecting"
-                    Sessions.whatsapp?.bridge?.isConnected?.value == true -> "Pairing"
-                    else -> "Connecting"
+                    syncDone -> "no messages yet"
+                    waState == "connected" -> "syncing"
+                    waState == "connecting" -> "connecting"
+                    Sessions.whatsapp?.bridge?.isConnected?.value == true -> "pairing"
+                    else -> "connecting"
                 },
                 variant = LightTextVariant.Copy,
                 align = TextAlign.Center,

@@ -147,11 +147,11 @@ private fun PhotonPreview(content: @Composable () -> Unit) {
 @Composable
 internal fun ChatListSample() {
     ChatListLayout(
-        title = "All Chats",
+        filter = "All Chats",
         conversations = PreviewSamples.conversations,
         platformOf = PreviewSamples::platformOf,
         onChat = {},
-        onTitleClick = {},
+        onFilter = {},
         onSettings = {},
         icon = { conv ->
             painterResource(
@@ -240,7 +240,7 @@ private fun ChatListPreview() = PhotonPreview { ChatListSample() }
 @Preview(name = "Chat list – empty", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
 @Composable
 private fun EmptyChatListPreview() = PhotonPreview {
-    ChatListLayout(title = "Signal", conversations = emptyList(), platformOf = { Platform.SIGNAL }, onChat = {}, emptyMessage = "No messages yet", onTitleClick = {}, onSettings = {})
+    ChatListLayout(filter = "Signal", conversations = emptyList(), platformOf = { Platform.SIGNAL }, onChat = {}, emptyMessage = "no messages yet", onFilter = {}, onSettings = {})
 }
 
 @Preview(name = "DM", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
