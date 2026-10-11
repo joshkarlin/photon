@@ -78,11 +78,17 @@ class BridgeClient(private val bridge: GoBridge) {
 
     private suspend fun connectLocked() {
         if (_isConnected.value && bridge.isRunning()) return
+        // A bridge whose output we've stopped reading may still be alive:
+        // it goes before another starts, as two must never share the session.
+        withContext(Dispatchers.IO) { bridge.stop() }
         val process = bridge.start() ?: return
         attach(process.inputStream, process.outputStream)
     }
 
-    /** Stop the bridge; nothing restarts it until [connect]. */
+    /**
+     * Stop the bridge; nothing restarts it until [connect]. Blocks until it
+     * has exited (a few seconds at most), so keep it off the main thread.
+     */
     fun disconnect() {
         detach(currentGeneration())
         bridge.stop()
@@ -90,9 +96,10 @@ class BridgeClient(private val bridge: GoBridge) {
 
     /**
      * Stop the bridge, run [block] (e.g. wipe its files), then start it again.
-     * Nothing can restart the bridge in between.
+     * Nothing can restart the bridge in between. Runs on the IO dispatcher:
+     * stopping waits for the old bridge to exit.
      */
-    suspend fun whileStopped(block: suspend () -> Unit) {
+    suspend fun whileStopped(block: suspend () -> Unit) = withContext(Dispatchers.IO) {
         lifecycle.withLock {
             disconnect()
             try {

@@ -1,6 +1,5 @@
 package app.photon.service
 
-import androidx.test.core.app.ApplicationProvider
 import app.photon.data.model.string
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -37,7 +36,7 @@ class BridgeClientTest {
 
     @Before
     fun setUp() {
-        client = BridgeClient(GoBridge(ApplicationProvider.getApplicationContext()))
+        client = BridgeClient(GoBridge({ null }))
         val toClient = Pipe.open()
         val toBridge = Pipe.open()
         bridgeOut = Channels.newOutputStream(toClient.sink()).bufferedWriter()
