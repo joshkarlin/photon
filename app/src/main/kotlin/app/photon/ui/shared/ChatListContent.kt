@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.sp
 import app.photon.data.ListScrollSpeed
 import app.photon.data.PhotonPreferences
 import app.photon.data.model.Conversation
+import app.photon.service.NotificationHelper
 import app.photon.ui.shared.components.PhotonHeader
 
 /**
@@ -68,6 +69,14 @@ fun ChatListContent(
     // had scrolled down, the keyed LazyColumn preserves their position instead.
     // Processed in a single collector so the reorder frame (top changes and the
     // at-top reading flips together) reads the pre-reorder at-top intent.
+    // Clear notifications left behind for chats that are no longer unread
+    // (read on another device, deleted, or posted by a previous process).
+    LaunchedEffect(conversations) {
+        conversations?.let { list ->
+            NotificationHelper.reconcile(context, list.associate { it.jid to it.unreadCount })
+        }
+    }
+
     val convState = rememberUpdatedState(conversations)
     LaunchedEffect(Unit) {
         var wasAtTop = true

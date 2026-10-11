@@ -895,7 +895,7 @@ class SignalMessageReceiver(
             "$senderName: $preview"
         } else preview
         app.photon.service.NotificationHelper.showMessageNotification(
-            context, notifTitle, notifBody, "Signal", conversationJid,
+            context, notifTitle, notifBody, app.photon.data.model.Platform.SIGNAL, conversationJid,
         )
 
         Log.d(TAG, "Stored message from $senderAci: ${body?.take(30) ?: contentType}")

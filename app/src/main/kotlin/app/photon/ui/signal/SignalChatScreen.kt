@@ -7,11 +7,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.platform.LocalContext
 import app.photon.data.model.Message
-import app.photon.service.NotificationHelper
 import app.photon.service.PhotonService
 import app.photon.ui.shared.ChatScreenContent
+import app.photon.ui.shared.VisibleConversationEffect
 import app.photon.ui.shared.components.MediaViewer
 import kotlinx.coroutines.launch
 
@@ -19,7 +18,6 @@ import kotlinx.coroutines.launch
 fun SignalChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, onBack: () -> Unit) {
     val repo = PhotonService._signalRepository ?: return
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
     // Observe the conversations StateFlow so the title updates live when
     // the conversation row is re-resolved (e.g. after the user saves a
     // contact via the in-app editor). Falls back to a one-shot read if the
@@ -32,6 +30,7 @@ fun SignalChatScreen(jid: String, onContact: (phone: String, name: String) -> Un
     val title = conversation?.name?.takeIf { it.isNotBlank() }
         ?: if (isGroup) "Signal group" else jid.take(8) + "..."
     var viewingMedia by remember { mutableStateOf<Message?>(null) }
+    VisibleConversationEffect(jid)
     // Participant names are written by the receiver as group messages come
     // in. Re-read on every conversation update so a new sender's name shows
     // without a navigation away/back.
@@ -58,7 +57,6 @@ fun SignalChatScreen(jid: String, onContact: (phone: String, name: String) -> Un
         onBack = onBack,
         onMediaTap = { msg -> viewingMedia = msg },
         onMessagesLoaded = { messages ->
-            NotificationHelper.cancelForConversation(context, jid)
             scope.launch { repo.markRead(jid, messages.filter { !it.isFromMe }.map { it.id }) }
         },
         onReact = { messageId, _, emoji ->

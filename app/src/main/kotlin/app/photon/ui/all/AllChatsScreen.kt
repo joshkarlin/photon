@@ -7,11 +7,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.res.painterResource
 import app.photon.R
 import app.photon.data.model.Conversation
+import app.photon.data.model.Platform
 import app.photon.service.PhotonService
 import app.photon.ui.shared.ChatListContent
 import kotlinx.coroutines.flow.StateFlow
-
-enum class Platform { WHATSAPP, SIGNAL, SMS }
 
 private data class TaggedConversation(
     val conversation: Conversation,

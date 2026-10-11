@@ -181,7 +181,7 @@ class PhotonService : Service() {
                         ?: convJid.substringBefore("@")
 
                     NotificationHelper.showMessageNotification(
-                        this@PhotonService, name, evt.string("text_body"), "WhatsApp", convJid,
+                        this@PhotonService, name, evt.string("text_body"), app.photon.data.model.Platform.WHATSAPP, convJid,
                     )
                 }
                 "receipt" -> {

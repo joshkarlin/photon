@@ -13,9 +13,11 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.navigation.compose.rememberNavController
+import app.photon.nav.ChatDeepLink
 import app.photon.nav.PhotonNavGraph
 import app.photon.service.PhotonService
 import app.photon.ui.theme.PhotonTheme
@@ -26,8 +28,12 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { /* results don't need handling — permissions are checked at point of use */ }
 
+    private val deepLink = mutableStateOf<ChatDeepLink?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // A recreated activity has already handled its launch intent.
+        if (savedInstanceState == null) deepLink.value = ChatDeepLink.from(intent)
         startPhotonService()
         requestPermissionsIfNeeded()
         enableEdgeToEdge()
@@ -36,12 +42,20 @@ class MainActivity : ComponentActivity() {
                 val navController = rememberNavController()
                 PhotonNavGraph(
                     navController = navController,
+                    deepLink = deepLink.value,
+                    onDeepLinkHandled = { deepLink.value = null },
                     modifier = Modifier
                         .fillMaxSize()
                         .systemBarsPadding(),
                 )
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        ChatDeepLink.from(intent)?.let { deepLink.value = it }
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {

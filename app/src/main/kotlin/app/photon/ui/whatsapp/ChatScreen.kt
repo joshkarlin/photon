@@ -8,12 +8,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.platform.LocalContext
 import app.photon.data.model.Message
 import app.photon.data.model.string
-import app.photon.service.NotificationHelper
 import app.photon.service.PhotonService
 import app.photon.ui.shared.ChatScreenContent
+import app.photon.ui.shared.VisibleConversationEffect
 import app.photon.ui.shared.components.MediaViewer
 import kotlinx.coroutines.launch
 
@@ -31,7 +30,6 @@ private fun formatJidAsPhone(jid: String): String {
 fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, onBack: () -> Unit) {
     val repo = PhotonService._chatRepository ?: return
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
     // Observe conversations so the title and participant names refresh live as
     // new messages arrive (e.g. a group member's name learned after open, or
     // history-sync names landing). Falls back to a one-shot read before the hot
@@ -61,6 +59,8 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
 
     val title = conversation?.name?.takeIf { it.isNotBlank() } ?: formatJidAsPhone(jid)
 
+    VisibleConversationEffect(jid)
+
     ChatScreenContent(
         title = title,
         messagesFlow = repo.messages(jid),
@@ -72,7 +72,6 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
         onBack = onBack,
         onMediaTap = { msg -> viewingMedia = msg },
         onMessagesLoaded = { messages ->
-            NotificationHelper.cancelForConversation(context, jid)
             // messages arrive newest-first; only mark read when a new
             // incoming message appears.
             val newestIncomingId = messages.firstOrNull { !it.isFromMe }?.id

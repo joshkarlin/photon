@@ -2,6 +2,7 @@ package app.photon.nav
 
 import android.net.Uri
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
@@ -14,7 +15,7 @@ import app.photon.ui.home.PlatformsScreen
 import app.photon.ui.contact.ContactScreen
 import app.photon.ui.settings.SettingsScreen
 import app.photon.ui.all.AllChatsScreen
-import app.photon.ui.all.Platform
+import app.photon.data.model.Platform
 import app.photon.ui.signal.SignalChatListScreen
 import app.photon.ui.signal.SignalChatScreen
 import app.photon.ui.sms.SmsChatListScreen
@@ -28,6 +29,8 @@ import app.photon.ui.whatsapp.PairingScreen
 @Composable
 fun PhotonNavGraph(
     navController: NavHostController,
+    deepLink: ChatDeepLink? = null,
+    onDeepLinkHandled: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     // All Chats is the start destination — kept at the bottom of the back stack
@@ -39,6 +42,21 @@ fun PhotonNavGraph(
             popUpTo(rootRoute) { inclusive = true }
             launchSingleTop = true
         }
+    }
+
+    LaunchedEffect(deepLink) {
+        val link = deepLink ?: return@LaunchedEffect
+        val jid = Uri.encode(link.conversationJid)
+        val route = when (link.platform) {
+            Platform.WHATSAPP -> Routes.chat(jid)
+            Platform.SIGNAL -> Routes.signalChat(jid)
+            Platform.SMS -> Routes.smsChat(jid)
+        }
+        navController.navigate(route) {
+            popUpTo(rootRoute) { inclusive = false }
+            launchSingleTop = true
+        }
+        onDeepLinkHandled()
     }
 
     NavHost(
