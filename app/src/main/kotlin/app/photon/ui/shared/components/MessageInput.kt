@@ -39,8 +39,8 @@ import com.thelightphone.sdk.ui.lightClickable
 
 /**
  * The inline input under the thread: attach, the [draft] field, and send or
- * voice note. While a voice note records, the bar shows its timer with
- * cancel and send.
+ * voice note. Attach opens the attachment sheet ([onAttach]). While a voice
+ * note records, the bar shows its timer with cancel and send.
  *
  * Tapping the field brings up the keyboard: the system one, or with
  * [KeyboardStyle.LIGHT] the LP3 keyboard docked under the bar. Clearing focus
@@ -54,6 +54,7 @@ fun MessageInputBar(
     keyboard: KeyboardStyle,
     onSendText: (String) -> Unit,
     media: MediaInput,
+    onAttach: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var lightKeyboard: Lp3KeyboardViewModel<*>? = null
@@ -99,7 +100,7 @@ fun MessageInputBar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (media.canAttach) {
-                InputIcon(LightIcons.ADD, "Attach", media::attach)
+                InputIcon(LightIcons.ADD, "Attach", onAttach)
             }
 
             val field = @Composable {
@@ -119,7 +120,7 @@ fun MessageInputBar(
             } else if (media.canRecord) {
                 // Voice note — only when the platform can send audio (SMS can't,
                 // so the mic is hidden rather than a dead control).
-                InputIcon(LightIcons.MICROPHONE, "Voice note", media::record)
+                InputIcon(VoiceNoteIcon, VOICE_NOTE, media::record)
             }
         }
 

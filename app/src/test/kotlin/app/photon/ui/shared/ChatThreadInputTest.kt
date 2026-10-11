@@ -1,5 +1,8 @@
 package app.photon.ui.shared
 
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
@@ -51,6 +54,8 @@ import org.robolectric.annotation.GraphicsMode
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.test.assertTrue
 
 /**
@@ -246,6 +251,42 @@ class ChatThreadInputTest {
         val compose = described("Compose").apply { assertIsDisplayed() }.bounds()
         assertTrue(attach.right <= mic.left && mic.right <= compose.left, "attach $attach, mic $mic, compose $compose")
         assertTrue(compose.bottom > 380f, "bottom bar $compose should sit at the bottom of the 413dp screen")
+    }
+
+    /** The pixels of the icon described as [description], as the screen draws them. */
+    private fun iconPixels(description: String): IntArray {
+        rule.waitForIdle()
+        val r = described(description).fetchSemanticsNode().boundsInWindow
+        val view = rule.activity.window.decorView
+        val screen = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+        view.draw(Canvas(screen))
+        val w = r.width.roundToInt()
+        val h = r.height.roundToInt()
+        return IntArray(w * h).also { screen.getPixels(it, 0, w, r.left.roundToInt(), r.top.roundToInt(), w, h) }
+    }
+
+    /** Voice note is one icon in both compose styles, so they can't drift apart. */
+    @Test
+    fun voiceNoteLooksTheSameInBothComposeStyles() {
+        var style by mutableStateOf(ComposeStyle.INLINE)
+        rule.setContent {
+            PhotonTheme {
+                ChatThread(
+                    title = PreviewSamples.LONG_DM_TITLE, platform = Platform.WHATSAPP, messages = PreviewSamples.dmMessages,
+                    isGroup = false, participantNames = emptyMap(), onSendText = { _, _ -> }, onSendAudio = { _, _ -> },
+                    onSendMedia = { _, _, _ -> }, onBack = {}, onMediaTap = null, onMessagesLoaded = null, onReact = null,
+                    onRetry = null, onDelete = null, onTitleClick = null, supportsReply = true, headerContent = null,
+                    composeStyle = style, keyboardStyle = KeyboardStyle.SYSTEM,
+                )
+            }
+        }
+        val inline = iconPixels("Voice note")
+        style = ComposeStyle.FULL_SCREEN
+        val fullScreen = iconPixels("Voice note")
+        assertEquals(inline.size, fullScreen.size, "same size")
+        // Allow for anti-aliasing at a different sub-pixel offset; another icon differs far more.
+        val differing = inline.indices.count { abs(Color.red(inline[it]) - Color.red(fullScreen[it])) > 96 }
+        assertTrue(differing < inline.size / 20, "$differing of ${inline.size} pixels differ")
     }
 
     @Test

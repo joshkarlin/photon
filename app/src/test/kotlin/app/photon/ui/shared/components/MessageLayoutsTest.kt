@@ -93,4 +93,11 @@ class MessageLayoutsTest {
         assertEquals("↳ hi", quoteLabel(message(), null))
         assertEquals("↳ You: hi", quoteLabel(message(fromMe = true), null))
     }
+
+    /** A file sent from Files shows as a document, with its name when the platform keeps one. */
+    @Test
+    fun documentsSayTheyAreDocuments() {
+        assertEquals("[ document: report.pdf ]", formatContent(message(contentType = "document", body = "report.pdf")))
+        assertEquals("[ document ]", formatContent(message(contentType = "document", body = null)))
+    }
 }

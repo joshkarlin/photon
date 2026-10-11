@@ -35,6 +35,7 @@ import app.photon.data.PhotonPreferences
 import app.photon.data.model.Message
 import app.photon.data.model.Platform
 import app.photon.data.names.DisplayNames
+import app.photon.ui.shared.components.AttachSheet
 import app.photon.ui.shared.components.CallRow
 import app.photon.ui.shared.components.ComposeEditor
 import app.photon.ui.shared.components.MessageAction
@@ -184,6 +185,12 @@ internal fun ChatThread(
         dismissKeyboard()
         composing = true
     }
+    // The attachment sheet, a page over the thread like the editor.
+    var attaching by rememberSaveable(conversationKey) { mutableStateOf(false) }
+    val openAttach = {
+        dismissKeyboard()
+        attaching = true
+    }
 
     // Every send path consumes and clears the active reply target.
     val media = rememberMediaInput(
@@ -244,7 +251,7 @@ internal fun ChatThread(
         }
     }
 
-    ChatScrollDialEffect(listState, enabled = !editorOpen && actionsFor == null, onTurn = dismissKeyboard)
+    ChatScrollDialEffect(listState, enabled = !editorOpen && !attaching && actionsFor == null, onTurn = dismissKeyboard)
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -316,11 +323,15 @@ internal fun ChatThread(
 
             if (keyboardStyle != null) {
                 when (composeStyle) {
-                    ComposeStyle.INLINE -> MessageInputBar(draft, keyboardStyle, onSendText = sendText, media = media)
-                    ComposeStyle.FULL_SCREEN -> ThreadBottomBar(media = media, onCompose = openCompose)
+                    ComposeStyle.INLINE -> MessageInputBar(draft, keyboardStyle, onSendText = sendText, media = media, onAttach = openAttach)
+                    ComposeStyle.FULL_SCREEN -> ThreadBottomBar(media = media, onAttach = openAttach, onCompose = openCompose)
                     null -> Unit
                 }
             }
+        }
+
+        if (attaching) {
+            AttachSheet(title = title, media = media, onClose = { attaching = false })
         }
 
         // The long-pressed message's actions, as full-screen LightOS pages.
