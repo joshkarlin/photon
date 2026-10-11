@@ -46,7 +46,8 @@ private val dayMonthFormat = SimpleDateFormat("dd/MM", Locale.getDefault())
  *
  * The row spans the list's full width, so all of it can be tapped, and
  * insets its content by the page margin. The time always ends the row, so
- * times form one column down the list; the count sits before it.
+ * times form one column down the list; the count sits before it, and the
+ * muted mark before that.
  *
  * @param platform whose naming rules the title follows
  * @param icon platform icon, shown in All Chats
@@ -84,12 +85,10 @@ fun ConversationRow(
             modifier = Modifier.weight(1f),
         )
 
-        if (conv.unreadCount > 0) {
-            UnreadBadge(conv.unreadCount)
-        }
-
+        // Muted mark, count, then time: the time ends every row, so times form
+        // one column, and the count sits beside it in every row, muted or not.
         Row(
-            horizontalArrangement = Arrangement.spacedBy(0.375f.gridUnitsAsDp()),
+            horizontalArrangement = Arrangement.spacedBy(TRAILING_GAP_UNITS.gridUnitsAsDp()),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (conv.isMuted) {
@@ -100,6 +99,9 @@ fun ConversationRow(
                     modifier = Modifier.size(1f.gridUnitsAsDp()),
                 )
             }
+            if (conv.unreadCount > 0) {
+                UnreadBadge(conv.unreadCount)
+            }
             LightText(
                 text = formatTimestamp(conv.lastTimestamp),
                 variant = LightTextVariant.Detail,
@@ -109,6 +111,9 @@ fun ConversationRow(
         }
     }
 }
+
+/** Between the muted mark, the count and the time. */
+private const val TRAILING_GAP_UNITS = 0.5f
 
 /** Unread count, inverted (black on white) so it reads without colour. */
 @Composable
