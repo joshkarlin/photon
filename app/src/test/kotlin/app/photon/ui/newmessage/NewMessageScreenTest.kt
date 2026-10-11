@@ -175,6 +175,22 @@ class NewMessageScreenTest {
         rule.onNodeWithContentDescription("Keypad").assertExists()
     }
 
+    /** The LP3 keyboard is docked while the field has focus; Back puts it away and a tap brings it back. */
+    @Test
+    fun theLp3KeyboardComesAndGoesWithTheField() {
+        show(KeyboardStyle.LIGHT)
+        rule.onNodeWithText("Q").assertExists()
+
+        rule.runOnIdle { rule.activity.onBackPressedDispatcher.onBackPressed() }
+        rule.waitForIdle()
+        field.assertIsNotFocused()
+        rule.onAllNodesWithText("Q").assertCountEquals(0)
+
+        field.performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Q").assertExists()
+    }
+
     // ─── Picking ────────────────────────────────────────────────────
 
     @Test
