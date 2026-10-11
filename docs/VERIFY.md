@@ -126,7 +126,7 @@ Send only to yourself or a willing contact.
   3. The keypad button switches to number entry in both modes (the phone keypad, or the LP3 keyboard's number layer). ABC switches back.
   4. The dial scrolls the matches, putting the keyboard away first.
   5. The first Back puts the keyboard away. The next returns to the chat list.
-  6. Nothing typed shows no matches. Text that matches nothing reads "No matches".
+  6. Nothing typed shows no matches. Text that matches nothing reads "no matches".
 
 #### NM2. Finding people and groups
 - **Do:** search for a contact by the start of their first name, by a later word of their name, and with different case or without accents ("zoe" for "Zoë"). Search for 3 or more digits of a number in national form ("07700") and in international form ("+44 7700"). Type a whole number nobody has. Search for a group. Pick a person whose chats are all on one platform, then a group.
