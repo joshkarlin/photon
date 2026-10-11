@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // InitMessageDB creates the message database schema if it doesn't exist.
@@ -198,6 +199,18 @@ func (b *Bridge) inTx(fn func(*sql.Tx) error) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// retry runs fn until it succeeds, at most attempts times, waiting delay
+// before the second try and twice as long before each one after.
+func retry(attempts int, delay time.Duration, fn func() error) error {
+	err := fn()
+	for i := 1; i < attempts && err != nil; i++ {
+		time.Sleep(delay)
+		delay *= 2
+		err = fn()
+	}
+	return err
 }
 
 // sqlInList returns "?,?,…" for n placeholders.

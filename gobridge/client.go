@@ -54,6 +54,10 @@ type Bridge struct {
 
 	calls      callTracker
 	reconciler coalescer
+
+	// retryDelay is the first wait before retrying a database write that
+	// failed (see applyRevoke).
+	retryDelay time.Duration
 }
 
 // NewBridge creates a new Bridge instance.
@@ -64,6 +68,7 @@ func NewBridge(client *whatsmeow.Client, msgDB *sql.DB, dataDir string, log waLo
 		dataDir:         dataDir,
 		log:             log,
 		connectionState: "disconnected",
+		retryDelay:      time.Second,
 		groupNames:      make(map[string]cachedGroupName),
 		retention: RetentionConfig{
 			MaxMessages:  50,

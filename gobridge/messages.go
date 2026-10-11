@@ -163,10 +163,37 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 
 // applyRevoke blanks a message deleted for everyone. If it was the last unread
 // message in its chat, Kotlin uses message_revoked's unread_count to withdraw
-// the notification that announced it.
+// the notification that announced it. WhatsApp never sends a revoke again, so
+// one that fails on the database (busy, say) is retried in the background
+// rather than dropped.
 func (b *Bridge) applyRevoke(chatJID string, info types.MessageInfo, targetID string) {
-	res, ok := b.revoke(chatJID, info, targetID)
-	if !ok {
+	res, found, err := b.revoke(chatJID, info, targetID)
+	if err == nil {
+		b.revoked(chatJID, info, targetID, res, found)
+		return
+	}
+	b.log.Warnf("Revoke of %s in %s failed, retrying: %v", targetID, chatJID, err)
+	go func() {
+		err := retry(revokeAttempts, b.retryDelay, func() error {
+			var err error
+			res, found, err = b.revoke(chatJID, info, targetID)
+			return err
+		})
+		if err != nil {
+			b.log.Errorf("Gave up on revoke of %s in %s: %v", targetID, chatJID, err)
+			return
+		}
+		b.revoked(chatJID, info, targetID, res, found)
+	}()
+}
+
+// revokeAttempts bounds the tries at a revoke that fails on the database.
+const revokeAttempts = 5
+
+// revoked finishes a revoke that reached the database: removes the media it
+// orphaned and tells Kotlin.
+func (b *Bridge) revoked(chatJID string, info types.MessageInfo, targetID string, res RevokeResult, found bool) {
+	if !found {
 		b.log.Debugf("Ignoring revoke of %s in %s by %s: no such message of theirs", targetID, chatJID, info.Sender)
 		return
 	}
@@ -191,15 +218,16 @@ func (b *Bridge) applyRevoke(chatJID string, info types.MessageInfo, targetID st
 // the message's sender, or — in a group — an admin (or the user's own
 // devices). The server can't check, as the revoke is end-to-end encrypted,
 // and message IDs are visible to every member of a group.
-func (b *Bridge) revoke(chatJID string, info types.MessageInfo, targetID string) (RevokeResult, bool) {
+func (b *Bridge) revoke(chatJID string, info types.MessageInfo, targetID string) (RevokeResult, bool, error) {
 	by := b.authorOf(info)
-	if res, ok := b.RevokeMessage(targetID, chatJID, &by); ok {
-		return res, true
+	res, found, err := b.RevokeMessage(targetID, chatJID, &by)
+	if found || err != nil {
+		return res, found, err
 	}
 	if info.Chat.Server == types.GroupServer && (info.IsFromMe || b.isGroupAdmin(info.Chat, info.Sender, info.SenderAlt)) {
 		return b.RevokeMessage(targetID, chatJID, nil)
 	}
-	return RevokeResult{}, false
+	return RevokeResult{}, false, nil
 }
 
 // author identifies who sent an edit or revoke, to match it against the

@@ -59,6 +59,15 @@ func registerFKDriver() {
 	sql.Register("sqlite_fk", &fkDriver{inner: &sqliteDriver.Driver{}})
 }
 
+// messageDBDSN is messages.db (a plain path, not a file: URI) with write
+// transactions that take the write lock as they begin (BEGIN IMMEDIATE). A
+// deferred transaction that reads first and writes after another connection
+// has committed fails with SQLITE_BUSY_SNAPSHOT, which no busy timeout
+// retries; revokes and LID merges both read first.
+func messageDBDSN(dataDir string) string {
+	return filepath.Join(dataDir, "messages.db") + "?_txlock=immediate"
+}
+
 // bridgeConfig is the bridge's command line.
 type bridgeConfig struct {
 	dataDir   string
@@ -128,10 +137,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize message database (use plain path, not file: URI). The
-	// sqlite_fk driver applies the WAL/foreign keys/busy timeout pragmas.
-	msgDSN := filepath.Join(cfg.dataDir, "messages.db")
-	msgDB, err := sql.Open("sqlite_fk", msgDSN)
+	// The sqlite_fk driver applies the WAL/foreign keys/busy timeout pragmas.
+	msgDB, err := sql.Open("sqlite_fk", messageDBDSN(cfg.dataDir))
 	if err != nil {
 		logger.Errorf("Failed to open message DB: %v", err)
 		os.Exit(1)

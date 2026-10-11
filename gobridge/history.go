@@ -135,14 +135,16 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 		}
 		// One transaction per conversation — per-row implicit transactions
 		// mean thousands of WAL commits during initial pairing.
-		b.InsertMessages(pending)
+		if err := b.InsertMessages(pending); err != nil {
+			b.log.Errorf("Failed to store history for %s: %v", jid, err)
+		}
 		for _, e := range edits {
 			if _, text, _ := extractContent(e.edited); text != "" {
 				b.UpdateMessageEdit(e.targetID, jid, b.resolveMentions(e.edited, jid, text), &e.by)
 			}
 		}
 		for _, r := range revokes {
-			b.revoke(jid, r.info, r.targetID)
+			b.applyRevoke(jid, r.info, r.targetID)
 		}
 
 		// Backfill group participant names: prefer the address-book contact

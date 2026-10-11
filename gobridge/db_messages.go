@@ -100,57 +100,59 @@ type RevokeResult struct {
 // RevokeMessage blanks a message deleted for everyone so it renders as
 // "[ deleted ]" (text type, no body, status "deleted"), drops its reactions,
 // and takes it out of the unread count if it was still unread. Only a message
-// in chatJID sent by `by` matches (nil: any sender). ok is false when no such
-// message is stored (pruned, outside the history window, or not theirs).
-func (b *Bridge) RevokeMessage(id, chatJID string, by *author) (res RevokeResult, ok bool) {
-	tx, err := b.msgDB.Begin()
-	if err != nil {
-		b.log.Errorf("Revoke %s: %v", id, err)
-		return res, false
-	}
-	defer tx.Rollback()
-
-	query := `SELECT conversation_jid, is_from_me, status, media_url, thumbnail_path FROM messages WHERE id = ? AND conversation_jid = ?`
-	args := []interface{}{id, chatJID}
-	if by != nil {
-		clause, extra := by.sqlClause()
-		query += " AND " + clause
-		args = append(args, extra...)
-	}
-	var isFromMe int
-	var status string
-	var mediaURL, thumbPath sql.NullString
-	err = tx.QueryRow(query, args...).Scan(&res.ConversationJID, &isFromMe, &status, &mediaURL, &thumbPath)
-	if err != nil {
-		return res, false
-	}
-	res.WasUnread = isFromMe == 0 && status != "read" && status != "deleted"
-	// Only bridge-owned downloads are removed — an outgoing row's media_url is
-	// the user's own staged file.
-	if isFromMe == 0 {
-		for _, p := range []sql.NullString{mediaURL, thumbPath} {
-			if p.Valid && p.String != "" {
-				res.Files = append(res.Files, p.String)
+// in chatJID sent by `by` matches (nil: any sender). found is false when no
+// such message is stored (pruned, outside the history window, or not theirs);
+// err is a database failure, after which nothing has changed.
+func (b *Bridge) RevokeMessage(id, chatJID string, by *author) (res RevokeResult, found bool, err error) {
+	err = b.inTx(func(tx *sql.Tx) error {
+		query := `SELECT conversation_jid, is_from_me, status, media_url, thumbnail_path FROM messages WHERE id = ? AND conversation_jid = ?`
+		args := []interface{}{id, chatJID}
+		if by != nil {
+			clause, extra := by.sqlClause()
+			query += " AND " + clause
+			args = append(args, extra...)
+		}
+		var isFromMe int
+		var status string
+		var mediaURL, thumbPath sql.NullString
+		err := tx.QueryRow(query, args...).Scan(&res.ConversationJID, &isFromMe, &status, &mediaURL, &thumbPath)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		found = true
+		res.WasUnread = isFromMe == 0 && status != "read" && status != "deleted"
+		// Only bridge-owned downloads are removed — an outgoing row's media_url is
+		// the user's own staged file.
+		if isFromMe == 0 {
+			for _, p := range []sql.NullString{mediaURL, thumbPath} {
+				if p.Valid && p.String != "" {
+					res.Files = append(res.Files, p.String)
+				}
 			}
 		}
-	}
 
-	if _, err := tx.Exec(`UPDATE messages SET content_type = 'text', text_body = NULL, media_url = NULL,
-		media_mime = NULL, media_size = NULL, thumbnail_path = NULL, raw_proto = NULL, status = 'deleted'
-		WHERE id = ?`, id); err != nil {
-		b.log.Errorf("Revoke %s: %v", id, err)
-		return res, false
+		if _, err := tx.Exec(`UPDATE messages SET content_type = 'text', text_body = NULL, media_url = NULL,
+			media_mime = NULL, media_size = NULL, thumbnail_path = NULL, raw_proto = NULL, status = 'deleted'
+			WHERE id = ?`, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM reactions WHERE message_id = ?`, id); err != nil {
+			return err
+		}
+		if res.WasUnread {
+			if _, err := tx.Exec(`UPDATE conversations SET unread_count = MAX(unread_count - 1, 0) WHERE jid = ?`, res.ConversationJID); err != nil {
+				return err
+			}
+		}
+		return tx.QueryRow(`SELECT COALESCE((SELECT unread_count FROM conversations WHERE jid = ?), 0)`, res.ConversationJID).Scan(&res.Unread)
+	})
+	if err != nil {
+		return RevokeResult{}, false, err
 	}
-	tx.Exec(`DELETE FROM reactions WHERE message_id = ?`, id)
-	if res.WasUnread {
-		tx.Exec(`UPDATE conversations SET unread_count = MAX(unread_count - 1, 0) WHERE jid = ?`, res.ConversationJID)
-	}
-	tx.QueryRow(`SELECT unread_count FROM conversations WHERE jid = ?`, res.ConversationJID).Scan(&res.Unread)
-	if err := tx.Commit(); err != nil {
-		b.log.Errorf("Revoke %s: %v", id, err)
-		return res, false
-	}
-	return res, true
+	return res, found, nil
 }
 
 const insertMessageSQL = `
