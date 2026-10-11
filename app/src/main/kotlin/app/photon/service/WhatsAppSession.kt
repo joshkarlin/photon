@@ -38,6 +38,7 @@ class WhatsAppSession internal constructor(
     private val context: Context,
     private val scope: CoroutineScope,
     goBridge: GoBridge,
+    private val logoutTimeoutMs: Long = LOGOUT_TIMEOUT_MS,
 ) {
     constructor(context: Context, scope: CoroutineScope) : this(context, scope, GoBridge(context))
 
@@ -89,6 +90,7 @@ class WhatsAppSession internal constructor(
      * would keep serving the old rows.
      */
     suspend fun reset() {
+        logOut()
         bridge.whileStopped {
             context.filesDir.listFiles()?.filter {
                 it.name.startsWith("messages.db") || it.name.startsWith("whatsmeow.db")
@@ -98,6 +100,23 @@ class WhatsAppSession internal constructor(
             database.invalidate()
         }
         clearQrCode()
+    }
+
+    // Tell WhatsApp first, so the phone drops Photon from Linked devices.
+    // Best effort: an unpaired, offline or hung bridge is still wiped.
+    private suspend fun logOut() {
+        val outcome = withTimeoutOrNull(logoutTimeoutMs) {
+            try {
+                bridge.request("logout").string("error") ?: "ok"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                e.message ?: e.javaClass.simpleName
+            }
+        }
+        if (outcome != "ok") {
+            Log.w(TAG, "WhatsApp logout before reset failed (${outcome ?: "timed out"}); the phone may still list Photon")
+        }
     }
 
     /**
@@ -223,6 +242,9 @@ class WhatsAppSession internal constructor(
 
     private companion object {
         const val TAG = "PhotonService"
+
+        // Long enough for WhatsApp to acknowledge a logout on a slow link.
+        const val LOGOUT_TIMEOUT_MS = 10_000L
 
         // Bridge events the notification layer acts on; delivered losslessly.
         val NOTIFIED_EVENTS = setOf(

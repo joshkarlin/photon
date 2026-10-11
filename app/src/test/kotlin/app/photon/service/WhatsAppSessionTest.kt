@@ -46,6 +46,8 @@ class WhatsAppSessionTest {
             },
             exitGraceMs = 200,
         ),
+        // These fake bridges don't answer; don't wait long for their logout.
+        logoutTimeoutMs = 300,
     )
 
     @After
@@ -120,6 +122,32 @@ class WhatsAppSessionTest {
         writeWhatsAppDb(dbFile, ::createWhatsAppSchema)
         writeChat("new@s.whatsapp.net")
         assertEquals(listOf("new@s.whatsapp.net"), session.database.getConversations().map { it.jid })
+    }
+
+    /** Reset logs out first, so the phone drops Photon from Linked devices, then wipes. */
+    @Test
+    fun resetLogsOutBeforeWiping() = runBlocking {
+        File(context.filesDir, "whatsmeow.db").writeText("old session")
+        session.start()
+        awaitConnected()
+        val bridge = launched.single()
+        val filesAtLogout = CopyOnWriteArrayList<Boolean>()
+        // Answer the logout request the way the Go bridge does.
+        val answerer = Thread {
+            while (true) {
+                val line = runCatching { bridge.sent.readLine() }.getOrNull() ?: break
+                if ("\"type\":\"logout\"" !in line) continue
+                filesAtLogout += File(context.filesDir, "whatsmeow.db").exists()
+                val id = Regex("\"id\":\"([^\"]+)\"").find(line)!!.groupValues[1]
+                bridge.print("{\"id\":\"$id\",\"type\":\"logout\",\"payload\":{}}")
+            }
+        }.apply { isDaemon = true; start() }
+
+        session.reset()
+
+        assertEquals(listOf(true), filesAtLogout, "logged out once, before the account was wiped")
+        assertFalse(File(context.filesDir, "whatsmeow.db").exists())
+        answerer.join(1_000)
     }
 
     @Test
