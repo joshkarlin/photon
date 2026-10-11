@@ -24,11 +24,12 @@ fun SignalMessageDatabase.upsertConversation(
     // contacts-sync ingest) don't clobber the existing last_message_id or
     // last_timestamp on a conversation that already has message history.
     // INSERT plants defaults on new rows; UPDATE only writes the fields
-    // the caller actually supplied.
+    // the caller actually supplied. A new row takes the mute the storage
+    // service gave its jid before it existed (SignalStorageMutes).
     writableDatabase.execSQL(
         """
-        INSERT INTO conversations (jid, name, is_group, last_message_id, last_timestamp, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO conversations (jid, name, is_group, last_message_id, last_timestamp, updated_at, muted_until)
+          VALUES (?, ?, ?, ?, ?, ?, ${storageMuteOf("?")})
         ON CONFLICT(jid) DO UPDATE SET
           name           = COALESCE(excluded.name, conversations.name),
           is_group       = excluded.is_group,
@@ -45,6 +46,7 @@ fun SignalMessageDatabase.upsertConversation(
             lastMessageId ?: "",
             lastTimestamp,
             System.currentTimeMillis(),
+            jid,
         ),
     )
     notifyChanged()

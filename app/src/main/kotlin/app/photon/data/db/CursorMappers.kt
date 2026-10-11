@@ -38,9 +38,10 @@ fun Cursor.toConversation(): Conversation {
 }
 
 /**
- * Whether a mute is in force now. WhatsApp rows carry muted_until (-1 = muted
- * forever, 0 = not muted, otherwise the unix second the mute ends) so timed
- * mutes lapse on their own; tables without the column (Signal) use the flag.
+ * Whether a mute is in force now. WhatsApp and Signal rows carry muted_until
+ * (-1 = muted forever, 0 = not muted, otherwise the unix second the mute
+ * ends) so timed mutes lapse on their own; a table without the column uses
+ * the flag.
  */
 fun isMutedAt(flag: Boolean, mutedUntil: Long?, nowSeconds: Long): Boolean = when (mutedUntil) {
     null -> flag

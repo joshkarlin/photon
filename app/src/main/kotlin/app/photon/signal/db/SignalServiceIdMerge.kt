@@ -37,6 +37,8 @@ fun SignalMessageDatabase.getResolvableNonAciIds(): List<Pair<String, String>> {
  *    the [from] copy is dropped and stops counting as unread.
  *  - The two conversations become one: unread counts add up, the newer last
  *    message wins, and a blank name takes the other's.
+ *  - Storage records that mapped to [from] map to [to], and [to]'s mute
+ *    follows them (SignalStorageMutes).
  *  - Participant rows move to [to]. The contact row's phone, address-book
  *    name, profile key and profile name fill gaps in [to]'s; the [from] row
  *    stays as an alias, so a later envelope from [from] that carries no
@@ -65,6 +67,8 @@ fun SignalMessageDatabase.mergeServiceId(from: String, to: String): Boolean {
         db.execSQL("UPDATE OR IGNORE participants SET jid = ? WHERE jid = ?", arrayOf(to, from))
         db.execSQL("DELETE FROM participants WHERE jid = ?", arrayOf(from))
         mergeConversationRows(db, from, to)
+        db.execSQL("UPDATE storage_records SET jid = ? WHERE jid = ?", arrayOf(to, from))
+        db.execSQL("UPDATE conversations SET muted_until = ${storageMuteOf("?")} WHERE jid = ?", arrayOf(to, to))
         // A dropped duplicate may have been a conversation's last message.
         for (jid in (lostRows + to).toSet()) repairLastMessage(db, jid)
         mergeContactRows(db, from, to)
@@ -87,6 +91,7 @@ private fun isReferenced(db: SQLiteDatabase, id: String): Boolean {
     val (callLo, callHi) = rangeOf("call_$id")
     // The contacts row doesn't count: it stays behind as an alias.
     return exists(db, "SELECT 1 FROM conversations WHERE jid = ?", arrayOf(id)) ||
+        exists(db, "SELECT 1 FROM storage_records WHERE jid = ?", arrayOf(id)) ||
         exists(db, "SELECT 1 FROM participants WHERE jid = ?", arrayOf(id)) ||
         exists(db, "SELECT 1 FROM reactions WHERE sender_jid = ? OR (message_id >= ? AND message_id < ?)", arrayOf(id, lo, hi)) ||
         exists(
