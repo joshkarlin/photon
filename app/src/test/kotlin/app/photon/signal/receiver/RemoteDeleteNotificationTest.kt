@@ -42,11 +42,14 @@ class RemoteDeleteNotificationTest {
     @After
     fun tearDown() = fx.close()
 
-    private fun receive(conversation: String, author: String, ts: Long, text: String) =
+    /** Stored unread, with its notification up. */
+    private fun receive(conversation: String, author: String, ts: Long, text: String) {
         fx.db.insertIncomingMessage(
             id = "${author}_${ts}_r", conversationJid = conversation, senderJid = author,
             timestamp = ts / 1000, contentType = "text", textBody = text,
         )
+        fx.notifier.showing += conversation
+    }
 
     private fun message(text: String?) = Message(
         id = "x", conversationJid = alice, senderJid = alice, timestamp = 0, contentType = "text", textBody = text,
@@ -94,6 +97,18 @@ class RemoteDeleteNotificationTest {
         edits.applyRemoteDelete("${bob}_1700000100000")
 
         assertEquals(listOf("message:$group:Climbing:+15550001111: first"), fx.notifier.events)
+    }
+
+    /** The user swiped the notification away: a delete mustn't bring it back. */
+    @Test
+    fun aDismissedNotificationIsNotRepostedAfterADelete() {
+        receive(alice, alice, 1_700_000_000_000, "see you at 8")
+        receive(alice, alice, 1_700_000_100_000, "oops, wrong chat")
+        fx.notifier.showing -= alice
+
+        edits.applyRemoteDelete("${alice}_1700000100000")
+
+        assertEquals(emptyList(), fx.notifier.events)
     }
 
     @Test

@@ -15,6 +15,11 @@ import kotlinx.coroutines.cancel
 internal class RecordingNotifier : SignalNotifier {
     val events = mutableListOf<String>()
 
+    /** Conversations whose message notification is up (not dismissed). */
+    val showing = mutableSetOf<String>()
+
+    override fun isShowingMessage(conversationJid: String) = conversationJid in showing
+
     override fun showMessage(title: String, body: String?, conversationJid: String) {
         events += "message:$conversationJid:$title:$body"
     }

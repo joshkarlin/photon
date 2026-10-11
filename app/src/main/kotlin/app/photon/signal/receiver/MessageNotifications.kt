@@ -67,6 +67,8 @@ internal class MessageNotifications(
             AfterRemoteDelete.Cancel -> notifier.cancelConversation(jid)
             AfterRemoteDelete.Keep -> {}
             is AfterRemoteDelete.Show -> {
+                // A dismissed notification stays dismissed.
+                if (!notifier.isShowingMessage(jid)) return
                 val conversation = messageDb.getConversation(jid)
                 val isGroup = conversation?.isGroup == true
                 val newest = next.newest
