@@ -55,7 +55,7 @@ internal class RecordingNotifier : SignalNotifier {
 internal class ReceiverFixture(localAci: String, localDeviceId: Int = 3) {
     val context: Context = ApplicationProvider.getApplicationContext()
     val db = SignalMessageDatabase(context)
-    private val protocolDb = SignalProtocolDatabase(context)
+    val protocolDb = SignalProtocolDatabase(context)
     val credentials = SignalCredentials(protocolDb).apply {
         aciString = localAci
         storedDeviceId = localDeviceId

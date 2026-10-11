@@ -32,6 +32,15 @@ fun SignalMessageDatabase.storageManifestVersion(): Long? =
     readableDatabase.rawQuery("SELECT version FROM storage_manifest WHERE id = 1", null)
         .use { if (it.moveToFirst()) it.getLong(0) else null }
 
+/**
+ * Read the whole manifest next time, whatever its version: a new storage
+ * key may not change the version. The records stay, so mutes hold until
+ * then.
+ */
+fun SignalMessageDatabase.forgetStorageManifestVersion() {
+    writableDatabase.execSQL("DELETE FROM storage_manifest")
+}
+
 /** The storage ids of every record read so far. */
 fun SignalMessageDatabase.storageRecordIds(): Set<String> =
     readableDatabase.rawQuery("SELECT storage_id FROM storage_records", null).use { c ->

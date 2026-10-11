@@ -1,6 +1,7 @@
 package app.photon.signal
 
 import android.util.Log
+import app.photon.signal.storage.storageKeyFrom
 import app.photon.signal.store.SignalProtocolDatabase
 import app.photon.signal.store.PhotonProtocolStore
 import org.signal.libsignal.protocol.IdentityKey
@@ -87,7 +88,8 @@ class SignalAccountManager(
 
             Log.i(TAG, "Provision message: number=${provisionMsg.number}, aci=${provisionMsg.aci}, " +
                 "hasAciPub=${provisionMsg.aciIdentityKeyPublic != null}, " +
-                "hasAciPriv=${provisionMsg.aciIdentityKeyPrivate != null}")
+                "hasAciPriv=${provisionMsg.aciIdentityKeyPrivate != null}, " +
+                "hasAccountEntropyPool=${provisionMsg.accountEntropyPool != null}")
 
             val phoneNumber = provisionMsg.number
                 ?: throw IllegalStateException("No phone number in provision message")
@@ -126,6 +128,9 @@ class SignalAccountManager(
             credentials.aciString = aci
             credentials.pniString = pni
             credentials.storedPassword = password
+            // The storage key reads chat mutes; without it the receiver asks
+            // the primary for it (StorageMuteSync).
+            credentials.storageKey = storageKeyFrom(provisionMsg.accountEntropyPool)
 
             val pushSocket = PushServiceSocket(
                 config, credentials, SignalConfig.USER_AGENT, false,

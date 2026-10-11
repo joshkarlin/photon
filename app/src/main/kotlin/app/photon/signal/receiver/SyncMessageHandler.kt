@@ -17,6 +17,7 @@ import app.photon.signal.db.updateConversationLastMessage
 import app.photon.signal.db.upsertConversation
 import app.photon.signal.replyPrefix
 import app.photon.signal.serviceIdString
+import app.photon.signal.storage.StorageMuteSync
 import app.photon.signal.store.PhotonIdentityKeyStore
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
@@ -27,7 +28,11 @@ import org.whispersystems.signalservice.internal.push.SyncMessage
 
 private const val TAG = SignalMessageReceiver.TAG
 
-/** SyncMessages from the user's other devices: sent transcripts, reads, contacts, verification and calls. */
+/**
+ * SyncMessages from the user's other devices: sent transcripts, reads,
+ * contacts, verification, calls, and the keys and storage changes that
+ * chat mutes come from ([StorageMuteSync]).
+ */
 internal class SyncMessageHandler(
     private val credentials: SignalCredentials,
     private val identityStore: PhotonIdentityKeyStore,
@@ -39,6 +44,7 @@ internal class SyncMessageHandler(
     private val contactsSync: ContactsSync,
     private val earlyReads: EarlyReadCache,
     private val notifier: SignalNotifier,
+    private val storageMutes: StorageMuteSync,
     private val scope: CoroutineScope,
 ) {
     fun processSyncMessage(sync: SyncMessage, metadata: EnvelopeMetadata) {
@@ -50,8 +56,19 @@ internal class SyncMessageHandler(
             "verified".takeIf { sync.verified != null },
             "callEvent".takeIf { sync.callEvent != null },
             "callLogEvent".takeIf { sync.callLogEvent != null },
+            "keys".takeIf { sync.keys != null },
+            "fetchLatest(${sync.fetchLatest?.type})".takeIf { sync.fetchLatest != null },
         )
         if (kinds.isNotEmpty()) Log.i(TAG, "Sync message kinds: ${kinds.joinToString(",")}")
+        // Only the account's own devices may hand over its keys or point at
+        // its storage.
+        val fromSelf = metadata.sourceServiceId.toString() == credentials.aciString
+        sync.keys?.let { keys ->
+            if (fromSelf) storageMutes.onKeys(keys.accountEntropyPool) else Log.w(TAG, "Ignoring a Keys sync from another account")
+        }
+        if (fromSelf && sync.fetchLatest?.type == SyncMessage.FetchLatest.Type.STORAGE_MANIFEST) {
+            storageMutes.onStorageChanged()
+        }
         sync.verified?.let { verified ->
             try {
                 val applied = applySignalVerificationSync(

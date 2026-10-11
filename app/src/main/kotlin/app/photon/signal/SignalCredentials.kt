@@ -26,6 +26,15 @@ class SignalCredentials(private val db: SignalProtocolDatabase) : CredentialsPro
         get() = db.getState("pni")?.let { String(it) }
         set(v) { if (v != null) db.putState("pni", v.toByteArray()) }
 
+    /**
+     * The storage service key (32 bytes), derived from the account entropy
+     * pool at linking or from a Keys sync. Null until one arrives. A
+     * secret, like the identity key beside it: never log it.
+     */
+    var storageKey: ByteArray?
+        get() = db.getState("storage_service_key")?.takeIf { it.size == 32 }
+        set(v) { if (v != null && v.size == 32) db.putState("storage_service_key", v) }
+
     fun isRegistered(): Boolean {
         return phoneNumber != null && storedPassword != null && aciString != null
     }
