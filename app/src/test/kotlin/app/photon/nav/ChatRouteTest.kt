@@ -89,7 +89,7 @@ class ChatRouteTest {
         assertEquals(Routes.CHATS, nav.currentBackStackEntry?.destination?.route)
         assertEquals("SMS", nav.currentBackStackEntry?.arguments?.getString("platform"))
         assertNull(nav.previousBackStackEntry, "the old list was replaced, not stacked")
-        rule.onNodeWithText("SMS ▾").assertExists()
+        rule.onNodeWithText("SMS").assertExists()
 
         // No WhatsApp session has reported logged_out: its chats, not pairing.
         pick("WhatsApp")
@@ -100,7 +100,7 @@ class ChatRouteTest {
         assertEquals(Routes.SIGNAL_PAIRING, nav.currentBackStackEntry?.destination?.route)
     }
 
-    /** The current list's title, which opens the platform picker. */
+    /** The current list's filter, in its bottom bar, which opens the platform picker. */
     private fun titleNow(nav: NavHostController): String =
-        (Routes.platformOf(nav.currentBackStackEntry?.arguments?.getString("platform"))?.label ?: "All Chats") + " ▾"
+        (Routes.platformOf(nav.currentBackStackEntry?.arguments?.getString("platform"))?.label ?: "All Chats").uppercase()
 }

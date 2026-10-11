@@ -48,6 +48,12 @@ object PhotonGrid {
      */
     const val MARGIN = 2f
 
+    /**
+     * Height of the SDK's `LightTopBar`. LightOS Messages, which has no top
+     * bar, leaves this much empty above its list.
+     */
+    const val TOP_BAR_HEIGHT = 3f
+
     /** Height of a menu row, as LightOS Settings spaces its rows. */
     const val MENU_ROW_HEIGHT = 5f
 

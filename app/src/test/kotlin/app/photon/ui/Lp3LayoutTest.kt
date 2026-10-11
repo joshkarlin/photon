@@ -62,7 +62,7 @@ class Lp3LayoutTest {
         rule.setContent {
             PhotonTheme {
                 ChatListLayout(
-                    title = "SMS",
+                    filter = "SMS",
                     conversations = PreviewSamples.conversations,
                     platformOf = PreviewSamples::platformOf,
                     onChat = {},
@@ -108,12 +108,22 @@ class Lp3LayoutTest {
         assertTrue(title.right <= 360f, "title $title runs off screen")
     }
 
+    /**
+     * As LightOS Messages: the list starts below a top bar's height left
+     * empty, and the bottom bar puts Settings at the left margin and the
+     * filter in the middle.
+     */
     @Test
-    fun longListTitleAndSettingsDoNotOverlap() {
+    fun chatListHasABottomBarInsteadOfATopBar() {
         rule.setContent { PhotonTheme { ChatListSample() } }
-        val title = bounds("All Chats ▾")
+        val unit = 360f / 27
+        assertEquals(3 * unit, rule.onNodeWithTag(CHAT_LIST_TAG).getBoundsInRoot().toRect().top, 0.5f)
         val settings = boundsOf("Settings")
-        assertTrue(title.right <= settings.left, "title $title overlaps settings $settings")
+        assertEquals(margin, settings.left, 0.5f)
+        assertTrue(settings.top >= 413f - 4 * unit, "settings $settings should sit in the bottom bar")
+        val filter = bounds("ALL CHATS")
+        assertEquals(180f, (filter.left + filter.right) / 2, 1f)
+        assertTrue(filter.top >= 413f - 4 * unit, "filter $filter should sit in the bottom bar")
     }
 
     @Test

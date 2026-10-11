@@ -16,8 +16,8 @@ import kotlinx.coroutines.flow.StateFlow
 
 /**
  * The chat list: every platform's chats by recency ([filter] null, "All
- * Chats", each with its platform's icon), or one platform's. The title opens
- * the platform picker.
+ * Chats", each with its platform's icon), or one platform's. The filter in
+ * the bottom bar opens the platform picker ([onSwitch]).
  */
 @Composable
 fun ChatListScreen(
@@ -47,8 +47,8 @@ internal fun ChatListScreen(
     fun platformOf(jid: String) = platformByJid[jid] ?: filter ?: Platform.SMS
 
     ChatListContent(
-        title = filter?.label ?: "All Chats",
-        onTitleClick = onSwitch,
+        filter = filter?.label ?: "All Chats",
+        onFilter = onSwitch,
         onSettings = onSettings,
         conversations = conversations,
         platformOf = { platformOf(it.jid) },
