@@ -122,6 +122,8 @@ dependencies {
     }
     implementation("org.signal:libsignal-android:0.92.1")
 
+    testImplementation(composeBom)
+    testImplementation("androidx.compose.ui:ui-test-junit4")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlin:kotlin-test:2.3.20")
     testImplementation("org.robolectric:robolectric:4.16.1")

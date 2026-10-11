@@ -11,11 +11,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.tooling.preview.Preview
 import app.photon.data.PhotonPreferences
 import app.photon.data.ScrollDial
 import app.photon.service.PhotonService
 import app.photon.ui.shared.components.MenuRow
 import app.photon.ui.shared.components.MenuScreen
+import app.photon.ui.theme.PhotonTheme
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
 import com.thelightphone.sdk.ui.gridUnitsAsDp
@@ -249,3 +251,26 @@ private suspend fun syncRetention(ws: app.photon.service.WsClient?, maxMessages:
         })
     } catch (_: Exception) {}
 }
+
+// ─── Previews (LP3 size) ────────────────────────────────────────
+
+@Preview(name = "Settings", widthDp = 360, heightDp = 413, showBackground = true, backgroundColor = 0xFF000000)
+@Composable
+private fun SettingsHomePreview() = PhotonTheme {
+    SettingsHomeContent(version = "0.4.0", onBack = {}, onNav = {})
+}
+
+@Preview(name = "Settings – chat", widthDp = 360, heightDp = 413, showBackground = true, backgroundColor = 0xFF000000)
+@Composable
+private fun ChatSettingsPreview() = PhotonTheme {
+    ChatSettingsContent(
+        notificationsEnabled = true,
+        showThumbnails = false,
+        scrollDial = ScrollDial.MEDIUM,
+        onBack = {},
+        onToggleNotifications = {},
+        onToggleThumbnails = {},
+        onCycleScrollDial = {},
+    )
+}
+
