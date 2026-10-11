@@ -93,20 +93,31 @@ fun ConversationRow(
     }
 }
 
-fun formatTimestamp(epochSeconds: Long): String {
+/**
+ * List timestamp: "14:02" today, "Yesterday", a weekday within this week,
+ * otherwise "dd/MM". Days are calendar days in the device's time zone.
+ */
+fun formatTimestamp(epochSeconds: Long, nowMillis: Long = System.currentTimeMillis()): String {
     if (epochSeconds == 0L) return ""
     val date = Date(epochSeconds * 1000)
-    val now = Calendar.getInstance()
+    val now = Calendar.getInstance().apply { timeInMillis = nowMillis }
     val then = Calendar.getInstance().apply { time = date }
-    return when {
-        now.get(Calendar.DATE) == then.get(Calendar.DATE) &&
-            now.get(Calendar.YEAR) == then.get(Calendar.YEAR) ->
-            hourMinuteFormat.format(date)
-        now.get(Calendar.DATE) - then.get(Calendar.DATE) == 1 &&
-            now.get(Calendar.YEAR) == then.get(Calendar.YEAR) -> "Yesterday"
-        now.get(Calendar.WEEK_OF_YEAR) == then.get(Calendar.WEEK_OF_YEAR) &&
-            now.get(Calendar.YEAR) == then.get(Calendar.YEAR) ->
-            weekdayFormat.format(date)
-        else -> dayMonthFormat.format(date)
+    return when (calendarDaysBetween(then, now)) {
+        0L -> hourMinuteFormat.format(date)
+        1L -> "Yesterday"
+        else -> if (now.get(Calendar.WEEK_OF_YEAR) == then.get(Calendar.WEEK_OF_YEAR) &&
+            now.get(Calendar.YEAR) == then.get(Calendar.YEAR)
+        ) weekdayFormat.format(date) else dayMonthFormat.format(date)
     }
+}
+
+private fun calendarDaysBetween(from: Calendar, to: Calendar): Long {
+    fun startOfDay(c: Calendar) = (c.clone() as Calendar).apply {
+        set(Calendar.HOUR_OF_DAY, 0)
+        set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
+    // Rounded so a DST shift between the two days doesn't cost a day.
+    return Math.round((startOfDay(to) - startOfDay(from)) / 86_400_000.0)
 }
