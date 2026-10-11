@@ -12,7 +12,7 @@ import kotlin.test.assertNull
 
 /** The ephemeral window: per-chat cap and max age (README "Ephemeral by design"). */
 @RunWith(RobolectricTestRunner::class)
-@Config(manifest = Config.NONE, sdk = [33])
+@Config(manifest = Config.NONE, sdk = [34])
 class SignalRetentionTest {
 
     private lateinit var db: SignalMessageDatabase

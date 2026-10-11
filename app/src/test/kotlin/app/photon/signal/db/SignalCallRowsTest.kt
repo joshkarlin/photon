@@ -14,7 +14,7 @@ import kotlin.test.assertTrue
 
 /** Call log rows: outcome in text_body, read state (and unread count) in status. */
 @RunWith(RobolectricTestRunner::class)
-@Config(manifest = Config.NONE, sdk = [33])
+@Config(manifest = Config.NONE, sdk = [34])
 class SignalCallRowsTest {
 
     private lateinit var db: SignalMessageDatabase

@@ -11,7 +11,7 @@ import kotlin.test.assertEquals
 
 /** Deletes-for-everyone and reaction removals arriving from other people/devices. */
 @RunWith(RobolectricTestRunner::class)
-@Config(manifest = Config.NONE, sdk = [33])
+@Config(manifest = Config.NONE, sdk = [34])
 class SignalRemoteEditsTest {
 
     private lateinit var db: SignalMessageDatabase

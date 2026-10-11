@@ -19,7 +19,7 @@ import kotlin.test.assertTrue
  * notification).
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(manifest = Config.NONE, sdk = [33])
+@Config(manifest = Config.NONE, sdk = [34])
 class SignalUnreadStateTest {
 
     private lateinit var db: SignalMessageDatabase

@@ -14,7 +14,7 @@ import kotlin.test.assertEquals
  * primary read sync can't subtract them from newer messages' count.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(manifest = Config.NONE, sdk = [33])
+@Config(manifest = Config.NONE, sdk = [34])
 class SignalMessageDatabaseUpgradeTest {
 
     @Test

@@ -17,7 +17,7 @@ import kotlin.test.assertNull
  * files under an open handle kept serving (and writing) the old data.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(manifest = Config.NONE, sdk = [33])
+@Config(manifest = Config.NONE, sdk = [34])
 class SignalResetTest {
 
     private val context = ApplicationProvider.getApplicationContext<Context>()
