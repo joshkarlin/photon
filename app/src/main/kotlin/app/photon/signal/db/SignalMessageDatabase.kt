@@ -35,6 +35,10 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         const val STATUS_SEEN = "seen"
         const val STATUS_READ = "read"
         const val STATUS_DELETED = "deleted"
+
+        // Call log rows (see SignalCalls). Their ids aren't "{author}_{ts}"
+        // keys, so they're excluded from read sync, dedupe and reactions.
+        const val CONTENT_CALL = "call"
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -255,7 +259,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
     /**
      * The user opened the conversation in Photon: clear its unread count and
      * move unread incoming rows to 'seen' (viewed here, read sync pending).
-     * One transaction,
+     * Call rows never sync, so they go straight to 'read'. One transaction,
      * so a message inserted concurrently is either counted and marked seen,
      * or arrives afterwards and stays unread.
      */
@@ -264,6 +268,12 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         var changed = 0
         db.beginTransaction()
         try {
+            changed += db.update(
+                "messages",
+                ContentValues().apply { put("status", STATUS_READ) },
+                "conversation_jid = ? AND is_from_me = 0 AND content_type = ? AND status IN (?, ?)",
+                arrayOf(jid, CONTENT_CALL, STATUS_UNREAD, STATUS_SEEN),
+            )
             changed += db.update(
                 "messages",
                 ContentValues().apply { put("status", STATUS_SEEN) },
@@ -506,12 +516,15 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
      * Incoming messages the user has seen in Photon whose read state hasn't
      * been synced to our other devices yet. The status column doubles as the
      * tracker: rows move "seen" → "read" once a SyncMessage.read covering
-     * them has gone out, so each message is synced at most once.
+     * them has gone out, so each message is synced at most once. Call rows
+     * are excluded: their ids aren't (author, timestamp) keys, so they could
+     * never be synced and would be retried on every chat open.
      */
     fun getUnsyncedIncomingReads(jid: String): List<String> {
         readableDatabase.rawQuery(
-            "SELECT id FROM messages WHERE conversation_jid = ? AND is_from_me = 0 AND status = ?",
-            arrayOf(jid, STATUS_SEEN),
+            "SELECT id FROM messages WHERE conversation_jid = ? AND is_from_me = 0 " +
+                "AND status = ? AND content_type != ?",
+            arrayOf(jid, STATUS_SEEN, CONTENT_CALL),
         ).use { c ->
             val ids = mutableListOf<String>()
             while (c.moveToNext()) ids.add(c.getString(0))
@@ -607,7 +620,12 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
     fun deleteDuplicateMessages(): Int {
         val seen = HashSet<String>()
         val toDelete = ArrayList<String>()
-        readableDatabase.rawQuery("SELECT id FROM messages ORDER BY rowid", null).use { c ->
+        // Call rows aren't "{author}_{ts}_{rand}" ids: two calls from the same
+        // peer share prefixOf() and must not be collapsed.
+        readableDatabase.rawQuery(
+            "SELECT id FROM messages WHERE content_type != ? ORDER BY rowid",
+            arrayOf(CONTENT_CALL),
+        ).use { c ->
             val idIdx = c.getColumnIndexOrThrow("id")
             while (c.moveToNext()) {
                 val id = c.getString(idIdx)
@@ -1152,6 +1170,158 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         if (changed > 0) notifyChanged()
         return ReadSyncResult(matched, cleared)
     }
+
+    // ── Call rows ──
+
+    /** Read state of a call row around an update; see [upsertCallRow]. */
+    data class CallRowChange(
+        val conversationJid: String,
+        val existed: Boolean,
+        val wasUnread: Boolean,
+        val isUnread: Boolean,
+        val unreadCount: Int,
+    )
+
+    /**
+     * Insert or update a call row. The outcome ("Missed voice call", …) lives
+     * in text_body; status stays read state, so [unread] decides whether the
+     * row counts towards unread_count. Insert/update and the count change
+     * are one transaction.
+     */
+    fun upsertCallRow(
+        id: String,
+        conversationJid: String,
+        senderJid: String,
+        timestamp: Long,
+        text: String,
+        unread: Boolean,
+    ): CallRowChange {
+        val db = writableDatabase
+        var existed = false
+        var wasUnread = false
+        var unreadCount = 0
+        db.beginTransaction()
+        try {
+            val previousStatus = db.rawQuery("SELECT status FROM messages WHERE id = ?", arrayOf(id))
+                .use { if (it.moveToFirst()) it.getString(0) else null }
+            if (previousStatus == null) {
+                db.insertOrThrow(
+                    "messages", null,
+                    ContentValues().apply {
+                        put("id", id)
+                        put("conversation_jid", conversationJid)
+                        put("sender_jid", senderJid)
+                        put("timestamp", timestamp)
+                        put("content_type", CONTENT_CALL)
+                        put("text_body", text)
+                        put("is_from_me", 0)
+                        put("status", if (unread) STATUS_UNREAD else STATUS_READ)
+                    },
+                )
+                setLastMessageIfNewer(db, conversationJid, id, timestamp)
+                if (unread) adjustUnread(db, conversationJid, +1)
+            } else {
+                existed = true
+                wasUnread = previousStatus == STATUS_UNREAD
+                val status = when {
+                    unread -> STATUS_UNREAD
+                    wasUnread -> STATUS_READ
+                    else -> previousStatus
+                }
+                db.update(
+                    "messages",
+                    ContentValues().apply {
+                        put("text_body", text)
+                        put("status", status)
+                    },
+                    "id = ?", arrayOf(id),
+                )
+                if (unread && !wasUnread) adjustUnread(db, conversationJid, +1)
+                if (!unread && wasUnread) adjustUnread(db, conversationJid, -1)
+            }
+            unreadCount = unreadCountOf(db, conversationJid)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        notifyChanged()
+        return CallRowChange(conversationJid, existed, wasUnread, unread, unreadCount)
+    }
+
+    /** Remove a call row (deleted from the call log on another device). */
+    fun deleteCallRow(id: String): CallRowChange? {
+        val db = writableDatabase
+        val change: CallRowChange
+        db.beginTransaction()
+        try {
+            val row = db.rawQuery(
+                "SELECT conversation_jid, status FROM messages WHERE id = ? AND content_type = ?",
+                arrayOf(id, CONTENT_CALL),
+            ).use { if (it.moveToFirst()) it.getString(0) to it.getString(1) else null } ?: return null
+            val (jid, status) = row
+            db.delete("messages", "id = ?", arrayOf(id))
+            val wasUnread = status == STATUS_UNREAD
+            if (wasUnread) adjustUnread(db, jid, -1)
+            change = CallRowChange(jid, true, wasUnread, false, unreadCountOf(db, jid))
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        notifyChanged()
+        return change
+    }
+
+    /**
+     * Call row id for a Signal callId, whatever conversation it's in. Used
+     * when a call-event sync's conversation id can't be mapped to a jid.
+     */
+    fun findCallRowId(callId: Long): String? =
+        readableDatabase.rawQuery(
+            "SELECT id FROM messages WHERE content_type = ? AND id LIKE ? ESCAPE '\\' LIMIT 1",
+            arrayOf(CONTENT_CALL, "%\\_$callId"),
+        ).use { if (it.moveToFirst()) it.getString(0) else null }
+
+    /**
+     * Mark unread call rows up to [upToTimestamp] (seconds) read — a call-log
+     * "mark as read" from another device, for one conversation or (null) all.
+     * Returns conversations whose unread count reached zero.
+     */
+    fun markCallRowsRead(conversationJid: String?, upToTimestamp: Long): List<String> {
+        val where = buildString {
+            append("content_type = ? AND is_from_me = 0 AND status = ? AND timestamp <= ?")
+            if (conversationJid != null) append(" AND conversation_jid = ?")
+        }
+        val args = listOfNotNull(CONTENT_CALL, STATUS_UNREAD, upToTimestamp.toString(), conversationJid)
+            .toTypedArray()
+        val counts = linkedMapOf<String, Int>()
+        val db = writableDatabase
+        val cleared: List<String>
+        db.beginTransaction()
+        try {
+            db.rawQuery("SELECT conversation_jid, COUNT(*) FROM messages WHERE $where GROUP BY conversation_jid", args)
+                .use { c -> while (c.moveToNext()) counts[c.getString(0)] = c.getInt(1) }
+            if (counts.isNotEmpty()) {
+                db.update("messages", ContentValues().apply { put("status", STATUS_READ) }, where, args)
+            }
+            cleared = decrementUnread(db, counts)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        if (counts.isNotEmpty()) notifyChanged()
+        return cleared
+    }
+
+    private fun adjustUnread(db: SQLiteDatabase, jid: String, delta: Int) {
+        db.execSQL(
+            "UPDATE conversations SET unread_count = MAX(0, unread_count + ?) WHERE jid = ?",
+            arrayOf<Any?>(delta, jid),
+        )
+    }
+
+    private fun unreadCountOf(db: SQLiteDatabase, jid: String): Int =
+        db.rawQuery("SELECT unread_count FROM conversations WHERE jid = ?", arrayOf(jid))
+            .use { if (it.moveToFirst()) it.getInt(0) else 0 }
 
     fun getReactions(messageIds: List<String>): Map<String, List<Reaction>> {
         if (messageIds.isEmpty()) return emptyMap()

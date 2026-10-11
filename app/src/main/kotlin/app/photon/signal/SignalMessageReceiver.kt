@@ -37,6 +37,7 @@ import org.whispersystems.signalservice.api.push.SignalServiceAddress
 import org.whispersystems.signalservice.api.util.AttachmentPointerUtil
 import org.whispersystems.signalservice.api.websocket.SignalWebSocket
 import org.whispersystems.signalservice.internal.push.AttachmentPointer
+import org.whispersystems.signalservice.internal.push.CallMessage
 import org.whispersystems.signalservice.internal.push.Content
 import org.whispersystems.signalservice.internal.push.DataMessage
 import org.whispersystems.signalservice.internal.push.Envelope
@@ -540,7 +541,7 @@ class SignalMessageReceiver(
             } else {
                 Log.i(TAG, "Reprocessing held envelope ${retryKey.take(12)}… (decrypted on an earlier delivery)")
             }
-            decrypted?.let { processContent(it.content, it.metadata) }
+            decrypted?.let { processContent(it.content, it.metadata, envelopeResponse) }
             envelopeRetries.clear(retryKey)
             true
         } catch (e: org.signal.libsignal.metadata.SelfSendException) {
@@ -592,10 +593,11 @@ class SignalMessageReceiver(
         }
     }
 
-    private fun processContent(content: Content, metadata: EnvelopeMetadata) {
+    private fun processContent(content: Content, metadata: EnvelopeMetadata, envelopeResponse: EnvelopeResponse) {
         Log.i(TAG, "Decrypted envelope from ${metadata.sourceServiceId}, " +
             "hasData=${content.dataMessage != null}, " +
             "hasSync=${content.syncMessage != null}, " +
+            "hasCall=${content.callMessage != null}, " +
             "hasReceipt=${content.receiptMessage != null}, " +
             "hasTyping=${content.typingMessage != null}, " +
             "hasSenderKeyDistribution=${content.senderKeyDistributionMessage != null}")
@@ -607,6 +609,7 @@ class SignalMessageReceiver(
         when {
             content.dataMessage != null -> processDataMessage(content.dataMessage!!, metadata)
             content.syncMessage != null -> processSyncMessage(content.syncMessage!!, metadata)
+            content.callMessage != null -> processCallMessage(content.callMessage!!, metadata, envelopeResponse)
             content.receiptMessage != null -> processReceipt(content.receiptMessage!!, metadata)
             content.typingMessage != null -> {} // ignore
             content.senderKeyDistributionMessage != null -> {} // already stored above
@@ -833,6 +836,17 @@ class SignalMessageReceiver(
             return
         }
 
+        // A group call started (or someone joined one). Photon can't join;
+        // record it like a message so the chat shows it. Group-call update
+        // messages have no body, so this must run before the empty check.
+        data.groupCallUpdate?.let { update ->
+            if (isGroup) {
+                val name = displayNameFor(senderAci, senderE164)
+                recordGroupCall(conversationJid, senderAci, name, update.eraId, timestamp)
+            }
+            return
+        }
+
         // Regular message
         val body = data.body
         val attachment = data.attachments.firstOrNull()
@@ -921,6 +935,220 @@ class SignalMessageReceiver(
         Log.d(TAG, "Stored message from $senderAci: ${body?.take(30) ?: contentType}")
     }
 
+    // ── Calls ──
+
+    /**
+     * 1:1 call signalling. Photon can't take part in the call (no RingRTC),
+     * so it only reports it: an offer rings via a notification and records
+     * an "Incoming … call" row; hangups/busy turn that into missed, answered
+     * elsewhere or declined. Answer, ICE and opaque (group ring) messages
+     * are WebRTC plumbing and are ignored.
+     */
+    private fun processCallMessage(
+        call: CallMessage,
+        metadata: EnvelopeMetadata,
+        envelopeResponse: EnvelopeResponse,
+    ) {
+        val localDeviceId = credentials.deviceId
+        val destination = call.destinationDeviceId
+        if (destination != null && destination != localDeviceId) {
+            Log.d(TAG, "Ignoring call message for device $destination")
+            return
+        }
+        // Call signalling between the user's own devices isn't a call to them.
+        if (metadata.sourceServiceId.toString() == credentials.aciString) return
+        val peerAci = normalizeServiceIdForConversation(
+            serviceId = metadata.sourceServiceId,
+            e164 = metadata.sourceE164,
+            context = "Incoming call source",
+        )
+        val envelope = envelopeResponse.envelope
+        val timestampMs = envelope.clientTimestamp ?: envelope.serverTimestamp ?: System.currentTimeMillis()
+
+        val offer = call.offer
+        val hangup = call.hangup
+        val busy = call.busy
+        when {
+            offer != null -> {
+                val callId = offer.id ?: return
+                val stale = SignalCalls.isStaleOffer(
+                    serverReceivedMs = envelope.serverTimestamp,
+                    serverDeliveredMs = envelopeResponse.serverDeliveredTimestamp,
+                    nowMs = System.currentTimeMillis(),
+                )
+                if (stale) Log.i(TAG, "Call offer $callId is stale; recording as missed without ringing")
+                applyCallSignal(
+                    peerAci, metadata.sourceE164, callId,
+                    if (stale) CallSignal.STALE_OFFER else CallSignal.OFFER,
+                    offerIsVideo = offer.type == CallMessage.Offer.Type.OFFER_VIDEO_CALL,
+                    timestampMs = timestampMs,
+                )
+            }
+            hangup != null -> {
+                val callId = hangup.id ?: return
+                val signal = SignalCalls.signalForHangup(hangup.type, hangup.deviceId, localDeviceId) ?: return
+                applyCallSignal(peerAci, metadata.sourceE164, callId, signal, null, timestampMs)
+            }
+            busy != null -> {
+                val callId = busy.id ?: return
+                applyCallSignal(peerAci, metadata.sourceE164, callId, CallSignal.ENDED_UNANSWERED, null, timestampMs)
+            }
+        }
+    }
+
+    private fun applyCallSignal(
+        peerAci: String,
+        peerE164: String?,
+        callId: Long,
+        signal: CallSignal,
+        offerIsVideo: Boolean?,
+        timestampMs: Long,
+    ) {
+        val id = SignalCalls.rowId(peerAci, callId)
+        val existing = messageDb.getMessage(id)
+        if (existing == null && signal != CallSignal.OFFER && signal != CallSignal.STALE_OFFER) {
+            Log.d(TAG, "Call $callId: $signal for a call we never saw ringing; ignoring")
+            return
+        }
+        if (existing == null) {
+            // First sight of this caller may be the call itself.
+            peerE164?.let { messageDb.updateContactPhone(peerAci, it) }
+            messageDb.upsertConversation(jid = peerAci, name = displayNameFor(peerAci, peerE164), isGroup = false)
+            maybeFetchProfile(peerAci)
+        }
+        updateCallRow(id, peerAci, existing?.textBody, signal, offerIsVideo, timestampMs / 1000)
+    }
+
+    private fun updateCallRow(
+        id: String,
+        conversationJid: String,
+        currentText: String?,
+        signal: CallSignal,
+        offerIsVideo: Boolean?,
+        timestampSeconds: Long,
+    ) {
+        val current = SignalCalls.parse(currentText)
+        val outcome = SignalCalls.next(current?.outcome, signal) ?: return
+        val state = CallState(outcome, current?.isVideo ?: offerIsVideo ?: false)
+        val change = messageDb.upsertCallRow(
+            id = id,
+            conversationJid = conversationJid,
+            senderJid = conversationJid,
+            timestamp = timestampSeconds,
+            text = SignalCalls.text(state),
+            unread = SignalCalls.isUnread(outcome),
+        )
+        Log.i(TAG, "Call ${id.takeLast(12)}: ${current?.outcome ?: "new"} -> $outcome ($signal)")
+
+        val helper = app.photon.service.NotificationHelper
+        val platform = app.photon.data.model.Platform.SIGNAL
+        when (outcome) {
+            CallOutcome.RINGING ->
+                helper.showIncomingCall(context, callerName(conversationJid), platform, conversationJid, state.isVideo)
+            CallOutcome.MISSED ->
+                helper.showMissedCall(context, callerName(conversationJid), platform, conversationJid, state.isVideo)
+            CallOutcome.ANSWERED, CallOutcome.DECLINED -> {
+                helper.cancelIncomingCall(context, conversationJid)
+                // A call shown as missed turned out to be answered elsewhere.
+                if (change.wasUnread && change.unreadCount == 0) {
+                    helper.cancelForConversation(context, conversationJid)
+                }
+            }
+        }
+    }
+
+    private fun callerName(conversationJid: String): String =
+        messageDb.getConversation(conversationJid)?.name?.takeIf { it.isNotBlank() }
+            ?: displayNameFor(conversationJid, null)
+            ?: conversationJid.take(8)
+
+    /**
+     * Another device's view of a call: answered, declined or deleted there.
+     * Group/ad-hoc call events are keyed by era, not callId, so they can't be
+     * matched to Photon's group-call rows and are skipped.
+     */
+    private fun processCallEventSync(event: SyncMessage.CallEvent) {
+        val callId = event.callId ?: return
+        if (event.type == SyncMessage.CallEvent.Type.GROUP_CALL ||
+            event.type == SyncMessage.CallEvent.Type.AD_HOC_CALL
+        ) {
+            Log.d(TAG, "Ignoring ${event.type} call event sync")
+            return
+        }
+        val conversationJid = event.conversationId?.toByteArray()?.let { SignalCalls.conversationJidFor(it) }
+        val id = conversationJid?.let { SignalCalls.rowId(it, callId) }
+            ?.takeIf { messageDb.getMessage(it) != null }
+            ?: messageDb.findCallRowId(callId)
+            ?: run {
+                Log.d(TAG, "Call event ${event.event} for unknown call $callId")
+                return
+            }
+        val row = messageDb.getMessage(id) ?: return
+        val helper = app.photon.service.NotificationHelper
+        when (event.event) {
+            SyncMessage.CallEvent.Event.DELETE -> {
+                val change = messageDb.deleteCallRow(id) ?: return
+                helper.cancelIncomingCall(context, change.conversationJid)
+                if (change.wasUnread && change.unreadCount == 0) {
+                    helper.cancelForConversation(context, change.conversationJid)
+                }
+            }
+            SyncMessage.CallEvent.Event.ACCEPTED ->
+                updateCallRow(id, row.conversationJid, row.textBody, CallSignal.ANSWERED_ELSEWHERE, null, row.timestamp)
+            SyncMessage.CallEvent.Event.NOT_ACCEPTED ->
+                updateCallRow(id, row.conversationJid, row.textBody, CallSignal.DECLINED_ELSEWHERE, null, row.timestamp)
+            else -> Log.d(TAG, "Ignoring call event ${event.event}")
+        }
+    }
+
+    /** Call log read on another device: clear the matching missed calls here. */
+    private fun processCallLogEvent(event: SyncMessage.CallLogEvent) {
+        val conversationJid = when (event.type) {
+            SyncMessage.CallLogEvent.Type.MARKED_AS_READ -> null
+            SyncMessage.CallLogEvent.Type.MARKED_AS_READ_IN_CONVERSATION ->
+                event.conversationId?.toByteArray()?.let { SignalCalls.conversationJidFor(it) } ?: return
+            else -> {
+                Log.d(TAG, "Ignoring call log event ${event.type}")
+                return
+            }
+        }
+        val upTo = (event.timestamp ?: System.currentTimeMillis()) / 1000
+        messageDb.markCallRowsRead(conversationJid, upTo).forEach { jid ->
+            app.photon.service.NotificationHelper.cancelForConversation(context, jid)
+        }
+    }
+
+    /**
+     * Someone started (or joined) a group call. One row per call era, however
+     * many members announce it; notifies like a message, never rings.
+     */
+    private fun recordGroupCall(
+        groupJid: String,
+        senderAci: String,
+        senderName: String?,
+        eraId: String?,
+        timestampMs: Long,
+    ) {
+        if (!senderName.isNullOrBlank()) {
+            messageDb.upsertParticipant(groupJid, senderAci, senderName, "member")
+        }
+        val id = SignalCalls.groupRowId(groupJid, eraId?.takeIf { it.isNotBlank() } ?: timestampMs.toString())
+        val inserted = messageDb.insertIncomingMessage(
+            id = id,
+            conversationJid = groupJid,
+            senderJid = senderAci,
+            timestamp = timestampMs / 1000,
+            contentType = SignalMessageDatabase.CONTENT_CALL,
+            textBody = SignalCalls.GROUP_CALL_TEXT,
+            dedupePrefix = null,
+        )
+        if (!inserted) return
+        val body = if (!senderName.isNullOrBlank()) "$senderName started a group call" else SignalCalls.GROUP_CALL_TEXT
+        app.photon.service.NotificationHelper.showMessageNotification(
+            context, groupTitle(groupJid), body, app.photon.data.model.Platform.SIGNAL, groupJid,
+        )
+    }
+
     private fun groupTitle(groupJid: String): String =
         ConversationNaming.groupTitle(messageDb.getConversation(groupJid)?.name, groupJid)
 
@@ -984,6 +1212,8 @@ class SignalMessageReceiver(
                 Log.w(TAG, "Invalid verification sync", e)
             }
         }
+        sync.callEvent?.let { processCallEventSync(it) }
+        sync.callLogEvent?.let { processCallLogEvent(it) }
         // Sent messages from our primary device
         val sent = sync.sent
         if (sent != null) {

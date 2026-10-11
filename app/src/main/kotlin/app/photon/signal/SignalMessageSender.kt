@@ -202,7 +202,7 @@ class SignalMessageSender(
      */
     fun sendTextMessage(conversationJid: String, text: String, replyToId: String? = null) {
         val timestamp = System.currentTimeMillis()
-        val replyPrefix = replyToId?.substringBeforeLast("_")
+        val replyPrefix = replyPrefixFor(replyToId)
         // Prefix "{authorAci}_{timestampMs}" must stay stable so quote lookups
         // via findMessageByPrefix still match. The random suffix only exists
         // to avoid local PK collisions on rapid-fire sends with the same ms.
@@ -261,7 +261,7 @@ class SignalMessageSender(
         replyToId: String? = null,
     ) {
         val timestamp = System.currentTimeMillis()
-        val replyPrefix = replyToId?.substringBeforeLast("_")
+        val replyPrefix = replyPrefixFor(replyToId)
         val messageId = "${credentials.aciString}_${timestamp}_${UUID.randomUUID().toString().take(8)}"
         val contentType = when {
             mimeType.startsWith("image/") -> "image"
@@ -339,11 +339,23 @@ class SignalMessageSender(
         return stream.use { sender.uploadAttachment(it) }
     }
 
+    /**
+     * Quote key for a reply. Call rows aren't messages other devices know
+     * about (their ids aren't "{author}_{ts}" keys), so a reply to one is
+     * sent as a plain message.
+     */
+    private fun replyPrefixFor(replyToId: String?): String? {
+        if (replyToId == null) return null
+        if (messageDb.getMessage(replyToId)?.contentType == SignalMessageDatabase.CONTENT_CALL) return null
+        return MessageKeys.prefixOf(replyToId)
+    }
+
     fun sendReaction(conversationJid: String, messageId: String, emoji: String): Boolean {
         val row = messageDb.getMessage(messageId)
         val reaction = signalReactionFor(messageId, emoji)
         val myAci = credentials.aciString
         if (row == null || row.conversationJid != conversationJid ||
+            row.contentType == SignalMessageDatabase.CONTENT_CALL ||
             row.status == "failed" || row.status == "sending" || reaction == null || myAci == null
         ) return false
 
