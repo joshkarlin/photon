@@ -1,0 +1,256 @@
+package app.photon.ui.preview
+
+import android.content.res.Configuration
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
+import app.photon.R
+import app.photon.data.model.Conversation
+import app.photon.data.model.Message
+import app.photon.data.model.Platform
+import app.photon.data.model.Reaction
+import app.photon.ui.shared.ChatListLayout
+import app.photon.ui.shared.ChatThread
+import app.photon.ui.shared.GroupRowStyle
+import app.photon.ui.theme.PhotonTheme
+import com.thelightphone.sdk.ui.LightThemeTokens
+
+// LP3-sized design previews (1080x1240 at 3x) with sample data covering the
+// cases the row design has to handle: bursts, a call, a failed send,
+// reactions, a reply, a deleted message, a placeholder, and long titles.
+
+private const val LP3_WIDTH_DP = 360
+private const val LP3_HEIGHT_DP = 413
+
+/** Sample conversations and threads for previews and layout tests. */
+internal object PreviewSamples {
+    private val now = System.currentTimeMillis() / 1000
+    private const val MIN = 60L
+    private const val HOUR = 60 * MIN
+
+    const val LONG_DM_TITLE = "Alexandra Konstantinopoulou-Whitfield"
+    const val LONG_GROUP_TITLE = "Saturday climbing crew + partners & kids"
+
+    private fun conversation(
+        jid: String,
+        name: String,
+        platform: Platform,
+        ago: Long,
+        unread: Int = 0,
+        isGroup: Boolean = false,
+    ) = Conversation(
+        jid = jid, name = name, isGroup = isGroup, lastMessageId = null,
+        lastTimestamp = now - ago, unreadCount = unread, isMuted = false,
+        avatarUrl = null, updatedAt = now - ago,
+    ) to platform
+
+    private val tagged = listOf(
+        conversation("a@s.whatsapp.net", LONG_DM_TITLE, Platform.WHATSAPP, 4 * MIN, unread = 2),
+        conversation("g@g.us", LONG_GROUP_TITLE, Platform.WHATSAPP, 25 * MIN, unread = 14, isGroup = true),
+        conversation("+447700900123", "Mum", Platform.SMS, 2 * HOUR),
+        conversation("sig-1", "Sam Okafor", Platform.SIGNAL, 26 * HOUR),
+        conversation("HSBC UK", "HSBC UK", Platform.SMS, 50 * HOUR),
+        conversation("sig-2", "Book club", Platform.SIGNAL, 4 * 24 * HOUR, isGroup = true),
+        conversation("b@s.whatsapp.net", "Priya", Platform.WHATSAPP, 9 * 24 * HOUR),
+    )
+
+    val conversations: List<Conversation> = tagged.map { it.first }
+
+    fun platformOf(conversation: Conversation): Platform =
+        tagged.first { it.first.jid == conversation.jid }.second
+
+    private fun message(
+        id: String,
+        ago: Long,
+        body: String?,
+        fromMe: Boolean = false,
+        sender: String = "alexandra@s.whatsapp.net",
+        contentType: String = "text",
+        status: String = if (fromMe) "read" else "received",
+        reactions: List<String> = emptyList(),
+        replyTo: Message? = null,
+    ) = Message(
+        id = id, conversationJid = "chat", senderJid = if (fromMe) "me@s.whatsapp.net" else sender,
+        timestamp = now - ago, contentType = contentType, textBody = body, mediaUrl = null,
+        mediaMime = null, mediaSize = null, thumbnailPath = null, stickerPackId = null,
+        replyToId = replyTo?.id, editVersion = 0, isFromMe = fromMe, status = status,
+        reactions = reactions.map { Reaction(id, "x", it, now) },
+        replyToPreview = replyTo,
+    )
+
+    /** DM thread, newest first. */
+    val dmMessages: List<Message> = run {
+        val plan = message("d1", 26 * HOUR, "Are we still on for tomorrow night?")
+        listOf(
+            message("d10", 1 * MIN, "Want me to order for you?", fromMe = true, status = "failed"),
+            message("d9", 3 * MIN, "No rush, I'm at the bar already", fromMe = true),
+            message("d8", 4 * MIN, "Running ten minutes late, sorry!"),
+            message("d7", 20 * MIN, "Missed voice call", contentType = "call"),
+            message("d6", 45 * MIN, "Table for four at 8 — booked", reactions = listOf("❤️", "👍")),
+            message("d5", 46 * MIN, null),
+            message("d4", 47 * MIN, "Yes! Booking now", replyTo = plan),
+            message("d3", 25 * HOUR, "Sounds good, see you there", fromMe = true),
+            message("d2", 25 * HOUR + 2 * MIN, "8pm at the usual place?"),
+            plan,
+        )
+    }
+
+    private const val ALICE = "alice@s.whatsapp.net"
+    private const val BOB = "bob@s.whatsapp.net"
+    private const val MAX = "max@s.whatsapp.net"
+
+    val groupNames = mapOf(
+        ALICE to "Alice",
+        BOB to "Bob",
+        MAX to "Maximilian Featherstonehaugh",
+    )
+
+    /** Group thread, newest first. */
+    val groupMessages: List<Message> = run {
+        val question = message("g2", 70 * MIN, "Who's driving on Saturday?", sender = ALICE)
+        listOf(
+            message("g12", 1 * MIN, "Grabbing chalk on the way", fromMe = true, status = "failed"),
+            message("g11", 3 * MIN, "[ unsupported message ]", sender = BOB),
+            message("g10", 4 * MIN, "Perfect", sender = BOB, reactions = listOf("👍", "👍", "🙏")),
+            message("g9", 12 * MIN, "Missed group video call", contentType = "call"),
+            message("g8", 30 * MIN, "Kids' harnesses are in the boot already", sender = MAX),
+            message("g7", 31 * MIN, "I can take three in the van, leaving at 9", sender = MAX),
+            message("g6", 40 * MIN, "I'll drive", fromMe = true, replyTo = question),
+            message("g5", 41 * MIN, "Count me in", fromMe = true),
+            message("g4", 60 * MIN, "Me too, if there's space", sender = BOB),
+            message("g3", 66 * MIN, "I'm in!", sender = BOB),
+            question,
+            message("g1", 72 * MIN, "Morning all", sender = ALICE),
+        )
+    }
+}
+
+@Composable
+private fun PhotonPreview(content: @Composable () -> Unit) {
+    PhotonTheme {
+        Box(Modifier.fillMaxSize().background(LightThemeTokens.colors.background)) { content() }
+    }
+}
+
+/**
+ * Pins the LP3 screen size for one pane of a multi-pane preview, since the
+ * SDK's grid and type scale derive from the configuration's screen size.
+ */
+@Composable
+private fun Lp3Frame(content: @Composable () -> Unit) {
+    val configuration = Configuration(LocalConfiguration.current).apply {
+        screenWidthDp = LP3_WIDTH_DP
+        screenHeightDp = LP3_HEIGHT_DP
+    }
+    CompositionLocalProvider(LocalConfiguration provides configuration) {
+        Box(Modifier.size(LP3_WIDTH_DP.dp, LP3_HEIGHT_DP.dp)) { content() }
+    }
+}
+
+@Composable
+internal fun ChatListSample() {
+    ChatListLayout(
+        title = "All Chats",
+        conversations = PreviewSamples.conversations,
+        onChat = {},
+        onTitleClick = {},
+        onSettings = {},
+        icon = { conv ->
+            painterResource(
+                when (PreviewSamples.platformOf(conv)) {
+                    Platform.WHATSAPP -> R.drawable.ic_whatsapp
+                    Platform.SIGNAL -> R.drawable.ic_signal
+                    Platform.SMS -> R.drawable.ic_sms
+                },
+            )
+        },
+    )
+}
+
+@Composable
+internal fun ChatThreadSample(
+    title: String,
+    messages: List<Message>,
+    isGroup: Boolean,
+    participantNames: Map<String, String> = emptyMap(),
+    groupRowStyle: GroupRowStyle = GroupRowStyle.COLUMN,
+) {
+    ChatThread(
+        title = title,
+        messages = messages,
+        isGroup = isGroup,
+        participantNames = participantNames,
+        onSendText = { _, _ -> },
+        onSendAudio = { _, _ -> },
+        onSendMedia = { _, _, _ -> },
+        onBack = {},
+        onMediaTap = null,
+        onMessagesLoaded = null,
+        onReact = { _, _, _ -> },
+        onRetry = {},
+        onDelete = { _, _ -> },
+        onTitleClick = {},
+        supportsReply = true,
+        headerContent = null,
+        groupRowStyle = groupRowStyle,
+    )
+}
+
+@Composable
+internal fun DmThreadSample() {
+    ChatThreadSample(PreviewSamples.LONG_DM_TITLE, PreviewSamples.dmMessages, isGroup = false)
+}
+
+@Composable
+internal fun GroupThreadSample(style: GroupRowStyle = GroupRowStyle.COLUMN) {
+    ChatThreadSample(
+        title = PreviewSamples.LONG_GROUP_TITLE,
+        messages = PreviewSamples.groupMessages,
+        isGroup = true,
+        participantNames = PreviewSamples.groupNames,
+        groupRowStyle = style,
+    )
+}
+
+@Preview(name = "Chat list", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
+@Composable
+private fun ChatListPreview() = PhotonPreview { ChatListSample() }
+
+@Preview(name = "Chat list – empty", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
+@Composable
+private fun EmptyChatListPreview() = PhotonPreview {
+    ChatListLayout(title = "Signal", conversations = emptyList(), onChat = {}, emptyMessage = "No messages yet", onTitleClick = {}, onSettings = {})
+}
+
+@Preview(name = "DM", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
+@Composable
+private fun DmChatPreview() = PhotonPreview { DmThreadSample() }
+
+@Preview(name = "Group – sender column (shipped)", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
+@Composable
+private fun GroupChatPreview() = PhotonPreview { GroupThreadSample(GroupRowStyle.COLUMN) }
+
+@Preview(name = "Group – LP2 style (alternative)", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
+@Composable
+private fun GroupChatLp2Preview() = PhotonPreview { GroupThreadSample(GroupRowStyle.LP2) }
+
+@Preview(name = "Group – column vs LP2", widthDp = 2 * LP3_WIDTH_DP + 8, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF333333)
+@Composable
+private fun GroupStylesSideBySidePreview() = PhotonTheme {
+    Row {
+        Lp3Frame { PhotonPreview { GroupThreadSample(GroupRowStyle.COLUMN) } }
+        Spacer(Modifier.width(8.dp))
+        Lp3Frame { PhotonPreview { GroupThreadSample(GroupRowStyle.LP2) } }
+    }
+}

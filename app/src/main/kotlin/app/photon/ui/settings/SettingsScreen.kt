@@ -1,21 +1,7 @@
 package app.photon.ui.settings
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.scrollBy
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -23,28 +9,22 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.dp
-import app.photon.data.ListScrollSpeed
-import app.photon.data.ScrollSpeed
-import app.photon.ui.shared.ScrollDialEffect
-import androidx.compose.ui.unit.sp
-import app.photon.data.MessageLayout
+import androidx.compose.ui.tooling.preview.Preview
 import app.photon.data.PhotonPreferences
+import app.photon.data.ScrollDial
 import app.photon.service.PhotonService
-import app.photon.ui.shared.components.PhotonHeader
+import app.photon.ui.shared.components.MenuRow
+import app.photon.ui.shared.components.MenuScreen
+import app.photon.ui.theme.PhotonTheme
+import com.thelightphone.sdk.ui.LightText
+import com.thelightphone.sdk.ui.LightTextVariant
+import com.thelightphone.sdk.ui.gridUnitsAsDp
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-
-private val divColor = Color(0xFF1A1A1A)
-private val divMinor = Color(0xFF111111)
-private val dim = Color(0xFF666666)
 
 private enum class Page { HOME, CONNECTIONS, WHATSAPP, SIGNAL, CHAT, STORAGE }
 
@@ -66,23 +46,28 @@ fun SettingsScreen(onBack: () -> Unit, onResetWhatsApp: () -> Unit = {}, onReset
 
 @Composable
 private fun HomePage(onBack: () -> Unit, onNav: (Page) -> Unit) {
+    val context = LocalContext.current
+    val version = remember {
+        runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull()
+    }
     BackHandler { onBack() }
-    Column(Modifier.fillMaxSize().background(Color.Black)) {
-        PhotonHeader("SETTINGS", onBack)
-        HorizontalDivider(color = divColor)
-        SettingsRow("CONNECTIONS") { onNav(Page.CONNECTIONS) }
-        HorizontalDivider(color = divMinor)
-        SettingsRow("CHAT") { onNav(Page.CHAT) }
-        HorizontalDivider(color = divMinor)
-        SettingsRow("STORAGE") { onNav(Page.STORAGE) }
-        HorizontalDivider(color = divMinor)
-        Spacer(Modifier.weight(1f))
-        HorizontalDivider(color = divColor)
-        Text(
-            text = "PHOTON 0.3.0",
-            fontSize = 12.sp, letterSpacing = 2.sp, color = Color(0xFF333333),
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 20.dp),
-        )
+    SettingsHomeContent(version = version, onBack = onBack, onNav = onNav)
+}
+
+@Composable
+private fun SettingsHomeContent(version: String?, onBack: () -> Unit, onNav: (Page) -> Unit) {
+    MenuScreen("Settings", onBack) {
+        MenuRow("CONNECTIONS") { onNav(Page.CONNECTIONS) }
+        MenuRow("CHAT") { onNav(Page.CHAT) }
+        MenuRow("STORAGE") { onNav(Page.STORAGE) }
+        if (version != null) {
+            LightText(
+                text = "PHOTON $version",
+                variant = LightTextVariant.Detail,
+                lighten = true,
+                modifier = Modifier.padding(vertical = 1f.gridUnitsAsDp()),
+            )
+        }
     }
 }
 
@@ -96,13 +81,9 @@ private fun ConnectionsPage(onBack: () -> Unit, onNav: (Page) -> Unit) {
     val sigRegistered = PhotonService._signalCredentials?.isRegistered() == true
 
     BackHandler { onBack() }
-    Column(Modifier.fillMaxSize().background(Color.Black)) {
-        PhotonHeader("CONNECTIONS", onBack)
-        HorizontalDivider(color = divColor)
-        SettingsRow("WHATSAPP", formatState(waState)) { onNav(Page.WHATSAPP) }
-        HorizontalDivider(color = divMinor)
-        SettingsRow("SIGNAL", if (sigRegistered) formatState(sigState) else "NOT LINKED") { onNav(Page.SIGNAL) }
-        HorizontalDivider(color = divMinor)
+    MenuScreen("Connections", onBack) {
+        MenuRow("WHATSAPP", formatState(waState)) { onNav(Page.WHATSAPP) }
+        MenuRow("SIGNAL", if (sigRegistered) formatState(sigState) else "NOT LINKED") { onNav(Page.SIGNAL) }
     }
 }
 
@@ -114,40 +95,28 @@ private fun WhatsAppPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
     val context = LocalContext.current
     val ws = PhotonService._wsClient
     val waState by (ws?.whatsappState ?: MutableStateFlow("disconnected")).collectAsState()
-    val scrollState = rememberScrollState()
 
     BackHandler { onBack() }
-    Column(Modifier.fillMaxSize().background(Color.Black).verticalScroll(scrollState)) {
-        PhotonHeader("WHATSAPP", onBack)
-        HorizontalDivider(color = divColor)
-
-        SettingsRow("STATUS", formatState(waState), stateColor(waState))
-        HorizontalDivider(color = divMinor)
-
-        Spacer(Modifier.height(16.dp))
-        HorizontalDivider(color = divColor)
+    MenuScreen("WhatsApp", onBack) {
+        MenuRow("STATUS", formatState(waState), emphasizeValue = waState == "connected")
 
         if (waState == "logged_out") {
             // Not paired: the only useful action is to start the pairing flow.
-            SettingsRow("LINK DEVICE", onClick = onReset)
-            HorizontalDivider(color = divMinor)
+            MenuRow("LINK DEVICE", onClick = onReset)
         } else {
-            SettingsRow("REFRESH CONNECTION", onClick = {
+            MenuRow("REFRESH CONNECTION", onClick = {
                 scope.launch {
                     try {
                         ws?.reconnectWhatsApp()
                     } catch (_: Exception) {}
                 }
             })
-            HorizontalDivider(color = divMinor)
-
-            SettingsRow("RESET", onClick = {
+            MenuRow("RESET", onClick = {
                 scope.launch {
                     PhotonService.resetWhatsApp(context.filesDir)
                     onReset()
                 }
             })
-            HorizontalDivider(color = divMinor)
         }
     }
 }
@@ -162,49 +131,33 @@ private fun SignalPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
     val sigRegistered = PhotonService._signalCredentials?.isRegistered() == true
     val phone = PhotonService._signalCredentials?.phoneNumber
     val deviceId = PhotonService._signalCredentials?.storedDeviceId
-    val scrollState = rememberScrollState()
 
     BackHandler { onBack() }
-    Column(Modifier.fillMaxSize().background(Color.Black).verticalScroll(scrollState)) {
-        PhotonHeader("SIGNAL", onBack)
-        HorizontalDivider(color = divColor)
-
-        SettingsRow("STATUS", if (sigRegistered) formatState(sigState) else "NOT LINKED", stateColor(if (sigRegistered) sigState else ""))
-        HorizontalDivider(color = divMinor)
-
-        if (phone != null) {
-            SettingsRow("PHONE", phone)
-            HorizontalDivider(color = divMinor)
-        }
-
-        if (deviceId != null && sigRegistered) {
-            SettingsRow("DEVICE", deviceId.toString())
-            HorizontalDivider(color = divMinor)
-        }
-
-        Spacer(Modifier.height(16.dp))
-        HorizontalDivider(color = divColor)
+    MenuScreen("Signal", onBack) {
+        MenuRow(
+            "STATUS",
+            if (sigRegistered) formatState(sigState) else "NOT LINKED",
+            emphasizeValue = sigRegistered && sigState == "connected",
+        )
+        if (phone != null) MenuRow("PHONE", phone)
+        if (deviceId != null && sigRegistered) MenuRow("DEVICE", deviceId.toString())
 
         if (sigRegistered) {
-            SettingsRow("REFRESH CONNECTION") {
+            MenuRow("REFRESH CONNECTION") {
                 scope.launch {
                     PhotonService._signalReceiver?.stop()
                     PhotonService._signalReceiver?.start()
                 }
             }
-            HorizontalDivider(color = divMinor)
-
-            SettingsRow("RESET") {
+            MenuRow("RESET") {
                 scope.launch(kotlinx.coroutines.Dispatchers.IO) {
                     PhotonService.resetSignal(context)
                     onReset()
                 }
             }
-            HorizontalDivider(color = divMinor)
         } else {
             // Not linked: offer the pairing flow directly from settings.
-            SettingsRow("LINK DEVICE", onClick = onReset)
-            HorizontalDivider(color = divMinor)
+            MenuRow("LINK DEVICE", onClick = onReset)
         }
     }
 }
@@ -215,38 +168,38 @@ private fun SignalPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
 private fun ChatPage(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val prefs = PhotonPreferences(context)
+    val prefs = remember { PhotonPreferences(context) }
 
     val showThumbnails by prefs.showThumbnails.collectAsState(initial = true)
-    val dmLayout by prefs.dmLayout.collectAsState(initial = MessageLayout.TERMINAL)
-    val groupLayout by prefs.groupLayout.collectAsState(initial = MessageLayout.TRANSCRIPT)
     val notificationsEnabled by prefs.notificationsEnabled.collectAsState(initial = true)
-    val chatScrollSpeed by prefs.chatScrollSpeed.collectAsState(initial = ScrollSpeed.MEDIUM)
-    val menuScrollSpeed by prefs.menuScrollSpeed.collectAsState(initial = ListScrollSpeed.SLOW)
-
-    val scrollState = rememberScrollState()
-    val scrollPx = with(LocalDensity.current) { 40.dp.toPx() }
-    ScrollDialEffect { dir -> scrollState.scrollBy((dir * scrollPx).toInt().toFloat()) }
+    val scrollDial by prefs.scrollDial.collectAsState(initial = ScrollDial.DEFAULT)
 
     BackHandler { onBack() }
-    Column(Modifier.fillMaxSize().background(Color.Black).verticalScroll(scrollState)) {
-        PhotonHeader("CHAT", onBack)
-        HorizontalDivider(color = divColor)
+    ChatSettingsContent(
+        notificationsEnabled = notificationsEnabled,
+        showThumbnails = showThumbnails,
+        scrollDial = scrollDial,
+        onBack = onBack,
+        onToggleNotifications = { scope.launch { prefs.setNotificationsEnabled(!notificationsEnabled) } },
+        onToggleThumbnails = { scope.launch { prefs.setShowThumbnails(!showThumbnails) } },
+        onCycleScrollDial = { scope.launch { prefs.setScrollDial(scrollDial.next()) } },
+    )
+}
 
-        SettingsRow("NOTIFICATIONS", if (notificationsEnabled) "ON" else "OFF") {
-            scope.launch { prefs.setNotificationsEnabled(!notificationsEnabled) }
-        }
-        HorizontalDivider(color = divMinor)
-        SettingsRow("DM LAYOUT", dmLayout.label) { scope.launch { prefs.setDmLayout(dmLayout.next()) } }
-        HorizontalDivider(color = divMinor)
-        SettingsRow("GROUP LAYOUT", groupLayout.label) { scope.launch { prefs.setGroupLayout(groupLayout.next()) } }
-        HorizontalDivider(color = divMinor)
-        SettingsRow("THUMBNAILS", if (showThumbnails) "ON" else "OFF") { scope.launch { prefs.setShowThumbnails(!showThumbnails) } }
-        HorizontalDivider(color = divMinor)
-        SettingsRow("CHAT SCROLL", chatScrollSpeed.label) { scope.launch { prefs.setChatScrollSpeed(chatScrollSpeed.next()) } }
-        HorizontalDivider(color = divMinor)
-        SettingsRow("MENU SCROLL", menuScrollSpeed.label) { scope.launch { prefs.setMenuScrollSpeed(menuScrollSpeed.next()) } }
-        HorizontalDivider(color = divMinor)
+@Composable
+private fun ChatSettingsContent(
+    notificationsEnabled: Boolean,
+    showThumbnails: Boolean,
+    scrollDial: ScrollDial,
+    onBack: () -> Unit,
+    onToggleNotifications: () -> Unit,
+    onToggleThumbnails: () -> Unit,
+    onCycleScrollDial: () -> Unit,
+) {
+    MenuScreen("Chat", onBack) {
+        MenuRow("NOTIFICATIONS", if (notificationsEnabled) "ON" else "OFF", onClick = onToggleNotifications)
+        MenuRow("THUMBNAILS", if (showThumbnails) "ON" else "OFF", onClick = onToggleThumbnails)
+        MenuRow("SCROLL DIAL", scrollDial.label, onClick = onCycleScrollDial)
     }
 }
 
@@ -256,72 +209,29 @@ private fun ChatPage(onBack: () -> Unit) {
 private fun StoragePage(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val prefs = PhotonPreferences(context)
+    val prefs = remember { PhotonPreferences(context) }
     val ws = PhotonService._wsClient
 
     val maxMessages by prefs.maxMessages.collectAsState(initial = 50)
     val maxDays by prefs.maxDays.collectAsState(initial = 7)
 
     BackHandler { onBack() }
-    Column(Modifier.fillMaxSize().background(Color.Black)) {
-        PhotonHeader("STORAGE", onBack)
-        HorizontalDivider(color = divColor)
-
+    MenuScreen("Storage", onBack) {
         ValueCycleRow("MESSAGES PER CHAT", maxMessages.toString(), listOf(25, 50, 100, 200), maxMessages) { v ->
             scope.launch { prefs.setMaxMessages(v); syncRetention(ws, v, maxDays) }
         }
-        HorizontalDivider(color = divMinor)
         ValueCycleRow("MESSAGE HISTORY", "$maxDays DAYS", listOf(1, 3, 7, 14, 30), maxDays) { v ->
             scope.launch { prefs.setMaxDays(v); syncRetention(ws, maxMessages, v) }
         }
-        HorizontalDivider(color = divMinor)
     }
 }
 
 // ─── Shared Components ──────────────────────────────────────────
 
-/**
- * Single settings row: white 18sp label, optional right-aligned 14sp value,
- * optionally clickable. Covers nav rows, action rows, info rows, and
- * cycle-through-options rows — they were all the same layout.
- */
-@Composable
-private fun SettingsRow(
-    label: String,
-    value: String? = null,
-    valueColor: Color = dim,
-    onClick: (() -> Unit)? = null,
-) {
-    val rowModifier = Modifier.fillMaxWidth()
-        .let { if (onClick != null) it.clickable(onClick = onClick) else it }
-        .padding(horizontal = 20.dp, vertical = 22.dp)
-    if (value == null) {
-        Text(
-            text = label,
-            fontSize = 18.sp, letterSpacing = 2.sp, color = Color.White,
-            modifier = rowModifier,
-        )
-    } else {
-        Row(
-            rowModifier,
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(label, fontSize = 18.sp, letterSpacing = 2.sp, color = Color.White)
-            Text(value, fontSize = 14.sp, letterSpacing = 1.sp, color = valueColor)
-        }
-    }
-}
-
 @Composable
 private fun <T> ValueCycleRow(label: String, display: String, options: List<T>, current: T, onSelect: (T) -> Unit) {
     val next = (options.indexOf(current) + 1) % options.size
-    SettingsRow(label, display) { onSelect(options[next]) }
-}
-
-private fun stateColor(state: String) = when (state) {
-    "connected" -> Color.White
-    else -> Color(0xFF666666)
+    MenuRow(label, display) { onSelect(options[next]) }
 }
 
 private fun formatState(state: String) = when (state) {
@@ -341,3 +251,26 @@ private suspend fun syncRetention(ws: app.photon.service.WsClient?, maxMessages:
         })
     } catch (_: Exception) {}
 }
+
+// ─── Previews (LP3 size) ────────────────────────────────────────
+
+@Preview(name = "Settings", widthDp = 360, heightDp = 413, showBackground = true, backgroundColor = 0xFF000000)
+@Composable
+private fun SettingsHomePreview() = PhotonTheme {
+    SettingsHomeContent(version = "0.4.0", onBack = {}, onNav = {})
+}
+
+@Preview(name = "Settings – chat", widthDp = 360, heightDp = 413, showBackground = true, backgroundColor = 0xFF000000)
+@Composable
+private fun ChatSettingsPreview() = PhotonTheme {
+    ChatSettingsContent(
+        notificationsEnabled = true,
+        showThumbnails = false,
+        scrollDial = ScrollDial.MEDIUM,
+        onBack = {},
+        onToggleNotifications = {},
+        onToggleThumbnails = {},
+        onCycleScrollDial = {},
+    )
+}
+

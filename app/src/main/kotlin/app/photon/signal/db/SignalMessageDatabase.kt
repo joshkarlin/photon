@@ -180,7 +180,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
     fun updateConversationLastMessage(jid: String, messageId: String, timestamp: Long) {
         writableDatabase.execSQL(
             "UPDATE conversations SET last_message_id = ?, last_timestamp = ?, updated_at = ? WHERE jid = ?",
-            arrayOf(messageId, timestamp, System.currentTimeMillis(), jid),
+            arrayOf<Any>(messageId, timestamp, System.currentTimeMillis(), jid),
         )
         notifyChanged()
     }

@@ -5,7 +5,6 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -14,12 +13,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import app.photon.ui.theme.PhotonColors
+import com.thelightphone.sdk.ui.LightText
+import com.thelightphone.sdk.ui.LightTextVariant
+import com.thelightphone.sdk.ui.gridUnitsAsDp
 import kotlin.math.roundToInt
 
 /**
@@ -42,8 +42,8 @@ fun SwipeToReply(
     }
 
     val density = LocalDensity.current
-    val triggerPx = with(density) { 60.dp.toPx() }
-    val maxPx = with(density) { 96.dp.toPx() }
+    val triggerPx = with(density) { 4.5f.gridUnitsAsDp().toPx() }
+    val maxPx = with(density) { 7f.gridUnitsAsDp().toPx() }
 
     var dragging by remember { mutableStateOf(false) }
     var rawOffset by remember { mutableFloatStateOf(0f) }
@@ -84,10 +84,10 @@ fun SwipeToReply(
     ) {
         // Reveal icon, shown behind the row while dragging.
         if (offset > 4f) {
-            Text(
+            LightText(
                 text = "↳",
-                fontSize = 18.sp,
-                color = Color(if (rawOffset >= triggerPx) 0xFFFFFFFF.toInt() else 0xFF444444.toInt()),
+                variant = LightTextVariant.Paragraph,
+                color = if (rawOffset >= triggerPx) null else PhotonColors.Faint,
                 modifier = Modifier.align(Alignment.CenterStart),
             )
         }

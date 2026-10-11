@@ -15,28 +15,37 @@ import kotlinx.coroutines.runBlocking
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore("photon_prefs")
 
-enum class MessageLayout(val label: String) {
-    TERMINAL("TERMINAL"),
-    CLEAN("CLEAN"),
-    TRANSCRIPT("TRANSCRIPT");
+/**
+ * What the LP3 scroll dial does in Photon. LightOS uses the dial for screen
+ * brightness by default, so [OFF] hands it back to the system.
+ *
+ * @param listItems list rows moved per detent
+ * @param chatLines message-body line heights scrolled per detent
+ */
+enum class ScrollDial(val label: String, val listItems: Int, val chatLines: Float) {
+    OFF("OFF", 0, 0f),
+    SLOW("SLOW", 1, 0.5f),
+    MEDIUM("MEDIUM", 2, 1f),
+    FAST("FAST", 3, 1.5f);
 
-    fun next(): MessageLayout = entries[(ordinal + 1) % entries.size]
-}
+    /** Whether Photon consumes dial key events (otherwise the system gets them). */
+    val consumesDial: Boolean get() = this != OFF
 
-enum class ScrollSpeed(val label: String, val dp: Int) {
-    SLOW("SLOW", 12),
-    MEDIUM("MEDIUM", 20),
-    FAST("FAST", 32);
+    fun next(): ScrollDial = entries[(ordinal + 1) % entries.size]
 
-    fun next(): ScrollSpeed = entries[(ordinal + 1) % entries.size]
-}
+    companion object {
+        val DEFAULT = MEDIUM
 
-enum class ListScrollSpeed(val label: String, val items: Int) {
-    SLOW("1 ITEM", 1),
-    MEDIUM("2 ITEMS", 2),
-    FAST("3 ITEMS", 3);
+        /**
+         * Resolves the stored setting. Before the single setting existed,
+         * chats and menus had separate SLOW/MEDIUM/FAST speeds; the chat speed
+         * wins (the dial is mostly used in chats), then the menu speed.
+         */
+        fun resolve(stored: String?, legacyChatSpeed: String?, legacyMenuSpeed: String?): ScrollDial =
+            parse(stored) ?: parse(legacyChatSpeed) ?: parse(legacyMenuSpeed) ?: DEFAULT
 
-    fun next(): ListScrollSpeed = entries[(ordinal + 1) % entries.size]
+        private fun parse(name: String?): ScrollDial? = entries.firstOrNull { it.name == name }
+    }
 }
 
 class PhotonPreferences(private val context: Context) {
@@ -44,27 +53,18 @@ class PhotonPreferences(private val context: Context) {
     private val maxMessagesKey = intPreferencesKey("max_messages")
     private val maxDaysKey = intPreferencesKey("max_days")
     private val showThumbnailsKey = booleanPreferencesKey("show_thumbnails")
-    private val dmLayoutKey = stringPreferencesKey("dm_layout")
-    private val groupLayoutKey = stringPreferencesKey("group_layout")
     private val notificationsKey = booleanPreferencesKey("notifications_enabled")
-    private val chatScrollSpeedKey = stringPreferencesKey("chat_scroll_speed")
-    private val menuScrollSpeedKey = stringPreferencesKey("menu_scroll_speed")
+    private val scrollDialKey = stringPreferencesKey("scroll_dial")
+    // Superseded by scroll_dial; read for migration, removed on the next write.
+    private val legacyChatScrollSpeedKey = stringPreferencesKey("chat_scroll_speed")
+    private val legacyMenuScrollSpeedKey = stringPreferencesKey("menu_scroll_speed")
 
     val maxMessages: Flow<Int> = context.dataStore.data.map { it[maxMessagesKey] ?: 50 }
     val maxDays: Flow<Int> = context.dataStore.data.map { it[maxDaysKey] ?: 7 }
     val showThumbnails: Flow<Boolean> = context.dataStore.data.map { it[showThumbnailsKey] ?: true }
-    val dmLayout: Flow<MessageLayout> = context.dataStore.data.map {
-        try { MessageLayout.valueOf(it[dmLayoutKey] ?: "TERMINAL") } catch (_: Exception) { MessageLayout.TERMINAL }
-    }
-    val groupLayout: Flow<MessageLayout> = context.dataStore.data.map {
-        try { MessageLayout.valueOf(it[groupLayoutKey] ?: "TRANSCRIPT") } catch (_: Exception) { MessageLayout.TRANSCRIPT }
-    }
     val notificationsEnabled: Flow<Boolean> = context.dataStore.data.map { it[notificationsKey] ?: true }
-    val chatScrollSpeed: Flow<ScrollSpeed> = context.dataStore.data.map {
-        try { ScrollSpeed.valueOf(it[chatScrollSpeedKey] ?: "MEDIUM") } catch (_: Exception) { ScrollSpeed.MEDIUM }
-    }
-    val menuScrollSpeed: Flow<ListScrollSpeed> = context.dataStore.data.map {
-        try { ListScrollSpeed.valueOf(it[menuScrollSpeedKey] ?: "SLOW") } catch (_: Exception) { ListScrollSpeed.SLOW }
+    val scrollDial: Flow<ScrollDial> = context.dataStore.data.map {
+        ScrollDial.resolve(it[scrollDialKey], it[legacyChatScrollSpeedKey], it[legacyMenuScrollSpeedKey])
     }
 
     suspend fun setMaxMessages(value: Int) {
@@ -79,24 +79,16 @@ class PhotonPreferences(private val context: Context) {
         context.dataStore.edit { it[showThumbnailsKey] = value }
     }
 
-    suspend fun setDmLayout(value: MessageLayout) {
-        context.dataStore.edit { it[dmLayoutKey] = value.name }
-    }
-
-    suspend fun setGroupLayout(value: MessageLayout) {
-        context.dataStore.edit { it[groupLayoutKey] = value.name }
-    }
-
     suspend fun setNotificationsEnabled(value: Boolean) {
         context.dataStore.edit { it[notificationsKey] = value }
     }
 
-    suspend fun setChatScrollSpeed(value: ScrollSpeed) {
-        context.dataStore.edit { it[chatScrollSpeedKey] = value.name }
-    }
-
-    suspend fun setMenuScrollSpeed(value: ListScrollSpeed) {
-        context.dataStore.edit { it[menuScrollSpeedKey] = value.name }
+    suspend fun setScrollDial(value: ScrollDial) {
+        context.dataStore.edit {
+            it[scrollDialKey] = value.name
+            it.remove(legacyChatScrollSpeedKey)
+            it.remove(legacyMenuScrollSpeedKey)
+        }
     }
 
     fun getNotificationsEnabledSync(): Boolean {

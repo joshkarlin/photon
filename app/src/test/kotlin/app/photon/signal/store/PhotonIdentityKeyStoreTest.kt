@@ -34,7 +34,7 @@ import kotlin.test.assertTrue
 import kotlin.test.assertFailsWith
 
 @RunWith(RobolectricTestRunner::class)
-@Config(manifest = Config.NONE, sdk = [33])
+@Config(manifest = Config.NONE, sdk = [34])
 class PhotonIdentityKeyStoreTest {
     private lateinit var db: SignalProtocolDatabase
     private lateinit var identities: PhotonIdentityKeyStore

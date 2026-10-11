@@ -14,7 +14,7 @@ import kotlin.test.assertEquals
  * real bug violated, not just "the code does what it does".
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(manifest = Config.NONE, sdk = [33])
+@Config(manifest = Config.NONE, sdk = [34])
 class SignalMessageDatabaseTest {
 
     private lateinit var db: SignalMessageDatabase

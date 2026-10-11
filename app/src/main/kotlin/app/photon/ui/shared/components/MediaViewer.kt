@@ -7,17 +7,14 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
 import android.widget.VideoView
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -29,12 +26,19 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.thelightphone.sdk.ui.LightBarButton
+import com.thelightphone.sdk.ui.LightBottomBar
+import com.thelightphone.sdk.ui.LightIcon
+import com.thelightphone.sdk.ui.LightIcons
+import com.thelightphone.sdk.ui.LightText
+import com.thelightphone.sdk.ui.LightTextVariant
+import com.thelightphone.sdk.ui.LightThemeTokens
+import com.thelightphone.sdk.ui.LightTopBar
+import com.thelightphone.sdk.ui.gridUnitsAsDp
+import com.thelightphone.sdk.ui.lightClickable
 import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -72,76 +76,57 @@ fun MediaViewer(
         }
     }
 
-    Box(
+    BackHandler(onBack = onDismiss)
+    Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black)
-            .clickable(onClick = onDismiss),
-        contentAlignment = Alignment.Center,
+            .background(LightThemeTokens.colors.background)
+            .lightClickable(hapticsEnabled = false, onClick = onDismiss),
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.fillMaxSize(),
-        ) {
-            // Close bar — same `<` affordance and dimensions as every header,
-            // just without a title.
-            PhotonHeader(title = null, onBack = onDismiss)
+        LightTopBar(leftButton = backButton(onDismiss))
 
-            // Content
-            Box(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                contentAlignment = Alignment.Center,
-            ) {
-                when {
-                    loading -> CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp)
-                    error != null -> Text(error!!, color = Color(0xFFCC4444), fontSize = 14.sp)
-                    localPath != null -> {
-                        val file = File(localPath!!)
-                        when {
-                            file.exists() && mediaMime?.startsWith("image/") == true -> {
-                                AsyncImage(
-                                    model = file,
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Fit,
-                                    modifier = Modifier.fillMaxSize().padding(16.dp),
-                                )
-                            }
-                            file.exists() && mediaMime?.startsWith("video/") == true -> {
-                                VideoPlayer(file = file)
-                            }
-                            file.exists() && mediaMime?.startsWith("audio/") == true -> {
-                                AudioPlayer(file = file, onDismiss = onDismiss)
-                            }
-                            else -> {
-                                Text(
-                                    text = "Downloaded: ${file.name}",
-                                    color = Color.White,
-                                    fontSize = 14.sp,
-                                )
-                            }
+        // Content
+        Box(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            contentAlignment = Alignment.Center,
+        ) {
+            when {
+                loading -> LightText("Downloading…", variant = LightTextVariant.Paragraph, lighten = true)
+                error != null -> LightText(error!!, variant = LightTextVariant.Paragraph)
+                localPath != null -> {
+                    val file = File(localPath!!)
+                    when {
+                        file.exists() && mediaMime?.startsWith("image/") == true -> {
+                            AsyncImage(
+                                model = file,
+                                contentDescription = null,
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize().padding(1f.gridUnitsAsDp()),
+                            )
+                        }
+                        file.exists() && mediaMime?.startsWith("video/") == true -> {
+                            VideoPlayer(file = file)
+                        }
+                        file.exists() && mediaMime?.startsWith("audio/") == true -> {
+                            AudioPlayer(file = file)
+                        }
+                        else -> {
+                            LightText("Downloaded: ${file.name}", variant = LightTextVariant.Paragraph)
                         }
                     }
                 }
             }
+        }
 
-            // Save button
-            if (localPath != null) {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = "SAVE TO DEVICE",
-                    fontSize = 16.sp,
-                    letterSpacing = 2.sp,
-                    color = Color.White,
-                    modifier = Modifier
-                        .clickable {
-                            scope.launch {
-                                saveToDevice(context, localPath!!, mediaMime)
-                            }
-                        }
-                        .padding(vertical = 20.dp),
-                )
-                Spacer(Modifier.height(16.dp))
-            }
+        if (localPath != null) {
+            LightBottomBar(
+                items = listOf(
+                    LightBarButton.Text(
+                        text = "SAVE TO DEVICE",
+                        onClick = { scope.launch { saveToDevice(context, localPath!!, mediaMime) } },
+                    ),
+                ),
+            )
         }
     }
 }
@@ -158,12 +143,12 @@ private fun VideoPlayer(file: File) {
                 }
             }
         },
-        modifier = Modifier.fillMaxSize().padding(16.dp),
+        modifier = Modifier.fillMaxSize().padding(1f.gridUnitsAsDp()),
     )
 }
 
 @Composable
-private fun AudioPlayer(file: File, onDismiss: () -> Unit) {
+private fun AudioPlayer(file: File) {
     var playing by remember { mutableStateOf(false) }
     var elapsed by remember { mutableIntStateOf(0) }
     var duration by remember { mutableIntStateOf(0) }
@@ -202,30 +187,26 @@ private fun AudioPlayer(file: File, onDismiss: () -> Unit) {
         }
     }
 
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(1.5f.gridUnitsAsDp()),
+    ) {
+        LightText(
             text = "%d:%02d / %d:%02d".format(elapsed / 60, elapsed % 60, duration / 60, duration % 60),
-            fontSize = 18.sp,
-            letterSpacing = 2.sp,
-            color = Color.White,
+            variant = LightTextVariant.Copy,
         )
-        Spacer(Modifier.height(24.dp))
-        Text(
-            text = if (playing) "STOP" else "PLAY",
-            fontSize = 18.sp,
-            letterSpacing = 3.sp,
-            color = Color.White,
-            modifier = Modifier
-                .clickable {
-                    if (playing) {
-                        player.pause()
-                        playing = false
-                    } else {
-                        player.start()
-                        playing = true
-                    }
+        LightIcon(
+            icon = if (playing) LightIcons.PAUSE else LightIcons.PLAY,
+            contentDescription = if (playing) "Pause" else "Play",
+            modifier = Modifier.lightClickable {
+                if (playing) {
+                    player.pause()
+                    playing = false
+                } else {
+                    player.start()
+                    playing = true
                 }
-                .padding(16.dp),
+            },
         )
     }
 }
