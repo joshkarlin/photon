@@ -28,6 +28,14 @@ var ownJID = types.NewJID("440000000000", types.DefaultUserServer)
 func newClientBridge(t *testing.T) *Bridge {
 	t.Helper()
 	b := newTestBridge(t)
+	b.client = newTestClient(t)
+	return b
+}
+
+// newTestClient is an offline whatsmeow client paired as ownJID, with a
+// throwaway session store.
+func newTestClient(t *testing.T) *whatsmeow.Client {
+	t.Helper()
 	ctx := context.Background()
 	registerFKDriver()
 	container, err := sqlstore.New(ctx, "sqlite_fk", filepath.Join(t.TempDir(), "whatsmeow.db"), waLog.Noop)
@@ -48,8 +56,7 @@ func newClientBridge(t *testing.T) *Bridge {
 	if err := container.PutDevice(ctx, device); err != nil {
 		t.Fatalf("put device: %v", err)
 	}
-	b.client = whatsmeow.NewClient(device, waLog.Noop)
-	return b
+	return whatsmeow.NewClient(device, waLog.Noop)
 }
 
 // eventLog records every event the bridge broadcasts.

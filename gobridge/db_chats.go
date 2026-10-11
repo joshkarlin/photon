@@ -74,23 +74,27 @@ func (b *Bridge) MarkChatUnread(jid string) {
 	}
 }
 
-// UpdateMute stores a conversation's mute (see migrateMessageDB for
+// UpdateMute stores a conversation's mute (see migrateMutedUntil for
 // muted_until's encoding), inserting the row if it doesn't exist yet (mute
 // events can arrive before any message in a chat). is_muted stays as "a mute
 // is set"; whether it's still in force depends on the time it's read.
 func (b *Bridge) UpdateMute(jid string, mutedUntil int64) {
+	if err := updateMute(b.msgDB, jid, mutedUntil); err != nil {
+		b.log.Errorf("Failed to update mute for %s: %v", jid, err)
+	}
+}
+
+func updateMute(ex execer, jid string, mutedUntil int64) error {
 	m := 0
 	if mutedUntil != 0 {
 		m = 1
 	}
-	_, err := b.msgDB.Exec(`
+	_, err := ex.Exec(`
 		INSERT INTO conversations (jid, is_muted, muted_until, updated_at)
 		VALUES (?, ?, ?, 0)
 		ON CONFLICT(jid) DO UPDATE SET is_muted = excluded.is_muted, muted_until = excluded.muted_until
 	`, jid, m, mutedUntil)
-	if err != nil {
-		b.log.Errorf("Failed to update mute for %s: %v", jid, err)
-	}
+	return err
 }
 
 // MarkIncomingRead records that the user read a conversation on another

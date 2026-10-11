@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"time"
 
 	"go.mau.fi/whatsmeow/proto/waSyncAction"
@@ -64,14 +65,16 @@ func mutedUntil(act *waSyncAction.MuteAction) int64 {
 	return (endMs + 999) / 1000
 }
 
-// BackfillMutedUntil copies each chat's mute end time from whatsmeow's chat
-// settings, which recorded it all along. Repairs rows from builds that kept
-// only a flag (timed mutes never lapsed, "always" mutes read as unmuted)
-// without waiting for the next mute change. Runs at startup; idempotent.
-func (b *Bridge) BackfillMutedUntil(ctx context.Context) {
-	rows, err := b.msgDB.QueryContext(ctx, `SELECT jid, muted_until FROM conversations`)
+// backfillMutedUntil copies each chat's mute end time from whatsmeow's chat
+// settings, for migrateMutedUntil. Without a paired session there are none
+// to copy.
+func (b *Bridge) backfillMutedUntil(ctx context.Context, tx *sql.Tx) error {
+	if b.client == nil || b.client.Store.ID == nil {
+		return nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT jid, muted_until FROM conversations`)
 	if err != nil {
-		return
+		return err
 	}
 	stored := map[string]int64{}
 	for rows.Next() {
@@ -90,15 +93,16 @@ func (b *Bridge) BackfillMutedUntil(ctx context.Context) {
 			continue
 		}
 		want, ok := b.storedMutedUntil(ctx, parsed)
-		if ok && want != until {
-			b.UpdateMute(jid, want)
-			fixed++
+		if !ok || want == until {
+			continue
 		}
+		if err := updateMute(tx, jid, want); err != nil {
+			return err
+		}
+		fixed++
 	}
-	if fixed > 0 {
-		b.log.Infof("Backfilled mute end time for %d chats", fixed)
-		b.BroadcastEvent("conversation_updated", struct{}{})
-	}
+	b.log.Infof("Backfilled mute end time for %d chats", fixed)
+	return nil
 }
 
 // storedMutedUntil reads whatsmeow's mute for a chat. A DM's settings may sit

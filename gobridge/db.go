@@ -71,29 +71,60 @@ func (b *Bridge) InitMessageDB(ctx context.Context) error {
 	return nil
 }
 
-// migrateMessageDB upgrades existing installs in place. Each step is
-// idempotent; CREATE TABLE IF NOT EXISTS above never alters an existing table.
+// migrations upgrade an existing messages.db in place, in order. Each runs
+// once, in its own transaction, and PRAGMA user_version counts those done; a
+// fresh database runs them all against the empty tables InitMessageDB just
+// made. Append only: a released step never changes or moves.
+var migrations = []func(b *Bridge, ctx context.Context, tx *sql.Tx) error{
+	(*Bridge).migrateMutedUntil,
+}
+
+// migrateMessageDB runs the migrations this database hasn't had yet.
+// CREATE TABLE IF NOT EXISTS in InitMessageDB never alters an existing table.
 func (b *Bridge) migrateMessageDB(ctx context.Context) error {
-	// muted_until: 0 = not muted, -1 = muted forever, otherwise the unix
-	// second the mute ends. Rows muted before this column existed have no
-	// known end, so start them as "forever"; BackfillMutedUntil then copies
-	// the real end time from whatsmeow's own chat settings.
-	added, err := b.addColumnIfMissing(ctx, "conversations", "muted_until", "INTEGER NOT NULL DEFAULT 0")
-	if err != nil {
-		return err
+	var done int
+	if err := b.msgDB.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&done); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
 	}
-	if added {
-		if _, err := b.msgDB.ExecContext(ctx, `UPDATE conversations SET muted_until = -1 WHERE is_muted = 1`); err != nil {
-			return fmt.Errorf("migrate muted_until: %w", err)
+	for i := done; i < len(migrations); i++ {
+		err := b.inTx(func(tx *sql.Tx) error {
+			if err := migrations[i](b, ctx, tx); err != nil {
+				return err
+			}
+			_, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, i+1))
+			return err
+		})
+		if err != nil {
+			return fmt.Errorf("migration %d: %w", i+1, err)
 		}
-		b.log.Infof("Migrated conversations: added muted_until")
+		b.log.Infof("Applied message DB migration %d", i+1)
 	}
 	return nil
 }
 
+// migrateMutedUntil adds muted_until: 0 = not muted, -1 = muted forever,
+// otherwise the unix second the mute ends. Builds before it kept only the
+// is_muted flag, so a timed mute never lapsed and an "always" mute could read
+// as unmuted. Those rows start as "forever", then take their real end time
+// from whatsmeow's own chat settings, which recorded it all along. The copy
+// runs here, once: whatsmeow can keep a stale entry under a chat's other JID
+// form (LID vs phone) that would re-mute it on every start, and from here on
+// mute events keep the column current. A database that already has the
+// column (from a build that added it without a version) is left as it is.
+func (b *Bridge) migrateMutedUntil(ctx context.Context, tx *sql.Tx) error {
+	added, err := addColumnIfMissing(ctx, tx, "conversations", "muted_until", "INTEGER NOT NULL DEFAULT 0")
+	if err != nil || !added {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE conversations SET muted_until = -1 WHERE is_muted = 1`); err != nil {
+		return err
+	}
+	return b.backfillMutedUntil(ctx, tx)
+}
+
 // addColumnIfMissing adds a column unless the table already has it.
-func (b *Bridge) addColumnIfMissing(ctx context.Context, table, column, def string) (added bool, err error) {
-	rows, err := b.msgDB.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+func addColumnIfMissing(ctx context.Context, tx *sql.Tx, table, column, def string) (added bool, err error) {
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
 	if err != nil {
 		return false, fmt.Errorf("inspect %s: %w", table, err)
 	}
@@ -108,7 +139,7 @@ func (b *Bridge) addColumnIfMissing(ctx context.Context, table, column, def stri
 	if exists {
 		return false, nil
 	}
-	if _, err := b.msgDB.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+def); err != nil {
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+def); err != nil {
 		return false, fmt.Errorf("add %s.%s: %w", table, column, err)
 	}
 	return true, nil

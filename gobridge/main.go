@@ -167,9 +167,6 @@ func main() {
 		logger.Errorf("Failed to init message DB: %v", err)
 		os.Exit(1)
 	}
-	if client.Store.ID != nil {
-		bridge.BackfillMutedUntil(ctx)
-	}
 
 	// Register event handler
 	client.AddEventHandler(bridge.HandleEvent)
