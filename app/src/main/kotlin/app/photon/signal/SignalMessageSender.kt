@@ -683,7 +683,10 @@ class SignalMessageSender(
      * the network delete couldn't be sent, so the user can retry.
      */
     fun deleteMessage(conversationJid: String, messageId: String, forEveryone: Boolean): Boolean {
-        if (forEveryone) {
+        // Call rows exist only in Photon: there's nothing to delete remotely,
+        // and their ids don't carry a sent timestamp to target.
+        val isCallRow = messageDb.getMessage(messageId)?.contentType == SignalMessageDatabase.CONTENT_CALL
+        if (forEveryone && !isCallRow) {
             val targetTs = MessageKeys.parse(messageId)?.second
                 ?: messageDb.getMessage(messageId)?.let { it.timestamp * 1000 }
                 ?: run {
