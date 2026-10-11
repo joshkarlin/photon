@@ -12,7 +12,6 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 
@@ -45,8 +44,12 @@ class LocalContacts(
     /** Bumped each time the address book changes. */
     val version: StateFlow<Long> = _version
 
-    /** Emits once per address-book change, with no initial value. */
-    val changes: Flow<Unit> = version.drop(1).map { }
+    /**
+     * A refresh trigger: emits at once, then after each address-book change.
+     * Emitting at once (rather than skipping the current version) means a
+     * change made while a collector is still subscribing can't be missed.
+     */
+    val changes: Flow<Unit> = version.map { }
 
     // A burst of provider notifications (one edit touches several tables; a
     // sync touches hundreds of rows) becomes one invalidation.

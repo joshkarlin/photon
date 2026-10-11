@@ -24,7 +24,7 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 
 class SmsRepository(
@@ -83,8 +83,9 @@ class SmsRepository(
         awaitClose { resolver.unregisterContentObserver(observer) }
     }
 
-    // Names re-resolve when the LP3 address book changes, too.
-    val conversations: StateFlow<List<Conversation>?> = merge(smsChanges(), localContacts.changes)
+    // Names re-resolve when the LP3 address book changes, too. Combined, not
+    // merged, so subscribing scans the provider once rather than twice.
+    val conversations: StateFlow<List<Conversation>?> = combine(smsChanges(), localContacts.version) { _, _ -> }
         .map<Unit, List<Conversation>?> { loadConversations() }
         .flowOn(Dispatchers.IO)
         .distinctUntilChanged()
