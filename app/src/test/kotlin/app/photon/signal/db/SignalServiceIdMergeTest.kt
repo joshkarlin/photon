@@ -121,6 +121,27 @@ class SignalServiceIdMergeTest {
         assertEquals(listOf(aci), db.getConversations().filter { !it.isGroup }.map { it.jid })
     }
 
+    /** A sent transcript with no service id is keyed by the phone number until the ACI is known. */
+    @Test
+    fun aPhoneKeyedConversationMergesIntoTheAci() {
+        db.upsertConversation(jid = phone, name = phone, isGroup = false)
+        db.updateContactPhone(phone, phone)
+        db.insertMessage(
+            id = "${me}_${t}_o", conversationJid = phone, senderJid = me, timestamp = t / 1000,
+            contentType = "text", textBody = "sent from the primary", isFromMe = true, status = "sent",
+        )
+        db.updateConversationLastMessage(phone, "${me}_${t}_o", t / 1000)
+        db.updateContactPhone(aci, phone)
+
+        assertEquals(listOf(phone to aci), db.getResolvableNonAciIds())
+        assertTrue(db.mergeServiceId(phone, aci))
+
+        assertNull(db.getConversation(phone))
+        assertEquals("${me}_${t}_o", db.getConversation(aci)?.lastMessageId)
+        assertEquals(aci, db.getMessage("${me}_${t}_o")?.conversationJid)
+        assertEquals(emptyList(), db.getResolvableNonAciIds())
+    }
+
     @Test
     fun nothingStoredUnderTheIdIsANoOp() {
         db.upsertConversation(jid = aci, name = "Alice", isGroup = false)
