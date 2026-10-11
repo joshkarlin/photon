@@ -1,0 +1,40 @@
+package app.photon.signal
+
+/**
+ * Reconnect policy for the Signal receiver. The old loop retried every 5s
+ * forever — including after the server rejected the credentials — and
+ * re-ran profile, name, group and pre-key upkeep on every attempt.
+ */
+internal object SignalReconnect {
+    const val BASE_DELAY_MS = 5_000L
+    const val MAX_DELAY_MS = 5 * 60_000L
+
+    // A connection that stayed up this long was healthy: its drop starts a
+    // fresh backoff instead of continuing the previous one.
+    const val STABLE_CONNECTION_MS = 60_000L
+
+    // Consecutive 401/403 handshakes before treating the device as unlinked.
+    // One retry absorbs a transient server hiccup.
+    const val AUTH_FAILURES_BEFORE_LOGOUT = 2
+
+    // Post-connect upkeep (profile sweep, contact-name refresh, group
+    // metadata, pre-key top-up) runs at most this often across reconnects.
+    const val MAINTENANCE_INTERVAL_MS = 10 * 60_000L
+
+    /** Delay before the next attempt after [consecutiveFailures] (≥ 1) failed connections. */
+    fun delayMs(consecutiveFailures: Int): Long {
+        if (consecutiveFailures <= 1) return BASE_DELAY_MS
+        val doublings = (consecutiveFailures - 1).coerceAtMost(16)
+        return (BASE_DELAY_MS shl doublings).coerceAtMost(MAX_DELAY_MS)
+    }
+
+    /**
+     * Failure count after a connection ended. [connectedForMs] is how long it
+     * was up, or null if it never connected.
+     */
+    fun nextFailureCount(previous: Int, connectedForMs: Long?): Int =
+        if (connectedForMs != null && connectedForMs >= STABLE_CONNECTION_MS) 1 else previous + 1
+
+    fun maintenanceDue(lastRunMs: Long, nowMs: Long): Boolean =
+        lastRunMs <= 0 || nowMs - lastRunMs >= MAINTENANCE_INTERVAL_MS
+}

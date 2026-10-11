@@ -12,6 +12,7 @@ import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.store.PhotonProtocolStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -84,11 +85,20 @@ class SignalMessageReceiver(
     private val _state = MutableStateFlow("disconnected")
     val state: StateFlow<String> = _state
 
-    private var webSocket: SignalWebSocket.AuthenticatedWebSocket? = null
-    private var unauthWebSocket: SignalWebSocket.UnauthenticatedWebSocket? = null
-    private var running = false
-    private var profileFetcher: SignalProfileFetcher? = null
-    private var pushSocket: PushServiceSocket? = null
+    // Lifecycle. Every start() begins a new generation and a loop only runs
+    // while its generation is current, so "Refresh connection" (stop();
+    // start()) can never leave an old loop reconnecting next to the new one.
+    // Guarded by lifecycleLock; @Volatile for the lock-free isCurrent() reads.
+    private val lifecycleLock = Any()
+    @Volatile private var running = false
+    @Volatile private var generation = 0L
+    private var receiveJob: Job? = null
+    @Volatile private var lastMaintenanceAt = 0L
+
+    @Volatile private var webSocket: SignalWebSocket.AuthenticatedWebSocket? = null
+    @Volatile private var unauthWebSocket: SignalWebSocket.UnauthenticatedWebSocket? = null
+    @Volatile private var profileFetcher: SignalProfileFetcher? = null
+    @Volatile private var pushSocket: PushServiceSocket? = null
     @Volatile private var groupManager: SignalGroupV2Manager? = null
     @Volatile private var contactsSyncRequested = false
     @Volatile private var activeContactsPinged = false
@@ -100,8 +110,20 @@ class SignalMessageReceiver(
     private val envelopeRetries = EnvelopeRetryTracker<DecryptedEnvelope>()
 
     fun start() {
-        if (running) return
-        running = true
+        synchronized(lifecycleLock) {
+            if (running) return
+            running = true
+            val gen = ++generation
+            // A fresh start (including "Refresh connection") re-runs upkeep.
+            lastMaintenanceAt = 0L
+            val previous = receiveJob
+            receiveJob = scope.launch {
+                // stop() cancelled the previous loop and closed its socket, so
+                // it exits promptly; wait for it so two loops never overlap.
+                previous?.join()
+                receiveLoop(gen)
+            }
+        }
         scope.launch {
             try { messageDb.repairConversationTimestamps() }
             catch (e: Exception) { Log.w(TAG, "Timestamp repair failed: ${e.message}") }
@@ -128,7 +150,6 @@ class SignalMessageReceiver(
                 Log.w(TAG, "Local-contacts migration failed: ${e.message}")
             }
         }
-        scope.launch { receiveLoop() }
     }
 
     /**
@@ -152,73 +173,149 @@ class SignalMessageReceiver(
     }
 
     fun stop() {
-        running = false
-        val authWs = webSocket
-        val unauthWs = unauthWebSocket
-        app.photon.service.PhotonService._signalSender?.detachReceiverWebSockets(authWs, unauthWs)
-        try { authWs?.disconnect() } catch (_: Exception) {}
-        try { unauthWs?.disconnect() } catch (_: Exception) {}
-        webSocket = null
-        unauthWebSocket = null
-        profileFetcher = null
-        groupManager = null
+        val authWs: SignalWebSocket.AuthenticatedWebSocket?
+        val unauthWs: SignalWebSocket.UnauthenticatedWebSocket?
+        synchronized(lifecycleLock) {
+            running = false
+            generation++
+            receiveJob?.cancel()
+            authWs = webSocket
+            unauthWs = unauthWebSocket
+            webSocket = null
+            unauthWebSocket = null
+            profileFetcher = null
+            groupManager = null
+            _state.value = "disconnected"
+        }
         app.photon.service.PhotonService._signalGroupManager = null
+        closeSockets(authWs, unauthWs)
     }
 
-    private suspend fun receiveLoop() {
-        while (running) {
-            try {
-                _state.value = "connecting"
-                // Disconnect old socket before creating new one
-                try { webSocket?.disconnect() } catch (_: Exception) {}
-                webSocket = null
+    private fun isCurrent(gen: Long): Boolean = running && generation == gen
 
-                connectWebSocket()
-                _state.value = "connected"
-                Log.i(TAG, "WebSocket connected, reading messages... stateSnapshot=${webSocket?.stateSnapshot}")
-                readMessages()
-            } catch (e: Exception) {
-                Log.e(TAG, "Message receive error", e)
-                _state.value = "disconnected"
-            }
-            if (running) {
-                val state = webSocket?.stateSnapshot
-                Log.i(TAG, "Reconnecting in 5s... (last state: $state)")
-                if (state == org.whispersystems.signalservice.api.websocket.WebSocketConnectionState.AUTHENTICATION_FAILED) {
-                    Log.e(TAG, "Signal server rejected our credentials (HTTP 401/403). " +
-                        "This usually means the device was unlinked on the primary — " +
-                        "user needs to re-pair Photon from Settings → Connections → Signal → RESET.")
-                }
-                delay(5000)
-            }
+    /** Publish a connection state, unless this loop has been superseded. */
+    private fun setState(gen: Long, value: String) {
+        synchronized(lifecycleLock) {
+            if (isCurrent(gen)) _state.value = value
         }
     }
 
-    private fun connectWebSocket() {
+    private fun closeSockets(
+        authWs: SignalWebSocket.AuthenticatedWebSocket?,
+        unauthWs: SignalWebSocket.UnauthenticatedWebSocket?,
+    ) {
+        app.photon.service.PhotonService._signalSender?.detachReceiverWebSockets(authWs, unauthWs)
+        try { authWs?.disconnect() } catch (_: Exception) {}
+        try { unauthWs?.disconnect() } catch (_: Exception) {}
+    }
+
+    private suspend fun receiveLoop(gen: Long) {
+        var failures = 0
+        var authFailures = 0
+        while (isCurrent(gen)) {
+            var ws: SignalWebSocket.AuthenticatedWebSocket? = null
+            var connectedAt: Long? = null
+            try {
+                setState(gen, "connecting")
+                ws = connectWebSocket(gen)
+                setState(gen, "connected")
+                connectedAt = System.currentTimeMillis()
+                Log.i(TAG, "WebSocket connected, reading messages... stateSnapshot=${ws.stateSnapshot}")
+                readMessages(gen, ws)
+            } catch (e: Exception) {
+                if (isCurrent(gen)) Log.e(TAG, "Message receive error", e)
+            }
+            if (!isCurrent(gen)) return
+
+            val wsState = ws?.stateSnapshot
+            if (wsState == org.whispersystems.signalservice.api.websocket.WebSocketConnectionState.AUTHENTICATION_FAILED) {
+                authFailures++
+                if (authFailures >= SignalReconnect.AUTH_FAILURES_BEFORE_LOGOUT) {
+                    Log.e(TAG, "Signal server rejected our credentials (HTTP 401/403) $authFailures times. " +
+                        "This usually means the device was unlinked on the primary — stopping until " +
+                        "Photon is re-paired from Settings → Connections → Signal → RESET.")
+                    markLoggedOut(gen)
+                    return
+                }
+            } else {
+                authFailures = 0
+            }
+
+            failures = SignalReconnect.nextFailureCount(
+                failures, connectedAt?.let { System.currentTimeMillis() - it },
+            )
+            val wait = SignalReconnect.delayMs(failures)
+            setState(gen, "disconnected")
+            Log.i(TAG, "Reconnecting in ${wait / 1000}s (attempt $failures, last state: $wsState)")
+            delay(wait)
+        }
+    }
+
+    /**
+     * Credentials rejected: stop reconnecting and report "logged_out" (shown
+     * as NOT LINKED in settings). "Refresh connection" or a re-pair starts a
+     * new generation.
+     */
+    private fun markLoggedOut(gen: Long) {
+        val authWs: SignalWebSocket.AuthenticatedWebSocket?
+        val unauthWs: SignalWebSocket.UnauthenticatedWebSocket?
+        synchronized(lifecycleLock) {
+            if (generation != gen) return
+            running = false
+            authWs = webSocket
+            unauthWs = unauthWebSocket
+            webSocket = null
+            unauthWebSocket = null
+            _state.value = "logged_out"
+        }
+        closeSockets(authWs, unauthWs)
+    }
+
+    private fun connectWebSocket(gen: Long): SignalWebSocket.AuthenticatedWebSocket {
+        // Close the previous attempt's pair first — both sockets; the
+        // unauthenticated one used to leak on every reconnect.
+        val oldAuth: SignalWebSocket.AuthenticatedWebSocket?
+        val oldUnauth: SignalWebSocket.UnauthenticatedWebSocket?
+        synchronized(lifecycleLock) {
+            oldAuth = webSocket
+            oldUnauth = unauthWebSocket
+            webSocket = null
+            unauthWebSocket = null
+        }
+        closeSockets(oldAuth, oldUnauth)
+
         val factory = SignalConfig.webSocketFactory(config, "photon-recv", credentials) { status ->
             Log.w(TAG, "Message error: $status")
         }
 
+        // canConnect is per generation: a superseded socket must never
+        // silently reconnect itself.
         val ws = SignalWebSocket.AuthenticatedWebSocket(
             factory,
-            { running },
+            { isCurrent(gen) },
             SignalConfig.sleepTimer,
             30_000L,
         )
         ws.connect()
         ws.registerKeepAliveToken("PhotonReceiver")
-        webSocket = ws
 
         // Unauthenticated socket is used by profile fetches and key uploads.
         val unauthFactory = SignalConfig.webSocketFactory(config, "photon-recv-unauth", null)
         val unauthWs = SignalWebSocket.UnauthenticatedWebSocket(
-            unauthFactory, { running },
+            unauthFactory, { isCurrent(gen) },
             SignalConfig.sleepTimer,
             30_000L,
         )
         unauthWs.connect()
         unauthWs.registerKeepAliveToken("PhotonReceiverUnauth")
-        unauthWebSocket = unauthWs
+
+        val current = synchronized(lifecycleLock) {
+            isCurrent(gen).also { if (it) { webSocket = ws; unauthWebSocket = unauthWs } }
+        }
+        if (!current) {
+            closeSockets(ws, unauthWs)
+            throw IllegalStateException("Receiver stopped while connecting")
+        }
 
         // Sending sync messages through a second authenticated WebSocket can
         // cause Signal to close this receiver socket. Share the receiver pair
@@ -238,6 +335,51 @@ class SignalMessageReceiver(
         groupManager = gm
         app.photon.service.PhotonService._signalGroupManager = gm
 
+        // Linked devices don't have native access to the user's address book.
+        // Ask the primary for it once per process so any contact whose Signal
+        // profile is anonymous still shows up as the locally-saved name.
+        // Throttled to a single request per session — repeating on every WS
+        // reconnect would re-download the same blob every ~30s.
+        if (!contactsSyncRequested) {
+            contactsSyncRequested = true
+            scope.launch {
+                try {
+                    delay(1500)   // let the WS settle first
+                    app.photon.service.PhotonService._signalSender?.requestContactsSync()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Couldn't request contacts sync: ${e.message}")
+                }
+            }
+        }
+
+        // Send a NullMessage to each active Signal ACI we know about. Without
+        // this, those contacts' apps don't know our linked deviceId exists and
+        // won't include us in their encrypted recipient list, so their messages
+        // never reach Photon. DM conversations cover direct contacts; GroupV2
+        // participants cover group-only members. Once per contact (persisted
+        // in SharedPreferences), with a 7-day refresh so sessions don't go stale.
+        if (!activeContactsPinged) {
+            activeContactsPinged = true
+            scheduleActiveContactPing(8000) // let contacts sync ingest first
+        }
+
+        val now = System.currentTimeMillis()
+        if (SignalReconnect.maintenanceDue(lastMaintenanceAt, now)) {
+            lastMaintenanceAt = now
+            runConnectMaintenance(ws, unauthWs)
+        }
+        return ws
+    }
+
+    /**
+     * Upkeep after a (re)connect, throttled to once per
+     * [SignalReconnect.MAINTENANCE_INTERVAL_MS] so a flapping connection
+     * doesn't redo it on every attempt.
+     */
+    private fun runConnectMaintenance(
+        ws: SignalWebSocket.AuthenticatedWebSocket,
+        unauthWs: SignalWebSocket.UnauthenticatedWebSocket,
+    ) {
         // After (re)connecting, sweep for contacts that have a profile key
         // but no resolved name — earlier fetches may have failed silently
         // (e.g. because this very WS was never connected before today). Also
@@ -269,29 +411,12 @@ class SignalMessageReceiver(
             }
         }
 
-        // Linked devices don't have native access to the user's address book.
-        // Ask the primary for it once per process so any contact whose Signal
-        // profile is anonymous still shows up as the locally-saved name.
-        // Throttled to a single request per session — repeating on every WS
-        // reconnect would re-download the same blob every ~30s.
-        if (!contactsSyncRequested) {
-            contactsSyncRequested = true
-            scope.launch {
-                try {
-                    delay(1500)   // let the WS settle first
-                    app.photon.service.PhotonService._signalSender?.requestContactsSync()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Couldn't request contacts sync: ${e.message}")
-                }
-            }
-        }
-
-        // Refresh conversation names from this device's local contacts on
-        // every reconnect. Cheap: ~50 PhoneLookup queries (cached per
-        // session via the resolver) plus a DB write only when the resolved
-        // name differs from what's stored. This means adding a contact in
-        // the LP3 address book causes Photon to pick up the new name on
-        // the next WS reconnect (~30s) without needing a fresh message.
+        // Refresh conversation names from this device's local contacts.
+        // Cheap: ~50 PhoneLookup queries (cached per session via the
+        // resolver) plus a DB write only when the resolved name differs from
+        // what's stored. A contact added in the LP3 address book is picked up
+        // here; Photon's own contact editor refreshes immediately instead
+        // (refreshContactNames).
         scope.launch {
             try {
                 contactResolver.invalidate()
@@ -325,24 +450,15 @@ class SignalMessageReceiver(
             }
         }
 
-        // Send a NullMessage to each active Signal ACI we know about. Without
-        // this, those contacts' apps don't know our linked deviceId exists and
-        // won't include us in their encrypted recipient list, so their messages
-        // never reach Photon. DM conversations cover direct contacts; GroupV2
-        // participants cover group-only members. Once per contact (persisted
-        // in SharedPreferences), with a 7-day refresh so sessions don't go stale.
-        if (!activeContactsPinged) {
-            activeContactsPinged = true
-            scheduleActiveContactPing(8000) // let contacts sync ingest first
-        }
-
         // Upload one-time pre-keys if they haven't been uploaded yet
-        uploadPreKeysIfNeeded(ws)
+        uploadPreKeysIfNeeded(ws, unauthWs)
     }
 
-    private fun uploadPreKeysIfNeeded(ws: SignalWebSocket.AuthenticatedWebSocket) {
+    private fun uploadPreKeysIfNeeded(
+        ws: SignalWebSocket.AuthenticatedWebSocket,
+        unauthWs: SignalWebSocket.UnauthenticatedWebSocket,
+    ) {
         try {
-            val unauthWs = unauthWebSocket ?: return
             val keysApi = KeysApi(ws, unauthWs)
 
             val countResult = keysApi.getAvailablePreKeyCounts(ServiceIdType.ACI)
@@ -458,8 +574,7 @@ class SignalMessageReceiver(
         }
     }
 
-    private fun readMessages() {
-        val ws = webSocket ?: return
+    private fun readMessages(gen: Long, ws: SignalWebSocket.AuthenticatedWebSocket) {
         val aci = credentials.aci ?: return
         val localAddress = SignalServiceAddress(aci)
         val deviceId = credentials.deviceId
@@ -485,7 +600,7 @@ class SignalMessageReceiver(
         )
 
         Log.d(TAG, "Starting message read loop")
-        while (running) {
+        while (isCurrent(gen)) {
             try {
                 val hasMore = ws.readMessageBatch(MESSAGE_POLL_TIMEOUT_MS, 10) { envelopes ->
                     Log.i(TAG, "Received batch of ${envelopes.size} envelopes")
