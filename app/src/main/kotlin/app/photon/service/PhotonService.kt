@@ -32,6 +32,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class PhotonService : Service() {
@@ -96,8 +97,10 @@ class PhotonService : Service() {
                     }
                 }
                 // Ephemeral media sweep (the Go bridge prunes its own dirs;
-                // this covers the Kotlin-owned ones).
+                // this covers the Kotlin-owned ones), plus the Signal message
+                // window (WhatsApp's is enforced inside the bridge).
                 launch {
+                    val prefs = app.photon.data.PhotonPreferences(this@PhotonService)
                     while (true) {
                         delay(5 * 60_000)
                         try {
@@ -105,6 +108,11 @@ class PhotonService : Service() {
                             pruneStagedSendFiles()
                         } catch (e: Exception) {
                             Log.w("PhotonService", "Media prune failed: ${e.message}")
+                        }
+                        try {
+                            _signalReceiver?.pruneMessages(prefs.maxMessages.first(), prefs.maxDays.first())
+                        } catch (e: Exception) {
+                            Log.w("PhotonService", "Signal message prune failed: ${e.message}")
                         }
                     }
                 }

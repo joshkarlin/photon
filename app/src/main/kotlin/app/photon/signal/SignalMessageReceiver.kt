@@ -1485,6 +1485,18 @@ class SignalMessageReceiver(
     }
 
     /**
+     * Enforce the ephemeral message window (per-chat cap and max age from
+     * Settings → Chat). Called periodically by PhotonService alongside
+     * [pruneMedia]; see SignalMessageDatabase.pruneMessages for the policy.
+     */
+    fun pruneMessages(maxPerConversation: Int, maxAgeDays: Int) {
+        val pruned = messageDb.pruneMessages(maxPerConversation, maxAgeDays)
+        if (pruned > 0) {
+            Log.i(TAG, "Pruned $pruned Signal messages (cap=$maxPerConversation/chat, maxAge=${maxAgeDays}d)")
+        }
+    }
+
+    /**
      * Downloads, decrypts, and parses a sync.contacts attachment.
      * Each DeviceContact in the stream gets its name + phone stored as a
      * contact record, and any conversation with that ACI gets its display
