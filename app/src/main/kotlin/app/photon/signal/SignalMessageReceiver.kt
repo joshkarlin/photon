@@ -5,6 +5,8 @@ import android.util.Log
 import org.whispersystems.signalservice.internal.push.PushServiceSocket
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.receiver.AndroidSignalNotifier
+import app.photon.signal.receiver.ContactNames
+import app.photon.signal.receiver.GroupMetadata
 import app.photon.signal.receiver.PreKeyRefill
 import app.photon.signal.receiver.SessionPings
 import app.photon.signal.receiver.SignalNotifier
@@ -70,9 +72,6 @@ class SignalMessageReceiver(
         // policy (viewed, then auto-deleted; re-downloadable on tap while
         // the CDN pointer is still valid).
         private const val MEDIA_TTL_MS: Long = 5L * 60 * 1000
-        // Conversation name used until the GroupV2 state fetch resolves the
-        // real title. Also doubles as the "needs fetch" sentinel.
-        private const val PLACEHOLDER_GROUP_NAME = ConversationNaming.PLACEHOLDER_GROUP_NAME
         // SignalWebSocket exposes inbound frames through a blocking long-poll
         // API. Its Object.wait() releases the socket monitor, so outbound
         // MessageApi/KeysApi requests can proceed while this waits.
@@ -91,6 +90,8 @@ class SignalMessageReceiver(
     private val notifier: SignalNotifier = AndroidSignalNotifier(context)
     private val preKeyRefill = PreKeyRefill(protocolStore)
     private val sessionPings = SessionPings(context, credentials, messageDb, scope)
+    private val contactNames = ContactNames(messageDb, contactResolver) { profileFetcher }
+    private val groupMetadata = GroupMetadata(messageDb, contactResolver, scope, { groupManager }, sessionPings)
     private val sessionLock = SignalConfig.newSessionLock()
     private val senderKeySessionBuilder = SignalGroupSessionBuilder(
         sessionLock,
@@ -169,10 +170,7 @@ class SignalMessageReceiver(
     fun refreshContactNames() {
         scope.launch {
             try {
-                contactResolver.invalidate()
-                val n = messageDb.reresolveConversationNames { phone ->
-                    contactResolver.resolve(phone)
-                }
+                val n = contactNames.reresolveFromLocalContacts()
                 if (n > 0) Log.i(TAG, "Live refresh: re-resolved $n conversation names")
             } catch (e: Exception) {
                 Log.w(TAG, "Live name refresh failed: ${e.message}")
@@ -427,36 +425,7 @@ class SignalMessageReceiver(
         ws: SignalWebSocket.AuthenticatedWebSocket,
         unauthWs: SignalWebSocket.UnauthenticatedWebSocket,
     ): Boolean {
-        // After (re)connecting, sweep for contacts that have a profile key
-        // but no resolved name — earlier fetches may have failed silently
-        // (e.g. because this very WS was never connected before today). Also
-        // backfill conversation names using the Android contacts provider for
-        // anyone whose Signal profile fetch returns null name.
-        scope.launch {
-            try {
-                val contacts = messageDb.getContactsWithProfileKeyButNoName()
-                if (contacts.isNotEmpty()) {
-                    Log.i(TAG, "Profile sweep: refetching ${contacts.size} contacts")
-                    contacts.forEach { c ->
-                        profileFetcher?.fetchAsync(c.jid, c.profileKey!!) { name ->
-                            if (!name.isNullOrBlank()) {
-                                messageDb.upsertConversation(c.jid, name, false)
-                            } else {
-                                // Fall back to Android contacts by phone number.
-                                c.phone?.let { phone ->
-                                    contactResolver.resolve(phone)?.let { androidName ->
-                                        Log.i(TAG, "Backfilled ${c.jid} from Android contacts: $androidName")
-                                        messageDb.upsertConversation(c.jid, androidName, false)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Profile sweep failed: ${e.message}")
-            }
-        }
+        scope.launch { contactNames.sweepProfiles() }
 
         // Refresh conversation names from this device's local contacts.
         // Cheap: ~50 PhoneLookup queries (cached per session via the
@@ -466,36 +435,14 @@ class SignalMessageReceiver(
         // (refreshContactNames).
         scope.launch {
             try {
-                contactResolver.invalidate()
-                val n = messageDb.reresolveConversationNames { phone ->
-                    contactResolver.resolve(phone)
-                }
+                val n = contactNames.reresolveFromLocalContacts()
                 if (n > 0) Log.i(TAG, "Re-resolved $n conversation names from local contacts")
             } catch (e: Exception) {
                 Log.w(TAG, "Conversation name re-resolution failed: ${e.message}")
             }
         }
 
-        // Repair/refetch GroupV2 metadata after reconnect. Blank titles need
-        // the old name-wipe repair; empty participant tables need a refetch so
-        // group-only members can be session-primed below.
-        scope.launch {
-            try {
-                val groups = messageDb.getGroupsNeedingMetadataRefresh()
-                if (groups.isNotEmpty()) {
-                    Log.i(TAG, "Refreshing metadata for ${groups.size} Signal group(s)")
-                    groups.forEach { (jid, masterKey) ->
-                        val currentName = messageDb.getConversation(jid)?.name
-                        if (currentName.isNullOrBlank()) {
-                            messageDb.upsertConversation(jid = jid, name = PLACEHOLDER_GROUP_NAME, isGroup = true)
-                        }
-                        resolveGroupMetadata(jid, masterKey)
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Group metadata refresh failed: ${e.message}")
-            }
-        }
+        scope.launch { groupMetadata.refreshGroupsNeedingMetadata() }
 
         // Upload one-time pre-keys if they haven't been uploaded yet
         return preKeyRefill.uploadPreKeysIfNeeded(ws, unauthWs)
@@ -747,65 +694,9 @@ class SignalMessageReceiver(
         else -> null
     }
 
-    /**
-     * Conversation rows must key Signal contacts by ACI. Some envelopes can
-     * identify the sender/destination by PNI; when that happens, use the E164
-     * carried with the envelope/sync transcript to find the contact-sync ACI.
-     * If the mapping is not available yet, keep the raw id so the message is
-     * not lost, and persist the phone mapping so a later contacts sync has
-     * enough information to converge.
-     */
-    private fun normalizeServiceIdForConversation(
-        serviceId: ServiceId,
-        e164: String?,
-        context: String,
-    ): String {
-        val raw = serviceId.toString()
-        if (serviceId is ServiceId.ACI || ServiceId.ACI.parseOrNull(raw) != null) {
-            return raw
-        }
-
-        val aci = e164?.let { messageDb.getAciForPhone(it) }
-        if (aci != null) {
-            Log.i(TAG, "$context: normalized non-ACI ${raw.take(8)}… to ACI ${aci.take(8)}… via $e164")
-            return aci
-        }
-
-        if (e164 != null) {
-            messageDb.updateContactPhone(raw, e164)
-        }
-        Log.w(
-            TAG,
-            "$context: non-ACI service id ${raw.take(8)}… has no ACI mapping " +
-                "(phone=${e164 ?: "none"}); using raw id until contacts sync resolves it",
-        )
-        return raw
-    }
-
-    private fun normalizeServiceIdStringForConversation(
-        serviceId: String?,
-        e164: String?,
-        context: String,
-    ): String? {
-        val parsed = serviceId?.let { ServiceId.parseOrNull(it) }
-        if (parsed != null) return normalizeServiceIdForConversation(parsed, e164, context)
-
-        val aci = e164?.let { messageDb.getAciForPhone(it) }
-        if (aci != null) {
-            Log.i(TAG, "$context: resolved missing/invalid service id to ACI ${aci.take(8)}… via $e164")
-            return aci
-        }
-
-        if (!serviceId.isNullOrBlank()) {
-            Log.w(TAG, "$context: unparseable service id ${serviceId.take(8)}…")
-            return serviceId
-        }
-        return null
-    }
-
     private fun processDataMessage(data: DataMessage, metadata: EnvelopeMetadata) {
         val senderE164 = metadata.sourceE164
-        val senderAci = normalizeServiceIdForConversation(
+        val senderAci = contactNames.normalizeServiceIdForConversation(
             serviceId = metadata.sourceServiceId,
             e164 = senderE164,
             context = "Incoming data source",
@@ -824,7 +715,7 @@ class SignalMessageReceiver(
             messageDb.updateContactProfileKey(senderAci, profileKeyBytes)
         }
         // Kick off an async profile fetch whenever we haven't resolved a display name yet.
-        maybeFetchProfile(senderAci)
+        contactNames.maybeFetchProfile(senderAci)
 
         // Determine conversation JID. Two sources of "this is a group":
         // (a) libsignal extracted `metadata.groupId` during decryption (the
@@ -868,7 +759,7 @@ class SignalMessageReceiver(
         // member list. Bailing out without storing it leaves the group
         // permanently unnamed and unable to receive outgoing sends.
         if (isGroup && groupMasterKey != null) {
-            seedGroupConversation(conversationJid, groupMasterKey, groupRevision)
+            groupMetadata.seedGroupConversation(conversationJid, groupMasterKey, groupRevision)
         }
 
         // Handle reactions (and reaction removals)
@@ -891,7 +782,7 @@ class SignalMessageReceiver(
         // messages have no body, so this must run before the empty check.
         data.groupCallUpdate?.let { update ->
             if (isGroup) {
-                val name = displayNameFor(senderAci, senderE164)
+                val name = contactNames.displayNameFor(senderAci, senderE164)
                 recordGroupCall(conversationJid, senderAci, name, update.eraId, timestamp)
             }
             return
@@ -913,7 +804,7 @@ class SignalMessageReceiver(
             else -> "sticker"
         }
 
-        val senderName = displayNameFor(senderAci, senderE164)
+        val senderName = contactNames.displayNameFor(senderAci, senderE164)
 
         if (isGroup) {
             // Master key + conversation row already seeded above (before
@@ -970,7 +861,7 @@ class SignalMessageReceiver(
         // Show notification — for groups, title is the group name (with the
         // sender's name woven into the body); for DMs it's the sender.
         val notifTitle = if (isGroup) {
-            groupTitle(conversationJid)
+            groupMetadata.groupTitle(conversationJid)
         } else {
             senderName ?: senderAci.take(8)
         }
@@ -1003,7 +894,7 @@ class SignalMessageReceiver(
         }
         // Call signalling between the user's own devices isn't a call to them.
         if (metadata.sourceServiceId.toString() == credentials.aciString) return
-        val peerAci = normalizeServiceIdForConversation(
+        val peerAci = contactNames.normalizeServiceIdForConversation(
             serviceId = metadata.sourceServiceId,
             e164 = metadata.sourceE164,
             context = "Incoming call source",
@@ -1059,8 +950,8 @@ class SignalMessageReceiver(
         if (existing == null) {
             // First sight of this caller may be the call itself.
             peerE164?.let { messageDb.updateContactPhone(peerAci, it) }
-            messageDb.upsertConversation(jid = peerAci, name = displayNameFor(peerAci, peerE164), isGroup = false)
-            maybeFetchProfile(peerAci)
+            messageDb.upsertConversation(jid = peerAci, name = contactNames.displayNameFor(peerAci, peerE164), isGroup = false)
+            contactNames.maybeFetchProfile(peerAci)
         }
         updateCallRow(id, peerAci, existing?.textBody, signal, offerIsVideo, timestampMs / 1000)
     }
@@ -1103,7 +994,7 @@ class SignalMessageReceiver(
 
     private fun callerName(conversationJid: String): String =
         messageDb.getConversation(conversationJid)?.name?.takeIf { it.isNotBlank() }
-            ?: displayNameFor(conversationJid, null)
+            ?: contactNames.displayNameFor(conversationJid, null)
             ?: conversationJid.take(8)
 
     /**
@@ -1187,11 +1078,8 @@ class SignalMessageReceiver(
         )
         if (!inserted) return
         val body = if (!senderName.isNullOrBlank()) "$senderName started a group call" else SignalCalls.GROUP_CALL_TEXT
-        notifier.showMessage(groupTitle(groupJid), body, groupJid)
+        notifier.showMessage(groupMetadata.groupTitle(groupJid), body, groupJid)
     }
-
-    private fun groupTitle(groupJid: String): String =
-        ConversationNaming.groupTitle(messageDb.getConversation(groupJid)?.name, groupJid)
 
     private fun applyReaction(reaction: DataMessage.Reaction, reactorAci: String, timestamp: Long) {
         when (val update = incomingReactionFor(reaction, fallbackAuthor = reactorAci)) {
@@ -1270,7 +1158,7 @@ class SignalMessageReceiver(
             if (groupMasterKey != null) {
                 val convJid = try { SignalGroupV2Manager.jidFromMasterKey(groupMasterKey) } catch (_: Exception) { null }
                 if (convJid != null) {
-                    seedGroupConversation(convJid, groupMasterKey, groupV2.revision ?: 0)
+                    groupMetadata.seedGroupConversation(convJid, groupMasterKey, groupV2.revision ?: 0)
 
                     val body = data.body
                     val attachment = data.attachments.firstOrNull()
@@ -1309,9 +1197,9 @@ class SignalMessageReceiver(
                     catch (_: Exception) { null }
                 }
             val destinationAci = destinationServiceId?.let {
-                normalizeServiceIdForConversation(it, sent.destinationE164, "Sync sent destination")
+                contactNames.normalizeServiceIdForConversation(it, sent.destinationE164, "Sync sent destination")
             }
-                ?: normalizeServiceIdStringForConversation(
+                ?: contactNames.normalizeServiceIdStringForConversation(
                     destinationServiceIdRaw,
                     sent.destinationE164,
                     "Sync sent destination",
@@ -1350,7 +1238,7 @@ class SignalMessageReceiver(
                     name = convName,
                     isGroup = false,
                 )
-                if (destinationAci != myAci) maybeFetchProfile(destinationAci)
+                if (destinationAci != myAci) contactNames.maybeFetchProfile(destinationAci)
                 messageDb.insertMessage(
                     id = messageId,
                     conversationJid = destinationAci,
@@ -1626,94 +1514,6 @@ class SignalMessageReceiver(
         val author = serviceIdString(quote?.authorAci, quote?.authorAciBinary) ?: return null
         val id = quote?.id ?: return null
         return "${author}_$id"
-    }
-
-    /**
-     * Seed (or refresh) a GroupV2 conversation row from a message that
-     * carries the group's master key. Plants a placeholder name on first
-     * sight, persists masterKey + revision, and kicks off an async state
-     * fetch whenever the name is still unresolved or the revision moved.
-     * Shared by the incoming-data and sync-sent paths.
-     */
-    private fun seedGroupConversation(conversationJid: String, masterKey: ByteArray, revision: Int) {
-        val existingName = messageDb.getConversation(conversationJid)?.name
-        val placeholder = existingName?.takeIf { it.isNotBlank() && it != conversationJid }
-            ?: PLACEHOLDER_GROUP_NAME
-        messageDb.upsertConversation(jid = conversationJid, name = placeholder, isGroup = true)
-        val storedRevision = messageDb.getGroupMeta(conversationJid)?.revision ?: -1
-        messageDb.updateGroupMeta(conversationJid, masterKey, revision)
-        val needsFetch = existingName.isNullOrBlank() ||
-            existingName == PLACEHOLDER_GROUP_NAME ||
-            existingName == conversationJid ||
-            storedRevision < revision
-        if (needsFetch) {
-            Log.i(TAG, "Group ${conversationJid.take(12)}…: seeding masterKey + fetching state (rev=$revision)")
-            scope.launch { resolveGroupMetadata(conversationJid, masterKey) }
-        }
-    }
-
-    /**
-     * Async-fetch the GroupV2 state from the server (title + members),
-     * decrypt it via libsignal's GroupsV2Operations, and write back: the
-     * conversation row's `name` becomes the decrypted title, and every
-     * member ACI lands in the participants table so per-message sender
-     * names show up in the chat. Failures are non-fatal — the placeholder
-     * "Signal group" stays until the next message triggers another try.
-     */
-    private fun resolveGroupMetadata(conversationJid: String, masterKey: ByteArray) {
-        val gm = groupManager ?: run {
-            Log.w(TAG, "Group fetch skipped: manager not ready for ${conversationJid.take(12)}…")
-            return
-        }
-        val group = gm.fetchGroup(masterKey) ?: run {
-            Log.w(TAG, "Group fetch returned null for ${conversationJid.take(12)}… — see GroupV2Manager warnings")
-            return
-        }
-        val title = group.title?.takeIf { it.isNotBlank() } ?: PLACEHOLDER_GROUP_NAME
-        messageDb.upsertConversation(jid = conversationJid, name = title, isGroup = true)
-
-        val acis = gm.memberAcis(group)
-        for (memberAci in acis) {
-            val aciString = memberAci.toString()
-            val name = messageDb.memberDisplayName(aciString) { contactResolver.resolve(it) }
-            messageDb.upsertParticipant(conversationJid, aciString, name, "member")
-        }
-        Log.i(TAG, "Resolved group ${conversationJid.take(12)}…: $title (${acis.size} members)")
-        sessionPings.scheduleActiveContactPing()
-    }
-
-    /**
-     * Friendly name for a Signal contact. Order: Android local contacts (this
-     * device's address book) → Signal profile name (when it actually returns
-     * one) → bare E.164. The envelope's E.164 is usually absent under sealed
-     * sender, so fall back to the phone learned from contacts sync. Names from
-     * the primary device's address book are deliberately never used.
-     */
-    private fun displayNameFor(aci: String, e164: String?): String? {
-        val contact = messageDb.getContact(aci)
-        return ConversationNaming.resolveFromContact(
-            phone = e164 ?: contact?.phone,
-            profileName = contact?.profileName,
-        ) { contactResolver.resolve(it) }
-    }
-
-    private fun maybeFetchProfile(aci: String) {
-        val fetcher = profileFetcher ?: return
-        val contact = messageDb.getContact(aci) ?: return
-        if (contact.profileKey == null) return
-        // Re-fetch only if we don't yet have a profile name or it's older than a day.
-        val stale = System.currentTimeMillis() - contact.profileFetchedAt > 24 * 60 * 60 * 1000
-        if (contact.profileName.isNullOrBlank() || stale) {
-            fetcher.fetchAsync(aci, contact.profileKey) { resolvedName ->
-                if (!resolvedName.isNullOrBlank()) {
-                    messageDb.upsertConversation(
-                        jid = aci,
-                        name = resolvedName,
-                        isGroup = false,
-                    )
-                }
-            }
-        }
     }
 
     private fun processReceipt(
