@@ -92,7 +92,7 @@ fun ChatScreenContent(
     participantNames: Map<String, String> = emptyMap(),
     onSendText: (text: String, replyToId: String?) -> Unit,
     onSendAudio: ((path: String, replyToId: String?) -> Unit)? = null,
-    onSendMedia: ((path: String, mime: String, replyToId: String?) -> Unit)? = null,
+    onSendMedia: ((path: String, mime: String, fileName: String?, replyToId: String?) -> Unit)? = null,
     onBack: () -> Unit,
     onMediaTap: ((Message) -> Unit)? = null,
     onMessagesLoaded: ((List<Message>) -> Unit)? = null,
@@ -145,7 +145,7 @@ internal fun ChatThread(
     participantNames: Map<String, String>,
     onSendText: (text: String, replyToId: String?) -> Unit,
     onSendAudio: ((path: String, replyToId: String?) -> Unit)?,
-    onSendMedia: ((path: String, mime: String, replyToId: String?) -> Unit)?,
+    onSendMedia: ((path: String, mime: String, fileName: String?, replyToId: String?) -> Unit)?,
     onBack: () -> Unit,
     onMediaTap: ((Message) -> Unit)?,
     onMessagesLoaded: ((List<Message>) -> Unit)?,
@@ -201,8 +201,8 @@ internal fun ChatThread(
             }
         },
         onSendMedia = onSendMedia?.let { handler ->
-            { path, mime ->
-                handler(path, mime, replyingTo?.id)
+            { path, mime, fileName ->
+                handler(path, mime, fileName, replyingTo?.id)
                 replyingTo = null
             }
         },

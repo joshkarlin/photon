@@ -20,6 +20,7 @@ import app.photon.data.ScrollDial
 import app.photon.service.BridgeClient
 import app.photon.service.GoBridge
 import app.photon.service.Sessions
+import app.photon.ui.shared.components.ConfirmPage
 import app.photon.ui.shared.components.MenuRow
 import app.photon.ui.shared.components.MenuScreen
 import app.photon.ui.theme.PhotonTheme
@@ -96,6 +97,7 @@ private fun ConnectionsPage(onBack: () -> Unit, onNav: (Page) -> Unit) {
 
 // ─── WhatsApp Detail ────────────────────────────────────────────
 
+/** @param onReset opens pairing, after a reset or to link an unpaired phone */
 @Composable
 private fun WhatsAppPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
@@ -103,71 +105,151 @@ private fun WhatsAppPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
     val bridge = session?.bridge
     val waState by (bridge?.whatsappState ?: MutableStateFlow("disconnected")).collectAsState()
 
+    WhatsAppSettingsContent(
+        state = waState,
+        onBack = onBack,
+        onLink = onReset,
+        onRefresh = {
+            scope.launch {
+                try {
+                    bridge?.reconnectWhatsApp()
+                } catch (_: Exception) {}
+            }
+        },
+        onReset = {
+            scope.launch {
+                session?.reset()
+                onReset()
+            }
+        },
+    )
+}
+
+/**
+ * WhatsApp's connection: its state, and Refresh Connection and Reset while
+ * it's paired, or Link Device. Reset wipes Photon's WhatsApp, so it asks
+ * first ([ConfirmPage]); [onReset] runs only once that's confirmed.
+ */
+@Composable
+internal fun WhatsAppSettingsContent(
+    state: String,
+    onBack: () -> Unit,
+    onLink: () -> Unit,
+    onRefresh: () -> Unit,
+    onReset: () -> Unit,
+) {
+    var confirmingReset by remember { mutableStateOf(false) }
+    if (confirmingReset) {
+        ConfirmResetPage(platform = "WhatsApp", text = RESET_WHATSAPP_WARNING, onReset = onReset) { confirmingReset = false }
+        return
+    }
+
     BackHandler { onBack() }
     MenuScreen("WhatsApp", onBack) {
-        MenuRow("Status", formatState(waState), emphasizeValue = waState == "connected")
+        MenuRow("Status", formatState(state), emphasizeValue = state == "connected")
 
-        if (waState == "logged_out") {
+        if (state == "logged_out") {
             // Not paired: the only useful action is to start the pairing flow.
-            MenuRow("Link Device", onClick = onReset)
+            MenuRow("Link Device", onClick = onLink)
         } else {
-            MenuRow("Refresh Connection", onClick = {
-                scope.launch {
-                    try {
-                        bridge?.reconnectWhatsApp()
-                    } catch (_: Exception) {}
-                }
-            })
-            MenuRow("Reset", onClick = {
-                scope.launch {
-                    session?.reset()
-                    onReset()
-                }
-            })
+            MenuRow("Refresh Connection", onClick = onRefresh)
+            MenuRow("Reset") { confirmingReset = true }
         }
     }
 }
 
 // ─── Signal Detail ──────────────────────────────────────────────
 
+/** @param onReset opens pairing, after a reset or to link an unlinked phone */
 @Composable
 private fun SignalPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
     val session = Sessions.signal
     val sigState by (session?.receiver?.state ?: MutableStateFlow("disconnected")).collectAsState()
-    val sigRegistered = session?.credentials?.isRegistered() == true
-    val phone = session?.credentials?.phoneNumber
-    val deviceId = session?.credentials?.storedDeviceId
+
+    SignalSettingsContent(
+        registered = session?.credentials?.isRegistered() == true,
+        state = sigState,
+        phone = session?.credentials?.phoneNumber,
+        deviceId = session?.credentials?.storedDeviceId,
+        onBack = onBack,
+        onLink = onReset,
+        onRefresh = { scope.launch { session?.refresh() } },
+        onReset = {
+            scope.launch {
+                // Unlinking waits on the network; navigating must happen on the main thread.
+                withContext(Dispatchers.IO) { session?.reset() }
+                onReset()
+            }
+        },
+    )
+}
+
+/**
+ * Signal's link: its state, phone and device, and Refresh Connection and
+ * Reset while it's linked, or Link Device. Reset unlinks and wipes Photon's
+ * Signal, so it asks first ([ConfirmPage]); [onReset] runs only once that's
+ * confirmed.
+ */
+@Composable
+internal fun SignalSettingsContent(
+    registered: Boolean,
+    state: String,
+    phone: String?,
+    deviceId: Int?,
+    onBack: () -> Unit,
+    onLink: () -> Unit,
+    onRefresh: () -> Unit,
+    onReset: () -> Unit,
+) {
+    var confirmingReset by remember { mutableStateOf(false) }
+    if (confirmingReset) {
+        ConfirmResetPage(platform = "Signal", text = RESET_SIGNAL_WARNING, onReset = onReset) { confirmingReset = false }
+        return
+    }
 
     BackHandler { onBack() }
     MenuScreen("Signal", onBack) {
         MenuRow(
             "Status",
-            if (sigRegistered) formatState(sigState) else NOT_LINKED,
-            emphasizeValue = sigRegistered && sigState == "connected",
+            if (registered) formatState(state) else NOT_LINKED,
+            emphasizeValue = registered && state == "connected",
         )
         if (phone != null) MenuRow("Phone", phone)
-        if (deviceId != null && sigRegistered) MenuRow("Device", deviceId.toString())
+        if (deviceId != null && registered) MenuRow("Device", deviceId.toString())
 
-        if (sigRegistered) {
-            MenuRow("Refresh Connection") {
-                scope.launch {
-                    session?.refresh()
-                }
-            }
-            MenuRow("Reset") {
-                scope.launch {
-                    // Unlinking waits on the network; navigating must happen on the main thread.
-                    withContext(Dispatchers.IO) { session?.reset() }
-                    onReset()
-                }
-            }
+        if (registered) {
+            MenuRow("Refresh Connection", onClick = onRefresh)
+            MenuRow("Reset") { confirmingReset = true }
         } else {
             // Not linked: offer the pairing flow directly from settings.
-            MenuRow("Link Device", onClick = onReset)
+            MenuRow("Link Device", onClick = onLink)
         }
     }
 }
+
+/** "Reset WhatsApp": what a reset does, with RESET in the bottom bar. Back returns to the platform's page. */
+@Composable
+private fun ConfirmResetPage(platform: String, text: String, onReset: () -> Unit, onCancel: () -> Unit) {
+    ConfirmPage(
+        title = "Reset $platform",
+        text = text,
+        action = "RESET",
+        onConfirm = {
+            onCancel()
+            onReset()
+        },
+        onBack = onCancel,
+    )
+}
+
+// The WhatsApp reset deletes Photon's session without logging out, so the
+// phone may list Photon under Linked devices until it's removed there.
+internal const val RESET_WHATSAPP_WARNING =
+    "Deletes Photon's link to WhatsApp and its WhatsApp messages. WhatsApp on your phone keeps everything."
+
+internal const val RESET_SIGNAL_WARNING =
+    "Unlinks Photon from Signal and deletes its Signal messages. Signal on your phone keeps everything."
 
 // ─── Chat Settings ──────────────────────────────────────────────
 

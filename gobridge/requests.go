@@ -115,7 +115,7 @@ func (b *Bridge) handleSendMedia(ctx context.Context, raw json.RawMessage) (json
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, err
 	}
-	id, ts, err := b.UploadAndSend(p.JID, p.FilePath, p.MimeType, p.Caption, p.ReplyToID)
+	id, ts, err := b.UploadAndSend(p)
 	if err != nil {
 		return nil, err
 	}

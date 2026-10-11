@@ -24,6 +24,9 @@ type SendMediaPayload struct {
 	MimeType  string `json:"mime_type"`
 	Caption   string `json:"caption,omitempty"`
 	ReplyToID string `json:"reply_to_id,omitempty"`
+	// FileName is the name the user's file had (FilePath is a staged copy).
+	// A document is sent under it; other media ignore it.
+	FileName string `json:"file_name,omitempty"`
 }
 
 type SendReactionPayload struct {

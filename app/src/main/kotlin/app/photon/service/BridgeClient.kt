@@ -266,13 +266,25 @@ class BridgeClient(private val bridge: GoBridge) {
         })
     }
 
-    suspend fun sendMedia(jid: String, filePath: String, mimeType: String, caption: String?, replyToId: String?): BridgeEvent {
+    /**
+     * Send the staged file [filePath]. [fileName] is the name the user's
+     * file had: a document goes out under it, other media ignore it.
+     */
+    suspend fun sendMedia(
+        jid: String,
+        filePath: String,
+        mimeType: String,
+        caption: String?,
+        replyToId: String?,
+        fileName: String? = null,
+    ): BridgeEvent {
         return request("send_media", buildJsonObject {
             put("jid", jid)
             put("file_path", filePath)
             put("mime_type", mimeType)
             if (caption != null) put("caption", caption)
             if (replyToId != null) put("reply_to_id", replyToId)
+            if (fileName != null) put("file_name", fileName)
         })
     }
 

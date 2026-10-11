@@ -290,7 +290,7 @@ internal class LibraryTransport(
      * to embed in a DataMessage. The pointer (not the stream) is reused in
      * the sync transcript, so linked devices download the same upload.
      */
-    override fun upload(file: File, mimeType: String, voiceNote: Boolean): SignalServiceAttachmentPointer {
+    override fun upload(file: File, mimeType: String, voiceNote: Boolean, fileName: String): SignalServiceAttachmentPointer {
         val sender = sender()
         val pushSocket = PushServiceSocket(config(), credentials, SignalConfig.USER_AGENT, false)
         val uploadLength = signalAttachmentUploadLength(file.length())
@@ -303,7 +303,7 @@ internal class LibraryTransport(
             .withStream(FileInputStream(file))
             .withContentType(mimeType)
             .withLength(file.length())
-            .withFileName(file.name)
+            .withFileName(fileName)
             .withVoiceNote(voiceNote)
             .withUploadTimestamp(System.currentTimeMillis())
             .withResumableUploadSpec(uploadSpec)

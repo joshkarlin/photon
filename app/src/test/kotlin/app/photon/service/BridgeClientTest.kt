@@ -83,6 +83,29 @@ class BridgeClientTest {
         assertEquals("[]", withTimeout(5_000) { response.await() }.payload["results"].toString())
     }
 
+    /** The staged copy's path, and the name the user's file had for a document to go out under. */
+    @Test
+    fun sendMediaCarriesTheFilesOwnName() = runBlocking {
+        suspend fun sent(fileName: String?): String {
+            val response = async { client.sendMedia("a@s.whatsapp.net", "/files/send_media_1.pdf", "application/pdf", null, null, fileName) }
+            val request = Json.parseToJsonElement(withContext(Dispatchers.IO) { bridgeIn.readLine() }).jsonObject
+            assertEquals("send_media", request["type"]!!.jsonPrimitive.content)
+            val id = request["id"]!!.jsonPrimitive.content
+            bridgePrints("""{"id":"$id","type":"send_media_response","payload":{"message_id":"m1","timestamp":1}}""")
+            withTimeout(5_000) { response.await() }
+            return request["payload"].toString()
+        }
+
+        assertEquals(
+            """{"jid":"a@s.whatsapp.net","file_path":"/files/send_media_1.pdf","mime_type":"application/pdf","file_name":"Q1 report.pdf"}""",
+            sent("Q1 report.pdf"),
+        )
+        assertEquals(
+            """{"jid":"a@s.whatsapp.net","file_path":"/files/send_media_1.pdf","mime_type":"application/pdf"}""",
+            sent(null),
+        )
+    }
+
     @Test
     fun losslessSubscribersGetEveryEventOfTheirTypes() = runBlocking {
         val channel = client.subscribeLossless(setOf("new_message"))

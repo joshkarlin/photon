@@ -176,7 +176,7 @@ func TestUploadAndSend_refusesUnstagedPathWithoutARow(t *testing.T) {
 	secret := filepath.Join(b.dataDir, "whatsmeow.db")
 	os.WriteFile(secret, []byte("keys"), 0600)
 
-	if _, _, err := b.UploadAndSend("447700900001@s.whatsapp.net", secret, "application/octet-stream", "", ""); err == nil {
+	if _, _, err := b.UploadAndSend(SendMediaPayload{JID: "447700900001@s.whatsapp.net", FilePath: secret, MimeType: "application/octet-stream"}); err == nil {
 		t.Fatal("UploadAndSend sent an arbitrary file")
 	}
 	if n := rowCount(t, b, `SELECT COUNT(*) FROM messages`); n != 0 {

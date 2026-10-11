@@ -39,7 +39,12 @@ interface ChatBackend {
 
     suspend fun sendText(jid: String, text: String, replyToId: String?)
 
-    suspend fun sendMedia(jid: String, path: String, mime: String, replyToId: String?)
+    /**
+     * Send the staged file [path]. [fileName] is the name the user's file
+     * had (the staged copy's is Photon's own): a document is sent and shown
+     * under it.
+     */
+    suspend fun sendMedia(jid: String, path: String, mime: String, replyToId: String?, fileName: String? = null)
 
     /** A voice note recorded in Photon. */
     suspend fun sendAudio(jid: String, path: String, replyToId: String?) =

@@ -138,8 +138,15 @@ class SignalRepository(
             synced
         }
 
-    suspend fun sendMedia(jid: String, filePath: String, mimeType: String, caption: String?, replyToId: String?): Boolean =
+    suspend fun sendMedia(
+        jid: String,
+        filePath: String,
+        mimeType: String,
+        caption: String?,
+        replyToId: String?,
+        fileName: String? = null,
+    ): Boolean =
         withContext(Dispatchers.IO) {
-            sender?.sendMediaMessage(jid, filePath, mimeType, caption, replyToId) ?: false
+            sender?.sendMediaMessage(jid, filePath, mimeType, caption, replyToId, fileName) ?: false
         }
 }

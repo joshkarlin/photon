@@ -156,6 +156,10 @@ class SignalMessageSender internal constructor(
      * to Signal's CDN; the pointer then rides a normal DataMessage. Audio
      * sends are flagged as voice notes — that's the only audio Photon records.
      * Returns whether it went out (otherwise its row is "failed").
+     *
+     * A document is uploaded under [fileName], the name the user's file had,
+     * and carries no caption. Its row keeps that name as its body, as a
+     * WhatsApp document's does, so the thread shows it and a retry reuses it.
      */
     fun sendMediaMessage(
         conversationJid: String,
@@ -163,15 +167,18 @@ class SignalMessageSender internal constructor(
         mimeType: String,
         caption: String?,
         replyToId: String? = null,
+        fileName: String? = null,
     ): Boolean {
         val timestamp = System.currentTimeMillis()
         val replyPrefix = replyPrefixFor(replyToId)
         val contentType = contentTypeForMime(mimeType)
+        val isDocument = contentType == "document"
+        val text = caption.takeUnless { isDocument }
         val file = File(filePath)
         val recipient = recipientFor(conversationJid)?.takeIf { file.exists() }
         val messageId = storeOutgoing(
             conversationJid, timestamp, if (recipient != null) "sending" else "failed", contentType,
-            caption?.takeIf { it.isNotBlank() }, replyPrefix,
+            (if (isDocument) fileName else text)?.takeIf { it.isNotBlank() }, replyPrefix,
             mediaPath = filePath, mediaMime = mimeType, mediaSize = file.length().takeIf { it > 0 },
         )
         if (recipient == null) {
@@ -179,8 +186,11 @@ class SignalMessageSender internal constructor(
             return false
         }
         return deliverRow(messageId, recipient, timestamp) {
-            val pointer = transport.upload(file, mimeType, voiceNote = contentType == "audio")
-            OutgoingContent.Message(caption, replyPrefix, listOf(pointer))
+            val pointer = transport.upload(
+                file, mimeType, voiceNote = contentType == "audio",
+                fileName = attachmentFileName(contentType, fileName, file),
+            )
+            OutgoingContent.Message(text, replyPrefix, listOf(pointer))
         }
     }
 
@@ -216,7 +226,8 @@ class SignalMessageSender internal constructor(
      * row's conversation_jid + content + reply_to_id and flips the status
      * back to "sending" while a fresh send is attempted. The local row keeps
      * its original ID so the chat list doesn't grow new bubbles per retry.
-     * Media rows re-upload from the original local file.
+     * Media rows re-upload from the original local file; a document's body
+     * is its file name, which it's uploaded under again.
      */
     fun retryMessage(messageId: String): Boolean {
         val row = messageDb.getMessage(messageId)
@@ -247,11 +258,15 @@ class SignalMessageSender internal constructor(
         // recipient-side dedupe and produce a duplicate. The exact ms value
         // lives in the id; the timestamp column only has seconds.
         val timestamp = MessageKeys.sentTimestampMs(messageId, row.timestamp)
+        val isDocument = row.contentType == "document"
         return deliverRow(messageId, recipient, timestamp) {
             val attachments = if (isText) emptyList() else listOf(
-                transport.upload(mediaFile!!, row.mediaMime ?: defaultMimeFor(row.contentType), voiceNote = row.contentType == "audio"),
+                transport.upload(
+                    mediaFile!!, row.mediaMime ?: defaultMimeFor(row.contentType), voiceNote = row.contentType == "audio",
+                    fileName = attachmentFileName(row.contentType, text.takeIf { isDocument }, mediaFile),
+                ),
             )
-            OutgoingContent.Message(text, row.replyToId, attachments)
+            OutgoingContent.Message(text.takeUnless { isDocument }, row.replyToId, attachments)
         }
     }
 

@@ -183,7 +183,7 @@ internal fun ChatThreadSample(
         participantNames = participantNames,
         onSendText = { _, _ -> },
         onSendAudio = { _, _ -> },
-        onSendMedia = { _, _, _ -> },
+        onSendMedia = { _, _, _, _ -> },
         onBack = {},
         onMediaTap = null,
         onMessagesLoaded = null,

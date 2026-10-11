@@ -103,8 +103,15 @@ class ChatRepository(
         return bridge.deleteMessage(jid, messageId, forEveryone).also { nudge() }
     }
 
-    suspend fun sendMedia(jid: String, filePath: String, mimeType: String, caption: String?, replyToId: String?): BridgeEvent {
-        return bridge.sendMedia(jid, filePath, mimeType, caption, replyToId).also { nudge() }
+    suspend fun sendMedia(
+        jid: String,
+        filePath: String,
+        mimeType: String,
+        caption: String?,
+        replyToId: String?,
+        fileName: String? = null,
+    ): BridgeEvent {
+        return bridge.sendMedia(jid, filePath, mimeType, caption, replyToId, fileName).also { nudge() }
     }
 
     suspend fun sendReaction(jid: String, messageId: String, senderJid: String, emoji: String): BridgeEvent {

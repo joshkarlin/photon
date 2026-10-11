@@ -38,8 +38,16 @@ internal interface SignalTransport {
     /** Throws if the message didn't reach the recipient (or, in a group, any member). */
     fun send(recipient: Recipient, content: OutgoingContent, timestamp: Long)
 
-    fun upload(file: File, mimeType: String, voiceNote: Boolean): SignalServiceAttachmentPointer
+    /** Upload [file] to the CDN as an attachment named [fileName]. */
+    fun upload(file: File, mimeType: String, voiceNote: Boolean, fileName: String): SignalServiceAttachmentPointer
 }
+
+/**
+ * The name an attachment is uploaded under: a document's own name (the one
+ * the user's file had), else the staged file's.
+ */
+internal fun attachmentFileName(contentType: String, documentName: String?, file: File): String =
+    documentName?.takeIf { contentType == "document" && it.isNotBlank() } ?: file.name
 
 /** A mime type for a stored row that has none, from its content type. */
 internal fun defaultMimeFor(contentType: String): String = when (contentType) {
