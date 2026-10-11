@@ -73,6 +73,17 @@ class BridgeClientTest {
     }
 
     @Test
+    fun checkOnWhatsAppAsksAboutThePhones() = runBlocking {
+        val response = async { client.checkOnWhatsApp(listOf("+447700900123", "+447700900999")) }
+        val request = Json.parseToJsonElement(withContext(Dispatchers.IO) { bridgeIn.readLine() }).jsonObject
+        assertEquals("check_on_whatsapp", request["type"]!!.jsonPrimitive.content)
+        assertEquals("""{"phones":["+447700900123","+447700900999"]}""", request["payload"].toString())
+        val id = request["id"]!!.jsonPrimitive.content
+        bridgePrints("""{"id":"$id","type":"check_on_whatsapp_response","payload":{"results":[]}}""")
+        assertEquals("[]", withTimeout(5_000) { response.await() }.payload["results"].toString())
+    }
+
+    @Test
     fun losslessSubscribersGetEveryEventOfTheirTypes() = runBlocking {
         val channel = client.subscribeLossless(setOf("new_message"))
         thread {

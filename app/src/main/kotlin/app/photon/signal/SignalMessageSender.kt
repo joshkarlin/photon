@@ -3,11 +3,13 @@ package app.photon.signal
 import android.util.Log
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.db.deleteMessage
+import app.photon.signal.db.getConversation
 import app.photon.signal.db.getGroupMeta
 import app.photon.signal.db.getMessage
 import app.photon.signal.db.insertMessage
 import app.photon.signal.db.updateConversationLastMessage
 import app.photon.signal.db.updateMessageStatus
+import app.photon.signal.db.upsertConversation
 import app.photon.signal.db.upsertReaction
 import app.photon.signal.receiver.contentTypeForMime
 import app.photon.signal.store.PhotonProtocolStore
@@ -111,6 +113,12 @@ class SignalMessageSender internal constructor(
         mediaMime: String? = null,
         mediaSize: Long? = null,
     ): String {
+        // A first DM to someone (a chat started from New message) has no
+        // conversation row: contact sync doesn't make one. Without it the
+        // chat isn't listed and has no last message.
+        if (ServiceId.ACI.parseOrNull(conversationJid) != null && messageDb.getConversation(conversationJid) == null) {
+            messageDb.upsertConversation(jid = conversationJid, name = null, isGroup = false)
+        }
         // Prefix "{authorAci}_{timestampMs}" must stay stable so quote lookups
         // via findMessageByPrefix still match. The random suffix only exists
         // to avoid local PK collisions on rapid-fire sends with the same ms.

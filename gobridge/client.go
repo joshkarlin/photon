@@ -58,6 +58,10 @@ type Bridge struct {
 	// retryDelay is the first wait before retrying a database write that
 	// failed (see applyRevoke).
 	retryDelay time.Duration
+
+	// isOnWhatsApp asks WhatsApp which phone numbers it knows (see
+	// CheckOnWhatsApp). Nil uses the client; tests answer instead.
+	isOnWhatsApp func(ctx context.Context, phones []string) ([]types.IsOnWhatsAppResponse, error)
 }
 
 // NewBridge creates a new Bridge instance.

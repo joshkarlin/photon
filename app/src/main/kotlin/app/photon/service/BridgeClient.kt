@@ -282,6 +282,21 @@ class BridgeClient(private val bridge: GoBridge) {
         })
     }
 
+    /**
+     * Whether each of [phones] (international format) is on WhatsApp, and the
+     * chat to open: `results`, one `{phone, jid, on_whatsapp, existing}` per
+     * number. A number with a chat is answered from the bridge's database;
+     * asking about the rest needs WhatsApp connected, else the response is
+     * the error "WhatsApp disconnected".
+     */
+    suspend fun checkOnWhatsApp(phones: List<String>): BridgeEvent {
+        return request("check_on_whatsapp", buildJsonObject {
+            put("phones", kotlinx.serialization.json.JsonArray(
+                phones.map { kotlinx.serialization.json.JsonPrimitive(it) }
+            ))
+        })
+    }
+
     suspend fun requestPairingCode(phone: String): BridgeEvent {
         return request("get_pairing_code", buildJsonObject {
             put("phone", phone)

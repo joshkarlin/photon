@@ -131,6 +131,11 @@ fun SignalMessageDatabase.getConversation(jid: String): Conversation? {
     ).use { if (it.moveToFirst()) it.toConversation() else null }
 }
 
+/** Whether [jid]'s chat has a message, so [getConversationsWithContacts] lists it. */
+fun SignalMessageDatabase.hasMessages(jid: String): Boolean =
+    readableDatabase.rawQuery("SELECT 1 FROM messages WHERE conversation_jid = ? LIMIT 1", arrayOf(jid))
+        .use { it.moveToFirst() }
+
 /**
  * Groups whose server metadata should be refreshed after reconnect: either
  * the title is blank or the member table is empty. The latter matters for

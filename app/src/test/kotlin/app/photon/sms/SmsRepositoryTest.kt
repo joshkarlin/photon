@@ -130,6 +130,31 @@ class SmsRepositoryTest {
         assertEquals(listOf(dad, mum), recovered.map { it.jid })
     }
 
+    /**
+     * A chat started from New message: no thread for the number yet. The send
+     * shows at once, and the chat is listed once Android stores it.
+     */
+    @Test
+    fun aFirstSendToANewNumberShowsAtOnceAndIsListedOnceStored() {
+        provider.add(dad, "Lift?", 2_000, Telephony.Sms.MESSAGE_TYPE_INBOX, thread = 2)
+        val repo = repo()
+        await(repo.conversations.filterNotNull()) { it.size == 1 }
+        val messages = repo.messages(mum)
+
+        repo.sendMessage(mum, "Hello")
+
+        val sending = await(messages) { it.isNotEmpty() }.single()
+        assertEquals("Hello", sending.textBody)
+        assertEquals(MessageStatus.SENDING, sending.status)
+        assertEquals(listOf(mum to "Hello"), radio.sent)
+
+        provider.add(mum, "Hello", System.currentTimeMillis(), Telephony.Sms.MESSAGE_TYPE_SENT, thread = 7)
+        val listed = await(repo.conversations.filterNotNull()) { it.size == 2 }
+        assertEquals(listOf(mum, dad), listed.map { it.jid })
+        val stored = await(messages) { list -> list.singleOrNull()?.let { it.id != sending.id } == true }
+        assertEquals(MessageStatus.SENT, stored.single().status)
+    }
+
     @Test
     fun aSendShowsAsSendingThenAsAndroidStoresIt() {
         provider.add(mum, "Dinner?", 3_000, Telephony.Sms.MESSAGE_TYPE_INBOX, thread = 1)

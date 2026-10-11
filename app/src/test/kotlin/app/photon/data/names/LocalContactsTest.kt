@@ -10,6 +10,7 @@ import android.database.MatrixCursor
 import android.net.Uri
 import android.os.Looper
 import android.provider.ContactsContract
+import android.provider.ContactsContract.CommonDataKinds.Phone
 import androidx.test.core.app.ApplicationProvider
 import java.time.Duration
 import org.junit.Before
@@ -126,7 +127,41 @@ class LocalContactsTest {
         assertNull(real.nameFor("+447700900999"))
     }
 
-    /** Answers PhoneLookup queries from a one-entry address book. */
+    /**
+     * Every contact with their numbers: the default number first, then
+     * mobiles; the same number saved twice once. Libphonenumber's example UK
+     * range (07400) parses nationally.
+     */
+    @Test
+    fun allListsEachContactWithTheirNumbers() {
+        Robolectric.buildContentProvider(FakeContactsProvider::class.java).create(ContactsContract.AUTHORITY)
+        val savedCountry = DisplayNames.defaultCountry
+        DisplayNames.defaultCountry = "GB"
+
+        val all = try {
+            LocalContacts(context).all()
+        } finally {
+            DisplayNames.defaultCountry = savedCountry
+        }
+
+        assertEquals(
+            listOf(
+                LocalContact("Mo Salah", listOf("+44 7700 900123", "020 7946 0000")),
+                LocalContact("Mum", listOf("07400 123456", "+44 7700 900456")),
+                LocalContact("+44 7700 900999", listOf("+447700900999")),
+            ),
+            all,
+        )
+    }
+
+    @Test
+    fun withoutReadContactsThereAreNoContacts() {
+        Robolectric.buildContentProvider(FakeContactsProvider::class.java).create(ContactsContract.AUTHORITY)
+        shadowOf(context as Application).denyPermissions(Manifest.permission.READ_CONTACTS)
+        assertEquals(emptyList(), LocalContacts(context).all())
+    }
+
+    /** Answers PhoneLookup queries from a one-entry address book, and phone-data queries from a small one. */
     class FakeContactsProvider : ContentProvider() {
         override fun onCreate() = true
 
@@ -136,8 +171,21 @@ class LocalContactsTest {
             selection: String?,
             selectionArgs: Array<out String>?,
             sortOrder: String?,
-        ): Cursor = MatrixCursor(arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME)).apply {
-            if (uri.lastPathSegment == "+447700900123") addRow(arrayOf("Mum"))
+        ): Cursor = if (uri == Phone.CONTENT_URI) {
+            MatrixCursor(projection).apply {
+                // contact id, name, number, default, type
+                addRow(arrayOf<Any>(1L, "Mo Salah", "020 7946 0000", 0, Phone.TYPE_HOME))
+                addRow(arrayOf<Any>(1L, "Mo Salah", "+44 7700 900123", 0, Phone.TYPE_MOBILE))
+                addRow(arrayOf<Any>(2L, "Mum", "+44 7700 900456", 0, Phone.TYPE_MOBILE))
+                addRow(arrayOf<Any>(2L, "Mum", "07400 123456", 1, Phone.TYPE_HOME))
+                addRow(arrayOf<Any>(2L, "Mum", "+44 7400 123456", 0, Phone.TYPE_OTHER))
+                addRow(arrayOf<Any>(3L, "", "+447700900999", 0, Phone.TYPE_MOBILE))
+                addRow(arrayOf<Any>(4L, "No number", "", 0, Phone.TYPE_MOBILE))
+            }
+        } else {
+            MatrixCursor(arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME)).apply {
+                if (uri.lastPathSegment == "+447700900123") addRow(arrayOf("Mum"))
+            }
         }
 
         override fun getType(uri: Uri): String? = null

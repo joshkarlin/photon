@@ -1,6 +1,7 @@
 package app.photon.nav
 
 import android.net.Uri
+import androidx.navigation.NavController
 import app.photon.data.model.Platform
 
 object Routes {
@@ -16,6 +17,9 @@ object Routes {
     const val CONTACT = "contact/{phone}/{name}"
     const val SETTINGS = "settings"
 
+    /** Find someone and start (or open) a chat with them ([openNewMessage]). */
+    const val NEW_MESSAGE = "new-message"
+
     fun chats(filter: Platform?) = if (filter == null) "chats" else "chats?platform=${filter.name}"
 
     fun chat(platform: Platform, jid: String) = "chat/${platform.name}/${Uri.encode(jid)}"
@@ -25,6 +29,16 @@ object Routes {
     /** The platform a route names, or null for none or one it doesn't know. */
     fun platformOf(arg: String?): Platform? = Platform.entries.firstOrNull { it.name == arg }
 }
+
+/** Open New message over the current screen, e.g. from the chat list's bottom bar. */
+fun NavController.openNewMessage() = navigate(Routes.NEW_MESSAGE) { launchSingleTop = true }
+
+/**
+ * Open a chat picked in New message in its place, so Back from the chat
+ * returns to the chat list rather than to the search.
+ */
+internal fun NavController.openChatFromNewMessage(platform: Platform, jid: String) =
+    navigate(Routes.chat(platform, jid)) { popUpTo(Routes.NEW_MESSAGE) { inclusive = true } }
 
 /**
  * Where picking [filter] in the platform picker goes: its chats, unless it

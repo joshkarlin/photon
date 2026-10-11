@@ -175,9 +175,25 @@ func (m *MessageRow) insertArgs() []interface{} {
 	}
 }
 
-// InsertMessage inserts a message record. inserted is false when a row with
-// the same ID already exists — a redelivery of something already stored.
+// ensureConversation creates an empty conversation row for a message about
+// to be stored. A message row needs its conversation (foreign key), and the
+// first message to or from someone new, a call from a new number, or history
+// for a chat not yet seen live comes before any. Callers upsert the
+// conversation's name and last message after the insert, as before; a row
+// left empty (last_timestamp 0) isn't listed.
+func ensureConversation(ex execer, jid string) error {
+	_, err := ex.Exec(`INSERT INTO conversations (jid, is_group) VALUES (?, ?) ON CONFLICT(jid) DO NOTHING`,
+		jid, isGroupJID(jid))
+	return err
+}
+
+// InsertMessage inserts a message record, creating its conversation if it
+// has none. inserted is false when a row with the same ID already exists —
+// a redelivery of something already stored.
 func (b *Bridge) InsertMessage(msg *MessageRow) (inserted bool, err error) {
+	if err := ensureConversation(b.msgDB, msg.ConversationJID); err != nil {
+		return false, err
+	}
 	res, err := b.msgDB.Exec(insertMessageSQL, msg.insertArgs()...)
 	if err != nil {
 		return false, err
@@ -215,6 +231,17 @@ func (b *Bridge) InsertMessages(msgs []*MessageRow) error {
 			b.InsertMessage(m)
 		}
 		return err
+	}
+	ensured := map[string]bool{}
+	for _, m := range msgs {
+		if ensured[m.ConversationJID] {
+			continue
+		}
+		if err := ensureConversation(tx, m.ConversationJID); err != nil {
+			tx.Rollback()
+			return err
+		}
+		ensured[m.ConversationJID] = true
 	}
 	stmt, err := tx.Prepare(insertMessageSQL)
 	if err != nil {

@@ -18,6 +18,7 @@ import app.photon.data.model.MessageStatus
 import app.photon.data.model.Platform
 import app.photon.data.names.DisplayNames
 import app.photon.data.names.LocalContacts
+import app.photon.data.names.PhoneNumbers
 import app.photon.data.repository.conversationsFlow
 import app.photon.data.repository.messagesFlow
 import java.util.concurrent.ConcurrentHashMap
@@ -127,6 +128,24 @@ class SmsRepository internal constructor(
     fun getConversation(address: String): Conversation? {
         return loadConversations().find { it.jid == normalizeAddress(address) }
     }
+
+    /**
+     * The chat with [phone], however its number was written when the chat
+     * began ("07400 123456" for "+447400123456"); null when there's none.
+     */
+    fun conversationWith(phone: String): Conversation? {
+        val normalized = normalizeAddress(phone)
+        return loadConversations().find { conversation ->
+            conversation.jid == normalized ||
+                (DisplayNames.phoneOf(conversation.jid, Platform.SMS) != null && PhoneNumbers.same(conversation.jid, phone))
+        }
+    }
+
+    /** The address a new chat with [phone] is keyed by. */
+    fun addressFor(phone: String): String = normalizeAddress(phone)
+
+    /** [address] named as its chat would be: its LP3 contact, else the number formatted. */
+    fun personName(address: String): String = displayName(normalizeAddress(address))
 
     /**
      * Send [text] to [address]. It shows as sending at once, then as the

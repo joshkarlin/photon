@@ -5,11 +5,13 @@ import androidx.test.core.app.ApplicationProvider
 import app.photon.data.model.MessageStatus
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.db.getConversation
+import app.photon.signal.db.getConversationsWithContacts
 import app.photon.signal.db.getMessage
 import app.photon.signal.db.getMessages
 import app.photon.signal.db.getReactions
 import app.photon.signal.db.insertIncomingMessage
 import app.photon.signal.db.insertMessage
+import app.photon.signal.db.updateContactFromSync
 import app.photon.signal.db.updateGroupMeta
 import app.photon.signal.db.upsertCallRow
 import app.photon.signal.db.upsertConversation
@@ -68,6 +70,7 @@ class SignalMessageSenderTest {
 
     private val me = "00000000-0000-4000-8000-00000000000a"
     private val alice = "00000000-0000-4000-8000-00000000a11c"
+    private val bob = "00000000-0000-4000-8000-000000000b0b"
     private val group = "Z3JvdXAtaWQtZm9yLXRlc3RzLTMyLWJ5dGVzLWxvbmc="
     private val masterKey = ByteArray(32) { 9 }
 
@@ -139,6 +142,42 @@ class SignalMessageSenderTest {
 
         assertEquals(MessageStatus.FAILED, onlyRow("not-a-chat").status)
         assertEquals(emptyList(), transport.sent)
+    }
+
+    /**
+     * A chat started from New message: a contact sync knows their number, but
+     * they have no conversation row. The first DM makes one, so the chat is
+     * listed and points at its message.
+     */
+    @Test
+    fun aFirstDmToSomeoneNewStartsTheirConversation() {
+        db.updateContactFromSync(bob, "+447700900456", "Bob")
+
+        sender.sendTextMessage(bob, "hello")
+
+        val row = onlyRow(bob)
+        assertEquals(MessageStatus.SENT, row.status)
+        val conversation = db.getConversation(bob)
+        assertEquals(false, conversation?.isGroup)
+        assertEquals(row.id, conversation?.lastMessageId)
+        assertEquals(listOf(bob), db.getConversationsWithContacts().map { it.first.jid })
+    }
+
+    /** Offline, it's still listed, with the failed message to retry. */
+    @Test
+    fun aFirstDmThatFailsStillStartsTheConversation() {
+        transport.failSends = true
+
+        sender.sendMediaMessage(bob, file("first.jpg").path, "image/jpeg", caption = null)
+
+        assertEquals(MessageStatus.FAILED, onlyRow(bob).status)
+        assertEquals(onlyRow(bob).id, db.getConversation(bob)?.lastMessageId)
+    }
+
+    @Test
+    fun aSendToSomethingThatIsntAnAciStartsNoConversation() {
+        sender.sendTextMessage("not-a-chat", "hello")
+        assertNull(db.getConversation("not-a-chat"))
     }
 
     @Test

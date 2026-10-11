@@ -8,6 +8,7 @@ import app.photon.data.repository.conversationsFlow
 import app.photon.data.repository.messagesFlow
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.db.findMessageByPrefix
+import app.photon.signal.db.getAciForPhone
 import app.photon.signal.db.getContact
 import app.photon.signal.db.getConversationWithContact
 import app.photon.signal.db.getConversationsWithContacts
@@ -15,6 +16,7 @@ import app.photon.signal.db.getGroupPeople
 import app.photon.signal.db.getMessages
 import app.photon.signal.db.getReactions
 import app.photon.signal.db.getUnsyncedIncomingReads
+import app.photon.signal.db.hasMessages
 import app.photon.signal.db.markConversationSeen
 import app.photon.signal.db.markMessagesRead
 import kotlinx.coroutines.CoroutineScope
@@ -68,6 +70,15 @@ class SignalRepository(
         db.getConversationWithContact(jid)?.let { (conversation, contact) -> names.resolve(conversation, contact) }
 
     fun getContactPhone(aci: String): String? = db.getContact(aci)?.phone
+
+    /** A person by ACI, named as their chat would be ([SignalNames]). */
+    fun personName(aci: String): String = names.person(aci)
+
+    /** The ACI a number (E.164) is known under: from contact sync, or past chats. */
+    fun aciForPhone(phone: String): String? = db.getAciForPhone(phone)
+
+    /** Whether [jid]'s chat has a message, so it's listed. */
+    fun hasMessages(jid: String): Boolean = db.hasMessages(jid)
 
     /**
      * A group's sender names by ACI, re-resolved whenever a source changes

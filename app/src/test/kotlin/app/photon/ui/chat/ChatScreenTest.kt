@@ -96,6 +96,26 @@ class ChatScreenTest {
         assertEquals(listOf(listOf("2", "1"), listOf("4", "2", "1")), backend.marked)
     }
 
+    /**
+     * A chat just started from New message: no conversation yet, so the
+     * platform names the person, then the conversation once its first
+     * message makes one.
+     */
+    @Test
+    fun aNewChatIsTitledByThePlatformUntilItHasAConversation() {
+        val backend = FakeChatBackend(Platform.SMS, FakeChatBackend.TEXT_ONLY, phone = JID)
+        backend.newChatTitles[JID] = "Mo Salah"
+        rule.setContent {
+            PhotonTheme { ChatScreen(backend, JID, onContact = { _, _ -> }, onBack = {}) }
+        }
+        rule.waitUntil(5_000) { rule.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().isNotEmpty() }
+        rule.onNodeWithText("Mo Salah").assertExists()
+
+        backend.conversations.value = listOf(FakeChatBackend.conversation(JID, "Mohamed"))
+        rule.waitForIdle()
+        rule.onNodeWithText("Mohamed").assertExists()
+    }
+
     private companion object {
         const val JID = "+447700900123"
     }
