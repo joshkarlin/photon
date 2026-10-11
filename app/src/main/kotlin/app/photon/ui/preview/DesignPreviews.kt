@@ -10,6 +10,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.tooling.preview.Preview
 import app.photon.R
 import app.photon.data.ComposeStyle
+import app.photon.data.KeyboardStyle
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
 import app.photon.data.model.Platform
@@ -165,6 +166,7 @@ internal fun ChatThreadSample(
     isGroup: Boolean,
     participantNames: Map<String, String> = emptyMap(),
     composeStyle: ComposeStyle = ComposeStyle.INLINE,
+    keyboardStyle: KeyboardStyle = KeyboardStyle.SYSTEM,
 ) {
     ChatThread(
         title = title,
@@ -184,21 +186,29 @@ internal fun ChatThreadSample(
         supportsReply = true,
         headerContent = null,
         composeStyle = composeStyle,
+        keyboardStyle = keyboardStyle,
     )
 }
 
 @Composable
-internal fun DmThreadSample(composeStyle: ComposeStyle = ComposeStyle.INLINE) {
-    ChatThreadSample(PreviewSamples.LONG_DM_TITLE, PreviewSamples.dmMessages, isGroup = false, composeStyle = composeStyle)
+internal fun DmThreadSample(
+    composeStyle: ComposeStyle = ComposeStyle.INLINE,
+    keyboardStyle: KeyboardStyle = KeyboardStyle.SYSTEM,
+) {
+    ChatThreadSample(
+        PreviewSamples.LONG_DM_TITLE, PreviewSamples.dmMessages, isGroup = false,
+        composeStyle = composeStyle, keyboardStyle = keyboardStyle,
+    )
 }
 
 /** FULL SCREEN compose, replying to a message, with a draft under way. */
 @Composable
-internal fun ComposeEditorSample() {
+internal fun ComposeEditorSample(keyboard: KeyboardStyle = KeyboardStyle.LIGHT) {
     val quoted = PreviewSamples.dmMessages.first { it.id == "d8" }
     ComposeEditor(
         title = PreviewSamples.LONG_DM_TITLE,
         draft = rememberTextFieldState("No problem, see you soon"),
+        keyboard = keyboard,
         replyLabel = quoteLabel(quoted, quotedSenderName = null, nameOtherSender = false),
         onSend = {},
         onBack = {},
@@ -233,9 +243,13 @@ private fun DmChatPreview() = PhotonPreview { DmThreadSample() }
 @Composable
 private fun DmFullScreenPreview() = PhotonPreview { DmThreadSample(ComposeStyle.FULL_SCREEN) }
 
-@Preview(name = "Compose (full screen)", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
+@Preview(name = "Compose (full screen) – LP3 keyboard", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
 @Composable
-private fun ComposeEditorPreview() = PhotonPreview { ComposeEditorSample() }
+private fun ComposeEditorPreview() = PhotonPreview { ComposeEditorSample(KeyboardStyle.LIGHT) }
+
+@Preview(name = "Compose (full screen) – system keyboard", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
+@Composable
+private fun SystemComposeEditorPreview() = PhotonPreview { ComposeEditorSample(KeyboardStyle.SYSTEM) }
 
 @Preview(name = "Group", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
 @Composable

@@ -9,31 +9,55 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import kotlin.test.assertEquals
 
+/** The COMPOSE and KEYBOARD settings in Settings › Chat. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
-class ComposeStyleTest {
+class InputPreferencesTest {
 
     @Test
-    fun defaultsToInlineWhenNothingOrSomethingUnknownIsStored() {
+    fun composeDefaultsToInlineWhenNothingOrSomethingUnknownIsStored() {
         assertEquals(ComposeStyle.INLINE, ComposeStyle.resolve(null))
         assertEquals(ComposeStyle.INLINE, ComposeStyle.resolve("SIDEWAYS"))
         assertEquals(ComposeStyle.FULL_SCREEN, ComposeStyle.resolve("FULL_SCREEN"))
     }
 
     @Test
-    fun cyclesBetweenTheTwoStyles() {
+    fun composeCyclesBetweenTheTwoStyles() {
         assertEquals(ComposeStyle.FULL_SCREEN, ComposeStyle.INLINE.next())
         assertEquals(ComposeStyle.INLINE, ComposeStyle.FULL_SCREEN.next())
         assertEquals("FULL SCREEN", ComposeStyle.FULL_SCREEN.label)
     }
 
     @Test
-    fun storesTheChosenStyle() = runBlocking {
+    fun keyboardDefaultsToSystemWhenNothingOrSomethingUnknownIsStored() {
+        assertEquals(KeyboardStyle.SYSTEM, KeyboardStyle.resolve(null))
+        assertEquals(KeyboardStyle.SYSTEM, KeyboardStyle.resolve("DVORAK"))
+        assertEquals(KeyboardStyle.LIGHT, KeyboardStyle.resolve("LIGHT"))
+    }
+
+    @Test
+    fun keyboardCyclesBetweenSystemAndLight() {
+        assertEquals(KeyboardStyle.LIGHT, KeyboardStyle.SYSTEM.next())
+        assertEquals(KeyboardStyle.SYSTEM, KeyboardStyle.LIGHT.next())
+    }
+
+    @Test
+    fun storesBothSettingsIndependently() = runBlocking {
         val prefs = PhotonPreferences(ApplicationProvider.getApplicationContext())
         assertEquals(ComposeStyle.INLINE, prefs.composeStyle.first())
+        assertEquals(KeyboardStyle.SYSTEM, prefs.keyboardStyle.first())
+
+        prefs.setKeyboardStyle(KeyboardStyle.LIGHT)
+        assertEquals(KeyboardStyle.LIGHT, prefs.keyboardStyle.first())
+        assertEquals(ComposeStyle.INLINE, prefs.composeStyle.first())
+
         prefs.setComposeStyle(ComposeStyle.FULL_SCREEN)
         assertEquals(ComposeStyle.FULL_SCREEN, prefs.composeStyle.first())
+        assertEquals(KeyboardStyle.LIGHT, prefs.keyboardStyle.first())
+
+        prefs.setKeyboardStyle(KeyboardStyle.SYSTEM)
         prefs.setComposeStyle(ComposeStyle.INLINE)
+        assertEquals(KeyboardStyle.SYSTEM, prefs.keyboardStyle.first())
         assertEquals(ComposeStyle.INLINE, prefs.composeStyle.first())
     }
 }
