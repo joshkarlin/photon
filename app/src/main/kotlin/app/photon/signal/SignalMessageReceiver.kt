@@ -13,11 +13,15 @@ import app.photon.signal.store.PhotonProtocolStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.signal.core.models.ServiceId
 import org.signal.libsignal.metadata.ProtocolDuplicateMessageException
 import org.signal.libsignal.metadata.ProtocolException
@@ -44,6 +48,7 @@ import org.whispersystems.signalservice.internal.push.DataMessage
 import org.whispersystems.signalservice.internal.push.Envelope
 import org.whispersystems.signalservice.internal.push.SyncMessage
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.UUID
 
 class SignalMessageReceiver(
@@ -72,8 +77,11 @@ class SignalMessageReceiver(
         // MessageApi/KeysApi requests can proceed while this waits.
         private const val MESSAGE_POLL_TIMEOUT_MS = 30_000L
         // In-process retry delay for an envelope left un-acked after a local
-        // processing failure (see scheduleHeldRetry).
+        // processing failure (see retryHeldEnvelopes).
         private const val HELD_ENVELOPE_RETRY_MS = 10_000L
+        // How long a Signal reset waits for in-flight receiver work before
+        // the databases are deleted.
+        private const val RESET_DRAIN_TIMEOUT_MS = 10_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -98,8 +106,20 @@ class SignalMessageReceiver(
     private var receiveJob: Job? = null
     @Volatile private var lastMaintenanceAt = 0L
 
-    @Volatile private var webSocket: SignalWebSocket.AuthenticatedWebSocket? = null
-    @Volatile private var unauthWebSocket: SignalWebSocket.UnauthenticatedWebSocket? = null
+    /**
+     * One connection attempt's socket pair. [alive] gates both sockets'
+     * canConnect: SignalWebSocket transparently reopens a closed connection on
+     * the next request, so anything still holding a superseded socket (an
+     * in-flight profile fetch, a late ack) would otherwise open a second
+     * authenticated connection and displace the live one.
+     */
+    private class SocketPair(
+        val auth: SignalWebSocket.AuthenticatedWebSocket,
+        val unauth: SignalWebSocket.UnauthenticatedWebSocket,
+        val alive: AtomicBoolean,
+    )
+
+    @Volatile private var sockets: SocketPair? = null
     @Volatile private var profileFetcher: SignalProfileFetcher? = null
     @Volatile private var pushSocket: PushServiceSocket? = null
     @Volatile private var groupManager: SignalGroupV2Manager? = null
@@ -111,6 +131,13 @@ class SignalMessageReceiver(
     private val earlyReads = EarlyReadCache()
     // Envelopes left un-acked after a local processing failure.
     private val envelopeRetries = EnvelopeRetryTracker<DecryptedEnvelope>()
+    // Their in-process retries, run by the read loop on its own thread.
+    private class HeldRetry(
+        val response: EnvelopeResponse,
+        val socket: SignalWebSocket.AuthenticatedWebSocket,
+        val dueAt: Long,
+    )
+    private val heldRetries = mutableListOf<HeldRetry>()
 
     fun start() {
         synchronized(lifecycleLock) {
@@ -123,7 +150,9 @@ class SignalMessageReceiver(
             receiveJob = scope.launch {
                 // stop() cancelled the previous loop and closed its socket, so
                 // it exits promptly; wait for it so two loops never overlap.
-                previous?.join()
+                // NonCancellable: if this job is itself stopped while waiting,
+                // the next start() joins it and must still wait for `previous`.
+                withContext(NonCancellable) { previous?.join() }
                 receiveLoop(gen)
             }
         }
@@ -176,22 +205,27 @@ class SignalMessageReceiver(
     }
 
     fun stop() {
-        val authWs: SignalWebSocket.AuthenticatedWebSocket?
-        val unauthWs: SignalWebSocket.UnauthenticatedWebSocket?
+        stopInternal()
+    }
+
+    /** Stop and return the cancelled receive loop's job. */
+    private fun stopInternal(): Job? {
+        val pair: SocketPair?
+        val loop: Job?
         synchronized(lifecycleLock) {
             running = false
             generation++
-            receiveJob?.cancel()
-            authWs = webSocket
-            unauthWs = unauthWebSocket
-            webSocket = null
-            unauthWebSocket = null
+            loop = receiveJob
+            loop?.cancel()
+            pair = sockets
+            sockets = null
             profileFetcher = null
             groupManager = null
             _state.value = "disconnected"
         }
         app.photon.service.PhotonService._signalGroupManager = null
-        closeSockets(authWs, unauthWs)
+        closeSockets(pair)
+        return loop
     }
 
     /**
@@ -199,13 +233,25 @@ class SignalMessageReceiver(
      * reset), so a re-pair starts clean: ask the primary for contacts again,
      * re-ping every contact for the new device id, and drop held envelopes,
      * early reads and the group credential cache.
+     *
+     * Blocks (call off the main thread) until in-flight receiver work — the
+     * envelope batch being processed, contacts ingest, profile fetches — has
+     * finished or been cancelled, so none of it writes the old account's data
+     * into the databases the caller is about to delete.
      */
     fun resetAccountState() {
-        stop()
+        stopInternal()
+        val work = scope.coroutineContext[Job]?.children?.toList().orEmpty()
+        work.forEach { it.cancel() }
+        val drained = runBlocking {
+            withTimeoutOrNull(RESET_DRAIN_TIMEOUT_MS) { work.forEach { it.join() } } != null
+        }
+        if (!drained) Log.w(TAG, "Reset: receiver work still running after ${RESET_DRAIN_TIMEOUT_MS}ms")
         contactsSyncRequested = false
         activeContactsPinged = false
         earlyReads.clear()
         envelopeRetries.clearAll()
+        synchronized(heldRetries) { heldRetries.clear() }
         context.getSharedPreferences("signal_ping_state", android.content.Context.MODE_PRIVATE)
             .edit().clear().apply()
         SignalGroupV2Manager.clearCredentialCache()
@@ -220,13 +266,17 @@ class SignalMessageReceiver(
         }
     }
 
-    private fun closeSockets(
-        authWs: SignalWebSocket.AuthenticatedWebSocket?,
-        unauthWs: SignalWebSocket.UnauthenticatedWebSocket?,
-    ) {
-        app.photon.service.PhotonService._signalSender?.detachReceiverWebSockets(authWs, unauthWs)
-        try { authWs?.disconnect() } catch (_: Exception) {}
-        try { unauthWs?.disconnect() } catch (_: Exception) {}
+    private fun closeSockets(pair: SocketPair?) {
+        if (pair == null) return
+        pair.alive.set(false)
+        app.photon.service.PhotonService._signalSender?.detachReceiverWebSockets(pair.auth, pair.unauth)
+        try { pair.auth.disconnect() } catch (_: Exception) {}
+        try { pair.unauth.disconnect() } catch (_: Exception) {}
+    }
+
+    /** When this attempt's socket was first seen connected (0 = not yet). */
+    private class Attempt {
+        var connectedAt = 0L
     }
 
     private suspend fun receiveLoop(gen: Long) {
@@ -234,14 +284,15 @@ class SignalMessageReceiver(
         var authFailures = 0
         while (isCurrent(gen)) {
             var ws: SignalWebSocket.AuthenticatedWebSocket? = null
-            var connectedAt: Long? = null
+            val attempt = Attempt()
             try {
                 setState(gen, "connecting")
                 ws = connectWebSocket(gen)
-                setState(gen, "connected")
-                connectedAt = System.currentTimeMillis()
-                Log.i(TAG, "WebSocket connected, reading messages... stateSnapshot=${ws.stateSnapshot}")
-                readMessages(gen, ws)
+                // connect() is asynchronous: report "connected" only once the
+                // handshake has actually completed.
+                markConnectedIfLive(gen, ws, attempt)
+                Log.i(TAG, "WebSocket opened, reading messages... stateSnapshot=${ws.stateSnapshot}")
+                readMessages(gen, ws, attempt)
             } catch (e: Exception) {
                 if (isCurrent(gen)) Log.e(TAG, "Message receive error", e)
             }
@@ -262,7 +313,7 @@ class SignalMessageReceiver(
             }
 
             failures = SignalReconnect.nextFailureCount(
-                failures, connectedAt?.let { System.currentTimeMillis() - it },
+                failures, attempt.connectedAt.takeIf { it > 0 }?.let { System.currentTimeMillis() - it },
             )
             val wait = SignalReconnect.delayMs(failures)
             setState(gen, "disconnected")
@@ -277,42 +328,44 @@ class SignalMessageReceiver(
      * new generation.
      */
     private fun markLoggedOut(gen: Long) {
-        val authWs: SignalWebSocket.AuthenticatedWebSocket?
-        val unauthWs: SignalWebSocket.UnauthenticatedWebSocket?
+        val pair: SocketPair?
         synchronized(lifecycleLock) {
             if (generation != gen) return
             running = false
-            authWs = webSocket
-            unauthWs = unauthWebSocket
-            webSocket = null
-            unauthWebSocket = null
+            pair = sockets
+            sockets = null
+            profileFetcher = null
+            groupManager = null
             _state.value = "logged_out"
         }
-        closeSockets(authWs, unauthWs)
+        app.photon.service.PhotonService._signalGroupManager = null
+        closeSockets(pair)
+    }
+
+    private fun markConnectedIfLive(gen: Long, ws: SignalWebSocket.AuthenticatedWebSocket, attempt: Attempt) {
+        if (attempt.connectedAt > 0) return
+        if (ws.stateSnapshot != org.whispersystems.signalservice.api.websocket.WebSocketConnectionState.CONNECTED) return
+        attempt.connectedAt = System.currentTimeMillis()
+        setState(gen, "connected")
     }
 
     private fun connectWebSocket(gen: Long): SignalWebSocket.AuthenticatedWebSocket {
         // Close the previous attempt's pair first — both sockets; the
         // unauthenticated one used to leak on every reconnect.
-        val oldAuth: SignalWebSocket.AuthenticatedWebSocket?
-        val oldUnauth: SignalWebSocket.UnauthenticatedWebSocket?
-        synchronized(lifecycleLock) {
-            oldAuth = webSocket
-            oldUnauth = unauthWebSocket
-            webSocket = null
-            unauthWebSocket = null
-        }
-        closeSockets(oldAuth, oldUnauth)
+        val oldPair = synchronized(lifecycleLock) { sockets.also { sockets = null } }
+        closeSockets(oldPair)
 
         val factory = SignalConfig.webSocketFactory(config, "photon-recv", credentials) { status ->
             Log.w(TAG, "Message error: $status")
         }
 
-        // canConnect is per generation: a superseded socket must never
-        // silently reconnect itself.
+        // canConnect is per generation and per pair: a superseded socket
+        // must never silently reconnect itself.
+        val alive = AtomicBoolean(true)
+        val canConnect = { isCurrent(gen) && alive.get() }
         val ws = SignalWebSocket.AuthenticatedWebSocket(
             factory,
-            { isCurrent(gen) },
+            canConnect,
             SignalConfig.sleepTimer,
             30_000L,
         )
@@ -322,38 +375,44 @@ class SignalMessageReceiver(
         // Unauthenticated socket is used by profile fetches and key uploads.
         val unauthFactory = SignalConfig.webSocketFactory(config, "photon-recv-unauth", null)
         val unauthWs = SignalWebSocket.UnauthenticatedWebSocket(
-            unauthFactory, { isCurrent(gen) },
+            unauthFactory, canConnect,
             SignalConfig.sleepTimer,
             30_000L,
         )
         unauthWs.connect()
         unauthWs.registerKeepAliveToken("PhotonReceiverUnauth")
-
-        val current = synchronized(lifecycleLock) {
-            isCurrent(gen).also { if (it) { webSocket = ws; unauthWebSocket = unauthWs } }
-        }
-        if (!current) {
-            closeSockets(ws, unauthWs)
-            throw IllegalStateException("Receiver stopped while connecting")
-        }
-
-        // Sending sync messages through a second authenticated WebSocket can
-        // cause Signal to close this receiver socket. Share the receiver pair
-        // so reads and sends are multiplexed over one linked-device session.
-        app.photon.service.PhotonService._signalSender?.attachReceiverWebSockets(ws, unauthWs)
+        val pair = SocketPair(ws, unauthWs, alive)
 
         // Used by the contacts sync to download the encrypted blob from CDN.
         val ps = PushServiceSocket(config, credentials, SignalConfig.USER_AGENT, false)
-        pushSocket = ps
-
-        profileFetcher = SignalProfileFetcher(config, ws, unauthWs, messageDb, scope)
-
+        val fetcher = SignalProfileFetcher(config, ws, unauthWs, messageDb, scope)
         // GroupV2 fetcher — reuses the same auth WS / push socket. Shared
         // via PhotonService so the sender can also consult it when sending
         // into a group without rebuilding the credential cache.
         val gm = SignalGroupV2Manager(config, credentials, ws, ps)
-        groupManager = gm
-        app.photon.service.PhotonService._signalGroupManager = gm
+
+        // Publish everything under the lock together with the generation
+        // check, so a concurrent stop() can't be followed by this attempt
+        // re-attaching sockets it has just closed.
+        val current = synchronized(lifecycleLock) {
+            isCurrent(gen).also { current ->
+                if (!current) return@also
+                sockets = pair
+                pushSocket = ps
+                profileFetcher = fetcher
+                groupManager = gm
+                app.photon.service.PhotonService._signalGroupManager = gm
+                // Sending sync messages through a second authenticated
+                // WebSocket can cause Signal to close this receiver socket.
+                // Share the receiver pair so reads and sends are multiplexed
+                // over one linked-device session.
+                app.photon.service.PhotonService._signalSender?.attachReceiverWebSockets(ws, unauthWs)
+            }
+        }
+        if (!current) {
+            closeSockets(pair)
+            throw IllegalStateException("Receiver stopped while connecting")
+        }
 
         // Linked devices don't have native access to the user's address book.
         // Ask the primary for it once per process so any contact whose Signal
@@ -385,8 +444,10 @@ class SignalMessageReceiver(
 
         val now = System.currentTimeMillis()
         if (SignalReconnect.maintenanceDue(lastMaintenanceAt, now)) {
-            lastMaintenanceAt = now
-            runConnectMaintenance(ws, unauthWs)
+            // Only a round trip that actually reached the server uses up the
+            // slot; an attempt made while offline mustn't defer upkeep for
+            // the connection that follows it.
+            if (runConnectMaintenance(ws, unauthWs)) lastMaintenanceAt = now
         }
         return ws
     }
@@ -394,12 +455,13 @@ class SignalMessageReceiver(
     /**
      * Upkeep after a (re)connect, throttled to once per
      * [SignalReconnect.MAINTENANCE_INTERVAL_MS] so a flapping connection
-     * doesn't redo it on every attempt.
+     * doesn't redo it on every attempt. Returns whether the pre-key check
+     * reached the server.
      */
     private fun runConnectMaintenance(
         ws: SignalWebSocket.AuthenticatedWebSocket,
         unauthWs: SignalWebSocket.UnauthenticatedWebSocket,
-    ) {
+    ): Boolean {
         // After (re)connecting, sweep for contacts that have a profile key
         // but no resolved name — earlier fetches may have failed silently
         // (e.g. because this very WS was never connected before today). Also
@@ -471,14 +533,14 @@ class SignalMessageReceiver(
         }
 
         // Upload one-time pre-keys if they haven't been uploaded yet
-        uploadPreKeysIfNeeded(ws, unauthWs)
+        return uploadPreKeysIfNeeded(ws, unauthWs)
     }
 
     private fun uploadPreKeysIfNeeded(
         ws: SignalWebSocket.AuthenticatedWebSocket,
         unauthWs: SignalWebSocket.UnauthenticatedWebSocket,
-    ) {
-        try {
+    ): Boolean {
+        return try {
             val keysApi = KeysApi(ws, unauthWs)
 
             val countResult = keysApi.getAvailablePreKeyCounts(ServiceIdType.ACI)
@@ -491,7 +553,7 @@ class SignalMessageReceiver(
 
             if (counts.ecCount >= 10 && counts.kyberCount >= 10) {
                 Log.i(TAG, "Server has enough pre-keys")
-                return
+                return true
             }
             Log.w(
                 TAG,
@@ -561,7 +623,7 @@ class SignalMessageReceiver(
                 result.successOrThrow()
                 Log.i(TAG, "Uploaded fresh keys via KeysApi: signed=$signedPreKeyId " +
                     "lastResortKyber=$lastResortId ec=${ecPreKeys.size} kyber=${kyberPreKeys.size}")
-                return
+                return true
             } catch (e: Exception) {
                 Log.w(TAG, "KeysApi.setPreKeys failed (${e.message}); trying PushServiceSocket fallback")
             }
@@ -589,12 +651,14 @@ class SignalMessageReceiver(
             push.serviceRequest("/v2/keys?identity=aci", "PUT", json)
             Log.i(TAG, "Uploaded fresh keys via PushServiceSocket fallback: signed=$signedPreKeyId " +
                 "lastResortKyber=$lastResortId ec=${ecPreKeys.size} kyber=${kyberPreKeys.size}")
+            true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to upload pre-keys", e)
+            false
         }
     }
 
-    private fun readMessages(gen: Long, ws: SignalWebSocket.AuthenticatedWebSocket) {
+    private fun readMessages(gen: Long, ws: SignalWebSocket.AuthenticatedWebSocket, attempt: Attempt) {
         val aci = credentials.aci ?: return
         val localAddress = SignalServiceAddress(aci)
         val deviceId = credentials.deviceId
@@ -642,6 +706,8 @@ class SignalMessageReceiver(
                 Log.e(TAG, "Error reading messages", e)
                 throw e
             }
+            markConnectedIfLive(gen, ws, attempt)
+            retryHeldEnvelopes(cipher, ws)
         }
     }
 
@@ -654,7 +720,7 @@ class SignalMessageReceiver(
      * when retrying can't help (decrypt failures, duplicates). If local
      * processing throws, the envelope is left un-acked for the server to
      * redeliver, with the decrypted payload held for that redelivery (see
-     * [EnvelopeRetryTracker]) and an in-process retry scheduled; a poison
+     * [EnvelopeRetryTracker]) and an in-process retry queued; a poison
      * envelope is acked after 3 failures. Reprocessing is safe: inserts
      * dedupe on the (author, timestamp) key.
      */
@@ -708,7 +774,9 @@ class SignalMessageReceiver(
                 Log.e(TAG, "Giving up on $description — acking after repeated failures", e)
             } else {
                 Log.w(TAG, "Failed to process $description — leaving un-acked, retrying", e)
-                scheduleHeldRetry(envelopeResponse, cipher, ws, retryKey)
+                synchronized(heldRetries) {
+                    heldRetries.add(HeldRetry(envelopeResponse, ws, System.currentTimeMillis() + HELD_ENVELOPE_RETRY_MS))
+                }
             }
             giveUp
         }
@@ -717,27 +785,23 @@ class SignalMessageReceiver(
 
     /**
      * The server only redelivers an un-acked envelope after a reconnect, which
-     * can be hours away on a healthy connection. Retry a held envelope
-     * in-process as well, through the same path, so it counts towards the
-     * poison limit and is acked once processed. If a redelivery got to it
-     * first, it's no longer held and this does nothing.
+     * can be hours away on a healthy connection. The read loop retries held
+     * envelopes itself, between batches and on its own thread (so a retry
+     * can't race other processing), through the same path: it counts towards
+     * the poison limit and is acked once processed. Only envelopes received
+     * on the current socket can be acked on it; the server redelivers the
+     * others on the new connection, and one a redelivery already handled is
+     * no longer held.
      */
-    private fun scheduleHeldRetry(
-        envelopeResponse: EnvelopeResponse,
-        cipher: SignalServiceCipher,
-        ws: SignalWebSocket.AuthenticatedWebSocket,
-        retryKey: String,
-    ) {
-        scope.launch {
-            delay(HELD_ENVELOPE_RETRY_MS)
-            if (!envelopeRetries.isHeld(retryKey)) return@launch
-            try {
-                processEnvelope(envelopeResponse, cipher, ws)
-            } catch (e: Exception) {
-                // The ack fails if this connection has closed meanwhile; the
-                // redelivery on the next connection completes it instead.
-                Log.w(TAG, "Held envelope retry couldn't ack: ${e.message}")
-            }
+    private fun retryHeldEnvelopes(cipher: SignalServiceCipher, ws: SignalWebSocket.AuthenticatedWebSocket) {
+        val now = System.currentTimeMillis()
+        val due = synchronized(heldRetries) {
+            heldRetries.filter { it.dueAt <= now }.also { heldRetries.removeAll(it) }
+        }
+        for (held in due) {
+            if (held.socket !== ws) continue
+            if (!envelopeRetries.isHeld(envelopeRetryKey(held.response.envelope))) continue
+            processEnvelope(held.response, cipher, ws)
         }
     }
 
@@ -952,7 +1016,7 @@ class SignalMessageReceiver(
 
         val metaGroupId = metadata.groupId
         val derivedGroupId = groupMasterKey?.let { mk ->
-            try { groupManager?.groupIdFromMasterKey(mk) } catch (_: Exception) { null }
+            try { SignalGroupV2Manager.groupIdFromMasterKey(mk) } catch (_: Exception) { null }
         }
 
         val groupIdBytes = derivedGroupId ?: metaGroupId
@@ -1411,7 +1475,7 @@ class SignalMessageReceiver(
             val groupV2 = data.groupV2
             val groupMasterKey = groupV2?.masterKey?.toByteArray()?.takeIf { it.size == 32 }
             if (groupMasterKey != null) {
-                val convJid = try { groupManager?.jidFromMasterKey(groupMasterKey) } catch (_: Exception) { null }
+                val convJid = try { SignalGroupV2Manager.jidFromMasterKey(groupMasterKey) } catch (_: Exception) { null }
                 if (convJid != null) {
                     seedGroupConversation(convJid, groupMasterKey, groupV2.revision ?: 0)
 
@@ -1439,7 +1503,7 @@ class SignalMessageReceiver(
                     app.photon.service.NotificationHelper.cancelForConversation(context, convJid)
                     return
                 }
-                Log.w(TAG, "Sync sent has groupV2 but groupManager unavailable; falling through")
+                Log.w(TAG, "Sync sent has an invalid groupV2 master key; falling through")
             }
 
             // DM case: needs a destination on the sync transcript. Normalize
