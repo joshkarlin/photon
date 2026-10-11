@@ -53,7 +53,12 @@ internal fun ChatScreen(
     val conversations by backend.conversations.collectAsState()
     val conversation = conversations?.firstOrNull { it.jid == jid } ?: remember(backend, jid) { backend.conversation(jid) }
     val isGroup = conversation?.isGroup ?: jid.endsWith("@g.us")
-    val title = DisplayNames.title(jid, conversation?.name, isGroup, backend.platform)
+    // A chat just started from New message has no conversation until its
+    // first message; until then the platform names the person.
+    val newChatTitle = remember(backend, jid, conversation == null) {
+        if (conversation == null && !isGroup) backend.newChatTitle(jid) else null
+    }
+    val title = newChatTitle ?: DisplayNames.title(jid, conversation?.name, isGroup, backend.platform)
     var viewingMedia by remember { mutableStateOf<Message?>(null) }
 
     // Group sender names, resolved again as names are learned or LP3 contacts change.

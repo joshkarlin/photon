@@ -39,6 +39,11 @@ internal class FakeChatBackend(
 
     override suspend fun downloadMedia(messageId: String): String = throw ChatBackendException("none")
 
+    /** What [newChatTitle] answers, by jid; else the interface's default. */
+    val newChatTitles = mutableMapOf<String, String>()
+
+    override fun newChatTitle(jid: String): String = newChatTitles[jid] ?: super.newChatTitle(jid)
+
     /** What [reach] answers, by number; anything else is unreachable. */
     val reaches = mutableMapOf<String, Reach>()
     val reached = mutableListOf<String>()

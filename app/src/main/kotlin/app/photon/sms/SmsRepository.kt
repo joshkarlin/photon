@@ -144,6 +144,9 @@ class SmsRepository internal constructor(
     /** The address a new chat with [phone] is keyed by. */
     fun addressFor(phone: String): String = normalizeAddress(phone)
 
+    /** [address] named as its chat would be: its LP3 contact, else the number formatted. */
+    fun personName(address: String): String = displayName(normalizeAddress(address))
+
     /**
      * Send [text] to [address]. It shows as sending at once, then as the
      * radio reports back (see [startSendResults]). Throws if SmsManager

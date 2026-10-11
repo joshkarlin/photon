@@ -70,6 +70,8 @@ class SmsBackend(private val repository: SmsRepository) : ChatBackend {
         }
     }
 
+    override fun newChatTitle(jid: String): String = repository.personName(jid)
+
     // A number-keyed chat is its number; an alphanumeric sender ("HSBC UK")
     // isn't one to save.
     override fun contactPhone(jid: String): String? = DisplayNames.phoneOf(jid, Platform.SMS)

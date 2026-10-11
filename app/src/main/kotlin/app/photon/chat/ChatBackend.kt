@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
 import app.photon.data.model.Platform
+import app.photon.data.names.DisplayNames
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
@@ -80,6 +81,13 @@ interface ChatBackend {
     /** Shown under the chat's top bar. */
     @Composable
     fun Header(jid: String, isGroup: Boolean, title: String, participantNames: Map<String, String>) {}
+
+    /**
+     * A DM's title while it has no conversation (a chat just started from
+     * New message, until its first message): the person by [DisplayNames]'
+     * policy, from what this platform knows of [jid]. Called as the chat opens.
+     */
+    fun newChatTitle(jid: String): String = DisplayNames.title(jid, null, isGroup = false, platform)
 
     /** The number a DM's contact can be saved under, if the chat has one. Called when its title is tapped. */
     fun contactPhone(jid: String): String?

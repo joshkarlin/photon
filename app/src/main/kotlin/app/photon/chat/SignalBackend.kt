@@ -97,6 +97,10 @@ class SignalBackend(
         )
     }
 
+    // From their contacts row: the LP3 contact for its number, the primary's
+    // contact sync name, their profile name, or the number.
+    override fun newChatTitle(jid: String): String = repository.personName(jid)
+
     override fun contactPhone(jid: String): String? = repository.getContactPhone(jid)
 
     private suspend fun succeed(failure: String, call: suspend () -> Boolean) {

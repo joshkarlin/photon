@@ -71,6 +71,9 @@ class SignalRepository(
 
     fun getContactPhone(aci: String): String? = db.getContact(aci)?.phone
 
+    /** A person by ACI, named as their chat would be ([SignalNames]). */
+    fun personName(aci: String): String = names.person(aci)
+
     /** The ACI a number (E.164) is known under: from contact sync, or past chats. */
     fun aciForPhone(phone: String): String? = db.getAciForPhone(phone)
 

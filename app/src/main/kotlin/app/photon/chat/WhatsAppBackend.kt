@@ -127,6 +127,9 @@ class WhatsAppBackend(
         if (isGroup) request("Name participants") { repository.resolveParticipants(jid) }
     }
 
+    // The LP3 contact for a phone JID's number, else the number.
+    override fun newChatTitle(jid: String): String = repository.names.person(jid, bridgeName = null)
+
     // Phone JIDs carry the number; an @lid DM has none to save.
     override fun contactPhone(jid: String): String? = DisplayNames.phoneOf(jid, Platform.WHATSAPP)
 
