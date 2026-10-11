@@ -73,8 +73,14 @@ interface ChatBackend {
     @Composable
     fun Header(jid: String, isGroup: Boolean, title: String, participantNames: Map<String, String>) {}
 
-    /** The number a DM's contact can be saved under, if the chat has one. */
+    /** The number a DM's contact can be saved under, if the chat has one. Called when its title is tapped. */
     fun contactPhone(jid: String): String?
+
+    /**
+     * False when [jid] can't have a number to save, so its title isn't
+     * tappable at all. Checked as the chat composes, so it must be cheap.
+     */
+    fun mayHaveContactPhone(jid: String): Boolean = true
 
     companion object {
         /** How Photon records voice notes. */

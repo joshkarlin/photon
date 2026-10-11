@@ -178,5 +178,6 @@ class ChatBackendTest {
         assertFailsWith<ChatBackendException> { backend.delete("+447700900123", "1", forEveryone = false) }
         assertEquals("+447700900123", backend.contactPhone("+447700900123"))
         assertEquals(null, backend.contactPhone("HSBC UK"))
+        assertFalse(backend.mayHaveContactPhone("HSBC UK"), "an alphanumeric sender's title isn't tappable")
     }
 }
