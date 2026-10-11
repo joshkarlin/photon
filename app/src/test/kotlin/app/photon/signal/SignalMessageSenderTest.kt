@@ -17,6 +17,7 @@ import app.photon.signal.db.upsertCallRow
 import app.photon.signal.db.upsertConversation
 import app.photon.signal.store.PhotonProtocolStore
 import app.photon.signal.store.SignalProtocolDatabase
+import app.photon.ui.shared.components.formatContent
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -40,6 +41,7 @@ internal class FakeTransport : SignalTransport {
 
     val sent = mutableListOf<Sent>()
     val uploads = mutableListOf<Pair<String, Boolean>>()
+    val uploadNames = mutableListOf<String>()
     var failSends = false
     var failUploads = false
 
@@ -48,13 +50,14 @@ internal class FakeTransport : SignalTransport {
         sent += Sent(recipient, content, timestamp)
     }
 
-    override fun upload(file: File, mimeType: String, voiceNote: Boolean): SignalServiceAttachmentPointer {
+    override fun upload(file: File, mimeType: String, voiceNote: Boolean, fileName: String): SignalServiceAttachmentPointer {
         if (failUploads) throw IOException("upload failed")
         uploads += mimeType to voiceNote
+        uploadNames += fileName
         return SignalServiceAttachmentPointer(
             3, SignalServiceAttachmentRemoteId.from("cdn-key"), mimeType, ByteArray(64),
             Optional.of(file.length().toInt()), Optional.empty(), 0, 0, Optional.empty(), Optional.empty(), 0,
-            Optional.of(file.name), voiceNote, false, false, Optional.empty(), Optional.empty(), 0L, null,
+            Optional.of(fileName), voiceNote, false, false, Optional.empty(), Optional.empty(), 0L, null,
         )
     }
 }
@@ -229,6 +232,29 @@ class SignalMessageSenderTest {
         assertEquals("audio", onlyRow(alice).contentType)
     }
 
+    /** A picked PDF goes out under its own name, not the staged copy's, and the thread shows that name. */
+    @Test
+    fun aDocumentIsUploadedUnderItsOwnName() {
+        sender.sendMediaMessage(alice, file("send_media_4.pdf").path, "application/pdf", null, fileName = "Q1 report.pdf")
+
+        assertEquals(listOf("Q1 report.pdf"), transport.uploadNames)
+        val content = transport.sent.single().content as OutgoingContent.Message
+        assertNull(content.text, "the name isn't sent as a caption")
+        assertEquals("Q1 report.pdf", content.attachments.single().asPointer().fileName.orElse(null))
+        val row = onlyRow(alice)
+        assertEquals("document", row.contentType)
+        assertEquals("[ document: Q1 report.pdf ]", formatContent(row))
+    }
+
+    @Test
+    fun otherMediaAndUnnamedDocumentsKeepTheStagedName() {
+        sender.sendMediaMessage(alice, file("send_media_5.jpg").path, "image/jpeg", null, fileName = "IMG_0001.jpg")
+        sender.sendMediaMessage(alice, file("send_media_6.pdf").path, "application/pdf", null, fileName = null)
+
+        assertEquals(listOf("send_media_5.jpg", "send_media_6.pdf"), transport.uploadNames)
+        assertEquals(listOf(null, null), db.getMessages(alice).map { it.textBody })
+    }
+
     @Test
     fun aMissingFileIsStoredFailedWithoutUploading() {
         sender.sendMediaMessage(alice, File(context.filesDir, "gone.jpg").path, "image/jpeg", null)
@@ -318,6 +344,21 @@ class SignalMessageSenderTest {
 
         assertEquals(listOf("image/jpeg" to false), transport.uploads)
         assertIs<Recipient.Group>(transport.sent.single().recipient)
+    }
+
+    @Test
+    fun aRetriedDocumentKeepsItsName() {
+        transport.failUploads = true
+        sender.sendMediaMessage(alice, file("send_media_7.pdf").path, "application/pdf", null, fileName = "Q1 report.pdf")
+        val failed = onlyRow(alice)
+        assertEquals(MessageStatus.FAILED, failed.status)
+
+        transport.failUploads = false
+        assertTrue(sender.retryMessage(failed.id))
+
+        assertEquals(listOf("Q1 report.pdf"), transport.uploadNames)
+        assertNull((transport.sent.single().content as OutgoingContent.Message).text)
+        assertEquals("Q1 report.pdf", db.getMessage(failed.id)?.textBody)
     }
 
     @Test
