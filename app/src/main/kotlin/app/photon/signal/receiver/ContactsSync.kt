@@ -27,6 +27,9 @@ internal class ContactsSync(
     private val messageDb: SignalMessageDatabase,
     private val contactResolver: AndroidContactResolver,
     private val pushSocket: () -> PushServiceSocket?,
+    // Runs after the contact book is ingested: new phone mappings can merge
+    // PNI-keyed conversations.
+    private val onSynced: () -> Unit,
 ) {
     /**
      * Downloads, decrypts, and parses a sync.contacts attachment.
@@ -95,6 +98,7 @@ internal class ContactsSync(
                 }
             }
             Log.i(TAG, "Contacts sync: ingested $count contacts")
+            onSynced()
         } catch (t: Throwable) {
             Log.w(TAG, "Contacts sync download/parse failed: ${t.javaClass.simpleName}: ${t.message}", t)
         } finally {

@@ -32,6 +32,8 @@ class SignalRepository(
         private const val TAG = "SignalRepository"
     }
 
+    private val unsyncableReads = UnsyncableReads()
+
     val conversations: StateFlow<List<Conversation>?> =
         conversationsFlow(scope, "SignalRepository", db.changes) { db.getConversations() }
 
@@ -88,7 +90,7 @@ class SignalRepository(
             // rows that can't be expressed in a read sync — retry on the
             // next chat open instead of being marked read silently.
             val plan = planReadSync(db.getUnsyncedIncomingReads(jid))
-            if (plan.skippedIds.isNotEmpty()) {
+            if (unsyncableReads.firstReport(jid, plan)) {
                 Log.w(TAG, "Cannot sync read state for ${plan.skippedIds.size} message(s) without an ACI key")
             }
             if (plan.entries.isEmpty()) return@withContext

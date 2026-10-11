@@ -1,6 +1,7 @@
 package app.photon.signal
 
 import org.signal.core.models.ServiceId
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * What a read sync for a set of seen rows will actually carry. [entries] are
@@ -31,4 +32,18 @@ internal fun planReadSync(pendingIds: List<String>): ReadSyncPlan {
         }
     }
     return ReadSyncPlan(entries, rowIds, skipped)
+}
+
+/**
+ * Remembers which conversations have rows a read sync can't express, so
+ * that is logged once per conversation instead of on every chat open. Such
+ * rows stay pending: once their author's ACI is known the conversation is
+ * merged and they sync.
+ */
+internal class UnsyncableReads {
+    private val reported = ConcurrentHashMap.newKeySet<String>()
+
+    /** True the first time [conversationJid]'s plan skips rows. */
+    fun firstReport(conversationJid: String, plan: ReadSyncPlan): Boolean =
+        plan.skippedIds.isNotEmpty() && reported.add(conversationJid)
 }

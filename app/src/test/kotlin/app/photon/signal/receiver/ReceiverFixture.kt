@@ -52,7 +52,7 @@ internal class ReceiverFixture(localAci: String, localDeviceId: Int = 3) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
     val notifier = RecordingNotifier()
     private val resolver = AndroidContactResolver(context)
-    val contactNames = ContactNames(db, resolver) { null }
+    val contactNames = ContactNames(db, resolver, notifier) { null }
     val groupMetadata = GroupMetadata(db, resolver, scope, { null }, SessionPings(context, credentials, db, scope))
 
     fun close() {

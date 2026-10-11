@@ -70,10 +70,14 @@ class SignalMessageReceiver(
     private val earlyReads = EarlyReadCache()
     private val preKeyRefill = PreKeyRefill(protocolStore)
     private val sessionPings = SessionPings(context, credentials, messageDb, scope)
-    private val contactNames = ContactNames(messageDb, contactResolver) { profileFetcher }
+    private val contactNames = ContactNames(messageDb, contactResolver, notifier) { profileFetcher }
     private val groupMetadata = GroupMetadata(messageDb, contactResolver, scope, { groupManager }, sessionPings)
     private val attachments = Attachments(context, messageDb) { pushSocket }
-    private val contactsSync = ContactsSync(context, messageDb, contactResolver) { pushSocket }
+    private val contactsSync = ContactsSync(
+        context, messageDb, contactResolver,
+        pushSocket = { pushSocket },
+        onSynced = { contactNames.mergeResolvableServiceIds() },
+    )
     private val calls = CallHandler(credentials, messageDb, contactNames, groupMetadata, notifier, { delayMs, task ->
         scope.launch {
             delay(delayMs)
@@ -157,6 +161,14 @@ class SignalMessageReceiver(
                 calls.expireStaleRinging()
             } catch (e: Exception) {
                 Log.w(TAG, "Ring expiry sweep failed: ${e.message}")
+            }
+        }
+        // PNI-keyed conversations whose ACI a past contacts sync revealed.
+        scope.launch {
+            try {
+                contactNames.mergeResolvableServiceIds()
+            } catch (e: Exception) {
+                Log.w(TAG, "PNI conversation merge failed: ${e.message}")
             }
         }
     }

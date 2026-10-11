@@ -31,4 +31,17 @@ class SignalReadSyncTest {
         assertEquals(emptyList(), plan.entries)
         assertEquals(emptyList(), plan.rowIds)
     }
+
+    /** Opening a chat with unsyncable rows warns once, not on every open. */
+    @Test
+    fun unsyncableRowsAreReportedOncePerConversation() {
+        val reads = UnsyncableReads()
+        val blocked = planReadSync(listOf("${pni}_1700000000456_cd"))
+        val fine = planReadSync(listOf("${aci}_1700000000123_ab"))
+
+        assertEquals(false, reads.firstReport("chat", fine))
+        assertEquals(true, reads.firstReport("chat", blocked))
+        assertEquals(false, reads.firstReport("chat", blocked))
+        assertEquals(true, reads.firstReport("other chat", blocked))
+    }
 }
