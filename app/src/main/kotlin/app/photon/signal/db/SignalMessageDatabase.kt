@@ -240,22 +240,6 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         notifyChanged()
     }
 
-    fun incrementUnread(jid: String) {
-        writableDatabase.execSQL(
-            "UPDATE conversations SET unread_count = unread_count + 1 WHERE jid = ?",
-            arrayOf(jid),
-        )
-        notifyChanged()
-    }
-
-    fun resetUnread(jid: String) {
-        writableDatabase.execSQL(
-            "UPDATE conversations SET unread_count = 0 WHERE jid = ?",
-            arrayOf(jid),
-        )
-        notifyChanged()
-    }
-
     /**
      * The user opened the conversation in Photon: clear its unread count and
      * move unread incoming rows to 'seen' (viewed here, read sync pending).
@@ -938,28 +922,6 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     /**
-     * Groups whose display name is blank/null but for which we hold a master
-     * key — i.e. the title was never resolved or was wiped (the old reresolve
-     * bug). Returned with the master key so the caller can re-fetch the real
-     * title from group state. Without this, the UI shows the base64 group id.
-     */
-    fun getGroupsWithBlankNameAndMasterKey(): List<Pair<String, ByteArray>> {
-        val out = mutableListOf<Pair<String, ByteArray>>()
-        readableDatabase.rawQuery(
-            "SELECT jid, master_key FROM conversations " +
-                "WHERE is_group = 1 AND (name IS NULL OR name = '') AND master_key IS NOT NULL",
-            null,
-        ).use { c ->
-            while (c.moveToNext()) {
-                val jid = c.getString(0)
-                val mk = if (c.isNull(1)) null else c.getBlob(1)
-                if (mk != null && mk.size == 32) out.add(jid to mk)
-            }
-        }
-        return out
-    }
-
-    /**
      * Groups whose server metadata should be refreshed after reconnect: either
      * the title is blank or the member table is empty. The latter matters for
      * linked-device session priming, because group-only contacts are discovered
@@ -1011,28 +973,6 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             """,
         )
         notifyChanged()
-    }
-
-    /**
-     * JIDs of DM conversations that have at least one message stored.
-     * Group JIDs (is_group = 1) are excluded — callers who use this list
-     * to ping contacts would otherwise try to parse a group identifier as
-     * an ACI and fail loudly.
-     */
-    fun getJidsWithMessages(): List<String> {
-        return readableDatabase.rawQuery(
-            """
-            SELECT DISTINCT m.conversation_jid
-              FROM messages m
-              LEFT JOIN conversations c ON c.jid = m.conversation_jid
-              WHERE COALESCE(c.is_group, 0) = 0
-            """,
-            null,
-        ).use { c ->
-            val out = mutableListOf<String>()
-            while (c.moveToNext()) out.add(c.getString(0))
-            out
-        }
     }
 
     /**

@@ -45,26 +45,6 @@ class SignalMessageDatabaseTest {
     }
 
     /**
-     * The blank-group-name repair must target only groups that are actually
-     * blank AND have a master key to re-fetch with — never named groups, never
-     * keyless ones. (Restores titles wiped by the old reresolve bug.)
-     */
-    @Test
-    fun getGroupsWithBlankNameAndMasterKey_selectsOnlyRepairableGroups() {
-        val mk = ByteArray(32) { 1 }
-        db.upsertConversation(jid = "blankGroup", name = null, isGroup = true)
-        db.updateGroupMeta("blankGroup", mk, 5)
-        db.upsertConversation(jid = "namedGroup", name = "Frothers Utd", isGroup = true)
-        db.updateGroupMeta("namedGroup", mk, 5)
-        db.upsertConversation(jid = "keylessGroup", name = null, isGroup = true)
-
-        val repairable = db.getGroupsWithBlankNameAndMasterKey()
-
-        assertEquals(listOf("blankGroup"), repairable.map { it.first })
-        assertEquals(32, repairable.single().second.size)
-    }
-
-    /**
      * Reconnect-time GroupV2 refresh must also pick up named groups with an
      * empty participants table, because those member ACIs are the session-ping
      * targets for group-only contacts.
@@ -152,16 +132,14 @@ class SignalMessageDatabaseTest {
     fun markIncomingReadByPrefix_marksOnlyMatchingDmMessageAndDecrementsUnread() {
         val aci = "read-dm-aci"
         db.upsertConversation(jid = aci, name = "Alice", isGroup = false)
-        db.insertMessage(
+        db.insertIncomingMessage(
             id = "${aci}_1700_abc", conversationJid = aci, senderJid = aci,
             timestamp = 1700, contentType = "text", textBody = "first",
         )
-        db.insertMessage(
+        db.insertIncomingMessage(
             id = "${aci}_1800_def", conversationJid = aci, senderJid = aci,
             timestamp = 1800, contentType = "text", textBody = "second",
         )
-        db.incrementUnread(aci)
-        db.incrementUnread(aci)
 
         val result = db.markIncomingReadByPrefix("${aci}_1700")
 
@@ -178,16 +156,14 @@ class SignalMessageDatabaseTest {
         val group = "read-group"
         val author = "read-group-author"
         db.upsertConversation(jid = group, name = "Group", isGroup = true)
-        db.insertMessage(
+        db.insertIncomingMessage(
             id = "${author}_1700_abc", conversationJid = group, senderJid = author,
             timestamp = 1700, contentType = "text", textBody = "first",
         )
-        db.insertMessage(
+        db.insertIncomingMessage(
             id = "${author}_1800_def", conversationJid = group, senderJid = author,
             timestamp = 1800, contentType = "text", textBody = "second",
         )
-        db.incrementUnread(group)
-        db.incrementUnread(group)
 
         val first = db.markIncomingReadByPrefix("${author}_1700")
         val duplicate = db.markIncomingReadByPrefix("${author}_1700")
@@ -221,7 +197,7 @@ class SignalMessageDatabaseTest {
     fun markConversationRead_clearsIncomingUnreadButPreservesOutgoingStatus() {
         val aci = "transcript-read-aci"
         db.upsertConversation(jid = aci, name = "Alice", isGroup = false)
-        db.insertMessage(
+        db.insertIncomingMessage(
             id = "${aci}_1700_in", conversationJid = aci, senderJid = aci,
             timestamp = 1700, contentType = "text", textBody = "incoming",
         )
@@ -230,7 +206,6 @@ class SignalMessageDatabaseTest {
             timestamp = 1800, contentType = "text", textBody = "outgoing",
             isFromMe = true, status = "delivered",
         )
-        db.incrementUnread(aci)
 
         val changed = db.markConversationRead(aci)
         val duplicate = db.markConversationRead(aci)
