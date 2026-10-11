@@ -32,7 +32,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.viewinterop.AndroidView
 import app.photon.ui.theme.PhotonGrid
 import com.thelightphone.sdk.ui.LightBarButton
-import com.thelightphone.sdk.ui.LightBottomBar
 import com.thelightphone.sdk.ui.LightIcon
 import com.thelightphone.sdk.ui.LightIcons
 import com.thelightphone.sdk.ui.LightText
@@ -81,8 +80,10 @@ fun MediaViewer(
         }
     }
 
-    // Back (top-left, or the system's) is the one way out. The page stops
-    // touches reaching the thread beneath.
+    // Back (top-left, or the system's) is the one way out. Save is the
+    // top bar's contextual action, so the media has the rest of the page;
+    // once saved, its icon turns to "downloaded". The page stops touches
+    // reaching the thread beneath.
     BackHandler(onBack = onDismiss)
     Column(
         modifier = Modifier
@@ -90,7 +91,24 @@ fun MediaViewer(
             .background(LightThemeTokens.colors.background)
             .pointerInput(Unit) {},
     ) {
-        LightTopBar(leftButton = backButton(onDismiss))
+        LightTopBar(
+            leftButton = backButton(onDismiss),
+            rightButton = localPath?.let { path ->
+                if (saved) {
+                    LightBarButton.LightIcon(LightIcons.DOWNLOADED_ARROW, onClick = null, contentDescription = "Saved")
+                } else {
+                    LightBarButton.LightIcon(
+                        LightIcons.DOWNLOAD_ARROW,
+                        onClick = {
+                            scope.launch {
+                                saved = withContext(Dispatchers.IO) { saveToDevice(context, path, mediaMime) }
+                            }
+                        },
+                        contentDescription = "Save",
+                    )
+                }
+            },
+        )
 
         // Content
         Box(
@@ -124,26 +142,6 @@ fun MediaViewer(
                     }
                 }
             }
-        }
-
-        // The bar says when it's saved, rather than a system toast.
-        localPath?.let { path ->
-            LightBottomBar(
-                items = listOf(
-                    if (saved) {
-                        LightBarButton.Text(text = "SAVED", onClick = null)
-                    } else {
-                        LightBarButton.Text(
-                            text = "SAVE TO DEVICE",
-                            onClick = {
-                                scope.launch {
-                                    saved = withContext(Dispatchers.IO) { saveToDevice(context, path, mediaMime) }
-                                }
-                            },
-                        )
-                    },
-                ),
-            )
         }
     }
 }
