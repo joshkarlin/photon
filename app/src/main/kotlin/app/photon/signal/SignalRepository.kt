@@ -12,7 +12,6 @@ import app.photon.signal.db.getContact
 import app.photon.signal.db.getConversationWithContact
 import app.photon.signal.db.getConversationsWithContacts
 import app.photon.signal.db.getGroupPeople
-import app.photon.signal.db.getMessage
 import app.photon.signal.db.getMessages
 import app.photon.signal.db.getReactions
 import app.photon.signal.db.getUnsyncedIncomingReads
@@ -36,7 +35,7 @@ import kotlinx.coroutines.withContext
  */
 class SignalRepository(
     private val db: SignalMessageDatabase,
-    val sender: SignalMessageSender?,
+    private val sender: SignalMessageSender?,
     scope: CoroutineScope,
     localContacts: LocalContacts,
     selfAci: () -> String?,
@@ -82,8 +81,6 @@ class SignalRepository(
                 }
             }
             .distinctUntilChanged()
-
-    fun getMessage(id: String): Message? = db.getMessage(id)
 
     // Each send returns whether it went out. A message that didn't is left
     // "failed" in its thread for the user to retry.

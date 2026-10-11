@@ -16,6 +16,8 @@ import app.photon.data.ComposeStyle
 import app.photon.data.KeyboardStyle
 import app.photon.data.PhotonPreferences
 import app.photon.data.ScrollDial
+import app.photon.service.BridgeClient
+import app.photon.service.GoBridge
 import app.photon.service.Sessions
 import app.photon.ui.shared.components.MenuRow
 import app.photon.ui.shared.components.MenuScreen
@@ -255,12 +257,12 @@ private fun formatState(state: String) = when (state) {
     else -> state.uppercase()
 }
 
-private suspend fun syncRetention(bridge: app.photon.service.BridgeClient?, maxMessages: Int, maxDays: Int) {
+private suspend fun syncRetention(bridge: BridgeClient?, maxMessages: Int, maxDays: Int) {
     try {
         bridge?.request("set_retention", buildJsonObject {
             put("max_messages", maxMessages)
             put("max_days", maxDays)
-            put("media_ttl_mins", 5)
+            put("media_ttl_mins", GoBridge.MEDIA_TTL_MINS)
         })
     } catch (_: Exception) {}
 }

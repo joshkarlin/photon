@@ -61,8 +61,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 
 /**
- * Shared chat screen used by WhatsApp, Signal, and SMS.
- * Handles the top bar, message list and input. Messages are laid out as in
+ * The thread of [app.photon.ui.chat.ChatScreen], on every platform: the top
+ * bar, message list and input. Messages are laid out as in
  * the LP3 thread ([MessageRow]); groups add the sender above each incoming
  * burst, as the LP2 group thread does.
  *
