@@ -135,15 +135,31 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 		b.IncrementUnread(chatJID)
 	}
 
-	// Broadcast new message event
-	b.BroadcastEvent("new_message", NewMessageEvent{
-		ConversationJID: chatJID,
-		MessageID:       msgID,
-		SenderName:      name.name,
-		TextBody:        textBody,
-		ContentType:     contentType,
-		IsFromMe:        isFromMe,
-	})
+	b.BroadcastEvent("new_message", b.newMessageEvent(chatJID, msgID, senderJID, textBody, contentType, isFromMe))
+}
+
+// newMessageEvent is new_message's payload for a stored message, with the
+// names as stored just now: the chat's, and for a message the user didn't
+// send, the sender's — their member name in a group, the chat's in a DM.
+func (b *Bridge) newMessageEvent(chatJID, msgID, senderJID, text, contentType string, isFromMe bool) NewMessageEvent {
+	evt := NewMessageEvent{
+		ConversationJID:  chatJID,
+		MessageID:        msgID,
+		IsGroup:          isGroupJID(chatJID),
+		ConversationName: b.storedConversationName(chatJID).name,
+		SenderJID:        senderJID,
+		TextBody:         text,
+		ContentType:      contentType,
+		IsFromMe:         isFromMe,
+	}
+	switch {
+	case isFromMe:
+	case evt.IsGroup:
+		evt.SenderName = b.ParticipantName(chatJID, senderJID)
+	default:
+		evt.SenderName = evt.ConversationName
+	}
+	return evt
 }
 
 // applyRevoke blanks a message deleted for everyone. If it was the last unread

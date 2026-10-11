@@ -132,10 +132,7 @@ func (b *Bridge) UploadAndSend(jid, filePath, mimeType, caption, replyToID strin
 		Status:          "sending",
 	})
 	b.UpsertConversation(jid, rankedName{}, id, ts)
-	b.BroadcastEvent("new_message", NewMessageEvent{
-		ConversationJID: jid, MessageID: id, TextBody: caption,
-		ContentType: contentType, IsFromMe: true,
-	})
+	b.BroadcastEvent("new_message", b.newMessageEvent(jid, id, b.client.Store.ID.ToNonAD().String(), caption, contentType, true))
 
 	data, err := os.ReadFile(filePath)
 	if err != nil {

@@ -110,13 +110,24 @@ type PairErrorEvent struct {
 	Error string `json:"error"`
 }
 
+// NewMessageEvent: a message was stored. Names are the stored ones — the best
+// WhatsApp gives (address book, verified business, push name) or "", never a
+// number — for Kotlin to put the user's LP3 contacts above and fall back from
+// to the number in SenderJID.
 type NewMessageEvent struct {
 	ConversationJID string `json:"conversation_jid"`
 	MessageID       string `json:"message_id"`
-	SenderName      string `json:"sender_name,omitempty"`
-	TextBody        string `json:"text_body,omitempty"`
-	ContentType     string `json:"content_type,omitempty"`
-	IsFromMe        bool   `json:"is_from_me"`
+	IsGroup         bool   `json:"is_group"`
+	// ConversationName is a group's subject or a DM's name.
+	ConversationName string `json:"conversation_name"`
+	// SenderJID is the sender without device suffix, by phone number when the
+	// LID mapping is known.
+	SenderJID string `json:"sender_jid"`
+	// SenderName is the sender's name; "" for the user's own messages.
+	SenderName  string `json:"sender_name"`
+	TextBody    string `json:"text_body,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
+	IsFromMe    bool   `json:"is_from_me"`
 }
 
 type MessageUpdatedEvent struct {
@@ -174,13 +185,17 @@ type HistorySyncProgressEvent struct {
 	MessagesTotal      int `json:"messages_total"`
 }
 
-// CallIncomingEvent: a call is ringing on the user's other devices.
+// CallIncomingEvent: a call is ringing on the user's other devices. Names
+// follow NewMessageEvent's rules: the caller's (CallerJID's) own name, and the
+// chat's — a group's subject for a call placed in a group.
 type CallIncomingEvent struct {
-	ConversationJID string `json:"conversation_jid"`
-	CallerName      string `json:"caller_name"`
-	IsVideo         bool   `json:"is_video"`
-	CallID          string `json:"call_id"`
-	IsGroup         bool   `json:"is_group"`
+	ConversationJID  string `json:"conversation_jid"`
+	ConversationName string `json:"conversation_name"`
+	CallerJID        string `json:"caller_jid"`
+	CallerName       string `json:"caller_name"`
+	IsVideo          bool   `json:"is_video"`
+	CallID           string `json:"call_id"`
+	IsGroup          bool   `json:"is_group"`
 }
 
 // CallEndedEvent: a ringing call stopped without being missed — answered
@@ -192,13 +207,15 @@ type CallEndedEvent struct {
 }
 
 // CallMissedEvent: a call ended unanswered; a "Missed … call" row was added
-// to the chat and counted as unread.
+// to the chat and counted as unread. Fields as in CallIncomingEvent.
 type CallMissedEvent struct {
-	ConversationJID string `json:"conversation_jid"`
-	CallerName      string `json:"caller_name"`
-	IsVideo         bool   `json:"is_video"`
-	IsGroup         bool   `json:"is_group"`
-	CallID          string `json:"call_id"`
+	ConversationJID  string `json:"conversation_jid"`
+	ConversationName string `json:"conversation_name"`
+	CallerJID        string `json:"caller_jid"`
+	CallerName       string `json:"caller_name"`
+	IsVideo          bool   `json:"is_video"`
+	IsGroup          bool   `json:"is_group"`
+	CallID           string `json:"call_id"`
 }
 
 type ErrorResponse struct {

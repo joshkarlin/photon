@@ -502,3 +502,50 @@ func TestReconcile_upgradesWithoutDowngrading(t *testing.T) {
 		t.Errorf("names_changed = %v", got)
 	}
 }
+
+// new_message carries the names Photon just stored: the chat's, and the
+// sender's with their canonical JID — never a number.
+func TestNewMessage_carriesStoredNames(t *testing.T) {
+	ctx := context.Background()
+	alice := types.NewJID("447700900001", types.DefaultUserServer)
+	aliceLID := types.NewJID("11223344", types.HiddenUserServer)
+	carol := types.NewJID("447700900003", types.DefaultUserServer)
+	club := types.NewJID("120363000000000001", types.GroupServer)
+
+	b := newClientBridge(t)
+	b.client.Store.LIDs.PutLIDMapping(ctx, aliceLID, alice)
+	b.client.Store.Contacts.PutContactName(ctx, carol, "Carol", "Carol Smith")
+	b.UpsertConversation(club.String(), rankedName{name: "Book club", rank: rankSubject}, "", 0)
+	sent := captureEvents(b)
+
+	dm := textEvent(aliceLID, aliceLID, "d1", "hi", 100)
+	dm.Info.PushName = "Ally"
+	b.handleMessage(dm)
+	inGroup := textEvent(club, aliceLID, "c1", "hi club", 101)
+	inGroup.Info.PushName = "Ally"
+	b.handleMessage(inGroup)
+	b.handleMessage(textEvent(club, carol, "c2", "hello", 102))
+	b.handleMessage(textEvent(carol, carol, "d2", "psst", 103))
+	b.handleMessage(textEvent(club, ownJID, "c3", "me too", 104))
+	b.handleMessage(textEvent(types.NewJID("447700900009", types.DefaultUserServer), types.NewJID("447700900009", types.DefaultUserServer), "d3", "who?", 105))
+
+	want := []map[string]any{
+		{"conversation_jid": alice.String(), "is_group": false, "conversation_name": "Ally", "sender_jid": alice.String(), "sender_name": "Ally"},
+		{"conversation_jid": club.String(), "is_group": true, "conversation_name": "Book club", "sender_jid": alice.String(), "sender_name": "Ally"},
+		{"conversation_jid": club.String(), "is_group": true, "conversation_name": "Book club", "sender_jid": carol.String(), "sender_name": "Carol Smith"},
+		{"conversation_jid": carol.String(), "is_group": false, "conversation_name": "Carol Smith", "sender_jid": carol.String(), "sender_name": "Carol Smith"},
+		{"conversation_jid": club.String(), "is_group": true, "conversation_name": "Book club", "sender_jid": ownJID.String(), "sender_name": ""},
+		{"conversation_jid": "447700900009@s.whatsapp.net", "is_group": false, "conversation_name": "", "sender_jid": "447700900009@s.whatsapp.net", "sender_name": ""},
+	}
+	got := sent.ofType("new_message")
+	if len(got) != len(want) {
+		t.Fatalf("new_message events = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		for k, v := range w {
+			if got[i][k] != v {
+				t.Errorf("event %d: %s = %v, want %v", i, k, got[i][k], v)
+			}
+		}
+	}
+}

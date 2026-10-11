@@ -46,10 +46,10 @@ func (n rankedName) writeArgs() []interface{} {
 }
 
 // setConversationName stores a conversation's name if it beats the stored
-// one (see nameWriteAllowed). An empty name never clears one. Returns whether
-// the row changed.
+// one (see nameWriteAllowed). An empty name never clears one, and a number
+// is no name (see cleanName). Returns whether the row changed.
 func setConversationName(ex execer, jid string, n rankedName) (bool, error) {
-	if n.name == "" {
+	if n.name = cleanName(n.name); n.name == "" {
 		return false, nil
 	}
 	args := append([]interface{}{n.name, n.rank, jid}, n.writeArgs()...)
@@ -176,8 +176,8 @@ func updateMute(ex execer, jid string, mutedUntil int64) error {
 }
 
 // UpsertParticipant names a group member, adding their row if it's new. The
-// name replaces a stored one as in setConversationName; an empty name adds
-// nothing. Returns whether anything changed.
+// name replaces a stored one as in setConversationName; an empty name (or a
+// number) adds nothing. Returns whether anything changed.
 func (b *Bridge) UpsertParticipant(convJID, jid string, n rankedName) bool {
 	changed, err := upsertParticipant(b.msgDB, convJID, jid, n)
 	if err != nil {
@@ -187,7 +187,7 @@ func (b *Bridge) UpsertParticipant(convJID, jid string, n rankedName) bool {
 }
 
 func upsertParticipant(ex execer, convJID, jid string, n rankedName) (bool, error) {
-	if n.name == "" {
+	if n.name = cleanName(n.name); n.name == "" {
 		return false, nil
 	}
 	res, err := ex.Exec(`INSERT OR IGNORE INTO participants (conversation_jid, jid, display_name, name_rank)

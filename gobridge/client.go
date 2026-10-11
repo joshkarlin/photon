@@ -311,10 +311,7 @@ func (b *Bridge) SendTextMessage(ctx context.Context, jid string, text string, r
 		Status:          "sending",
 	})
 	b.UpsertConversation(jid, rankedName{}, id, ts)
-	b.BroadcastEvent("new_message", NewMessageEvent{
-		ConversationJID: jid, MessageID: id, TextBody: text,
-		ContentType: "text", IsFromMe: true,
-	})
+	b.BroadcastEvent("new_message", b.newMessageEvent(jid, id, b.client.Store.ID.ToNonAD().String(), text, "text", true))
 
 	msg := b.buildTextMessage(text, replyToID)
 	resp, err := b.client.SendMessage(ctx, targetJID, msg, whatsmeow.SendRequestExtra{ID: id})
