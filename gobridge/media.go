@@ -101,6 +101,9 @@ func (b *Bridge) saveThumbnail(msgID string, data []byte) string {
 // row goes in with status="sending" before the upload starts so users see
 // it the instant they tap send.
 func (b *Bridge) UploadAndSend(jid, filePath, mimeType, caption, replyToID string) (string, int64, error) {
+	if err := b.sendableFile(filePath); err != nil {
+		return "", 0, err
+	}
 	targetJID, err := types.ParseJID(jid)
 	if err != nil {
 		return "", 0, err

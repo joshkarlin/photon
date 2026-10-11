@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -63,7 +62,6 @@ func registerFKDriver() {
 // bridgeConfig is the bridge's command line.
 type bridgeConfig struct {
 	dataDir   string
-	wsPort    int
 	logLevel  string
 	retention RetentionConfig
 }
@@ -76,7 +74,6 @@ func parseConfig(args []string) (bridgeConfig, error) {
 	var cfg bridgeConfig
 	fs := flag.NewFlagSet("gobridge", flag.ContinueOnError)
 	fs.StringVar(&cfg.dataDir, "data-dir", ".", "Path to data directory")
-	fs.IntVar(&cfg.wsPort, "ws-port", 8765, "WebSocket server port")
 	fs.StringVar(&cfg.logLevel, "log-level", "DEBUG", "Log level (DEBUG, INFO, WARN, ERROR)")
 	fs.IntVar(&cfg.retention.MaxMessages, "max-messages", 0, "Messages kept per chat (0 = default)")
 	fs.IntVar(&cfg.retention.MaxDays, "max-days", 0, "Days of history kept (0 = default)")
@@ -90,9 +87,18 @@ func main() {
 	if err != nil {
 		os.Exit(2)
 	}
+	if abs, err := filepath.Abs(cfg.dataDir); err == nil {
+		cfg.dataDir = abs
+	}
 
-	logger := waLog.Stdout("Bridge", cfg.logLevel, true)
-	logger.Infof("Starting Photon bridge, data-dir=%s, ws-port=%d", cfg.dataDir, cfg.wsPort)
+	// stdout is the line protocol to Kotlin (transport.go). whatsmeow's
+	// loggers print to os.Stdout, so point that — and any stray print — at
+	// stderr, which Kotlin forwards to logcat.
+	protocolOut := os.Stdout
+	os.Stdout = os.Stderr
+
+	logger := waLog.Stdout("Bridge", cfg.logLevel, false)
+	logger.Infof("Starting Photon bridge, data-dir=%s", cfg.dataDir)
 
 	// Android doesn't have /etc/resolv.conf, so Go's pure-Go DNS resolver
 	// can't find DNS servers. Override the default resolver to use Google DNS.
@@ -116,7 +122,7 @@ func main() {
 	// that runs PRAGMA foreign_keys=ON on each connection.
 	sessionPath := filepath.Join(cfg.dataDir, "whatsmeow.db")
 	registerFKDriver()
-	container, err := sqlstore.New(ctx, "sqlite_fk", sessionPath, waLog.Stdout("Session", cfg.logLevel, true))
+	container, err := sqlstore.New(ctx, "sqlite_fk", sessionPath, waLog.Stdout("Session", cfg.logLevel, false))
 	if err != nil {
 		logger.Errorf("Failed to init session store: %v", err)
 		os.Exit(1)
@@ -144,7 +150,7 @@ func main() {
 	store.DeviceProps.Os = &photonName
 
 	// Create whatsmeow client
-	client := whatsmeow.NewClient(device, waLog.Stdout("Client", cfg.logLevel, true))
+	client := whatsmeow.NewClient(device, waLog.Stdout("Client", cfg.logLevel, false))
 	// A stored session can need a few attempts after a long offline period or
 	// a transient primary-device/network outage. Let whatsmeow retry an initial
 	// connection in the background instead of returning a terminal failure.
@@ -152,6 +158,7 @@ func main() {
 
 	// Create bridge
 	bridge := NewBridge(client, msgDB, cfg.dataDir, logger)
+	bridge.out = &lineWriter{w: protocolOut}
 	bridge.SetRetention(cfg.retention.MaxMessages, cfg.retention.MaxDays, cfg.retention.MediaTTLMins)
 	logger.Infof("Retention: %+v", bridge.retention)
 
@@ -171,19 +178,9 @@ func main() {
 	bridge.StartPruning(ctx)
 	bridge.StartConnectionWatchdog(ctx)
 
-	// Start WebSocket server
-	mux := http.NewServeMux()
-	bridge.RegisterWSHandler(mux)
-
-	addr := fmt.Sprintf("127.0.0.1:%d", cfg.wsPort)
-	server := &http.Server{Addr: addr, Handler: mux}
-
-	go func() {
-		logger.Infof("WebSocket server listening on %s", addr)
-		if err := server.ListenAndServe(); err != http.ErrServerClosed {
-			logger.Errorf("WS server error: %v", err)
-		}
-	}()
+	// Answer Kotlin's requests until it closes our stdin.
+	served := make(chan error, 1)
+	go func() { served <- bridge.Serve(ctx, os.Stdin) }()
 
 	// Connect to WhatsApp if already paired
 	if client.Store.ID != nil {
@@ -198,12 +195,16 @@ func main() {
 		bridge.setConnectionState("logged_out", "no paired WhatsApp session")
 	}
 
-	// Wait for shutdown signal
+	// Run until the app closes our stdin (it exited, or is restarting us) or
+	// we're signalled.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-
-	logger.Infof("Shutting down...")
+	select {
+	case err := <-served:
+		logger.Infof("Request stream closed (%v), shutting down", err)
+	case sig := <-sigCh:
+		logger.Infof("Received %s, shutting down", sig)
+	}
+	cancel()
 	client.Disconnect()
-	server.Shutdown(ctx)
 }

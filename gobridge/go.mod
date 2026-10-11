@@ -6,7 +6,6 @@ require (
 	go.mau.fi/whatsmeow v0.0.0-20260730092514-662ad1dc6900
 	google.golang.org/protobuf v1.36.11
 	modernc.org/sqlite v1.48.1
-	nhooyr.io/websocket v1.8.17
 )
 
 require (

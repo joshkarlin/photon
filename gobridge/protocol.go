@@ -2,7 +2,8 @@ package main
 
 import "encoding/json"
 
-// WsMessage is the envelope for all WebSocket messages.
+// WsMessage is the envelope for every request, response and event exchanged
+// with Kotlin (one per line; see transport.go).
 type WsMessage struct {
 	ID      string          `json:"id,omitempty"`
 	Type    string          `json:"type"`

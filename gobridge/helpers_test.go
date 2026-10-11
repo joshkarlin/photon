@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"path/filepath"
 	"sync"
@@ -121,3 +122,5 @@ func textBody(t *testing.T, b *Bridge, id string) string {
 	}
 	return s
 }
+
+func nullString(s string) sql.NullString { return sql.NullString{String: s, Valid: s != ""} }

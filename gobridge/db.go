@@ -39,7 +39,8 @@ func (b *Bridge) InitMessageDB(ctx context.Context) error {
 			unread_count    INTEGER NOT NULL DEFAULT 0,
 			is_muted        INTEGER NOT NULL DEFAULT 0,
 			avatar_url      TEXT,
-			updated_at      INTEGER NOT NULL DEFAULT 0
+			updated_at      INTEGER NOT NULL DEFAULT 0,
+			muted_until     INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS messages (
 			id              TEXT PRIMARY KEY,

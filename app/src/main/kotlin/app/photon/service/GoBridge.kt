@@ -1,19 +1,26 @@
 package app.photon.service
 
 import android.content.Context
-import android.content.pm.ApplicationInfo
 import android.util.Log
 import app.photon.data.PhotonPreferences
 import kotlinx.coroutines.flow.first
 import java.io.File
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
+/**
+ * Owns the WhatsApp bridge process. Its stdin/stdout carry the line protocol
+ * (see [WsClient]); its stderr is forwarded to logcat.
+ */
 class GoBridge(private val context: Context) {
-    private var process: Process? = null
-    val port = 8765
+    @Volatile private var process: Process? = null
 
-    suspend fun start() {
-        if (process?.isAlive == true) return
+    /**
+     * Start the bridge unless it's already running, and return the process
+     * (null if the binary is missing). Callers serialize start/stop.
+     */
+    suspend fun start(): Process? {
+        process?.takeIf { it.isAlive }?.let { return it }
 
         // The Go binary is packaged as libgobridge.so in the native libs directory.
         // This directory is executable on Android (unlike filesDir or assets).
@@ -22,7 +29,7 @@ class GoBridge(private val context: Context) {
 
         if (!binary.exists()) {
             Log.e("GoBridge", "Go bridge binary not found at ${binary.absolutePath}")
-            return
+            return null
         }
 
         val dataDir = context.filesDir.absolutePath
@@ -33,21 +40,21 @@ class GoBridge(private val context: Context) {
 
         val prefs = PhotonPreferences(context)
         val pb = ProcessBuilder(
-            bridgeArgs(binary.absolutePath, dataDir, port, prefs.maxMessages.first(), prefs.maxDays.first()),
+            bridgeArgs(binary.absolutePath, dataDir, prefs.maxMessages.first(), prefs.maxDays.first()),
         )
             .directory(context.filesDir)
-            .redirectErrorStream(true)
 
         // Go's pure-Go DNS resolver can't read Android's DNS config.
         // Force it to use Google DNS as a fallback.
         pb.environment()["GODEBUG"] = "netdns=go"
         pb.environment()["GOFLAGS"] = ""
 
-        process = pb.start()
+        val started = pb.start()
+        process = started
 
         thread(isDaemon = true, name = "gobridge-log") {
             try {
-                process?.inputStream?.bufferedReader()?.forEachLine { line ->
+                started.errorStream.bufferedReader().forEachLine { line ->
                     Log.d("GoBridge", line)
                 }
             } catch (_: Exception) {
@@ -56,11 +63,25 @@ class GoBridge(private val context: Context) {
         }
 
         Log.i("GoBridge", "Started Go bridge process from ${binary.absolutePath}")
+        return started
     }
 
+    /**
+     * Stop the bridge. Closing its stdin lets it disconnect from WhatsApp and
+     * exit on its own; it's killed if it hasn't within a couple of seconds.
+     */
     fun stop() {
-        process?.destroy()
+        val p = process ?: return
         process = null
+        try { p.outputStream.close() } catch (_: Exception) {}
+        try {
+            if (!p.waitFor(2, TimeUnit.SECONDS)) {
+                p.destroy()
+                p.waitFor(1, TimeUnit.SECONDS)
+            }
+        } catch (_: InterruptedException) {
+            p.destroy()
+        }
         Log.i("GoBridge", "Stopped Go bridge process")
     }
 
@@ -77,12 +98,29 @@ class GoBridge(private val context: Context) {
  * user's settings (the bridge otherwise falls back to 50 messages / 7 days
  * until the next set_retention).
  */
-internal fun bridgeArgs(binary: String, dataDir: String, port: Int, maxMessages: Int, maxDays: Int): List<String> =
+internal fun bridgeArgs(binary: String, dataDir: String, maxMessages: Int, maxDays: Int): List<String> =
     listOf(
         binary,
         "--data-dir", dataDir,
-        "--ws-port", port.toString(),
         "--max-messages", maxMessages.toString(),
         "--max-days", maxDays.toString(),
         "--media-ttl-mins", GoBridge.MEDIA_TTL_MINS.toString(),
     )
+
+/**
+ * Delay before restarting a bridge that exited: 1s, doubling to a 60s cap,
+ * back to 1s once a bridge has stayed up.
+ */
+class RestartBackoff(private val initialMs: Long = 1_000, private val maxMs: Long = 60_000) {
+    private var nextMs = initialMs
+
+    fun next(): Long {
+        val delay = nextMs
+        nextMs = (nextMs * 2).coerceAtMost(maxMs)
+        return delay
+    }
+
+    fun reset() {
+        nextMs = initialMs
+    }
+}
