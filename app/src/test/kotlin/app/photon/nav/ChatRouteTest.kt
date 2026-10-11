@@ -4,6 +4,8 @@ import android.content.Intent
 import android.net.Uri
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.rememberNavController
 import app.photon.data.model.Platform
@@ -66,4 +68,39 @@ class ChatRouteTest {
         assertNull(Routes.platformOf("whatsapp"), "platform names are the enum's")
         assertEquals(Platform.SMS, Routes.platformOf("SMS"))
     }
+
+    @Test
+    fun switchingPlatformLeavesOneChatListAndGatesPairing() {
+        lateinit var nav: NavHostController
+        rule.setContent {
+            PhotonTheme {
+                nav = rememberNavController()
+                PhotonNavGraph(nav)
+            }
+        }
+
+        fun pick(row: String) {
+            rule.onNodeWithText(titleNow(nav)).performClick()
+            rule.onNodeWithText(row).performClick()
+            rule.waitForIdle()
+        }
+
+        pick("SMS")
+        assertEquals(Routes.CHATS, nav.currentBackStackEntry?.destination?.route)
+        assertEquals("SMS", nav.currentBackStackEntry?.arguments?.getString("platform"))
+        assertNull(nav.previousBackStackEntry, "the old list was replaced, not stacked")
+        rule.onNodeWithText("SMS ▾").assertExists()
+
+        // No WhatsApp session has reported logged_out: its chats, not pairing.
+        pick("WHATSAPP")
+        assertEquals("WHATSAPP", nav.currentBackStackEntry?.arguments?.getString("platform"))
+
+        // Signal isn't linked here: pairing.
+        pick("SIGNAL")
+        assertEquals(Routes.SIGNAL_PAIRING, nav.currentBackStackEntry?.destination?.route)
+    }
+
+    /** The current list's title, which opens the platform picker. */
+    private fun titleNow(nav: NavHostController): String =
+        (Routes.platformOf(nav.currentBackStackEntry?.arguments?.getString("platform"))?.label ?: "All Chats") + " ▾"
 }
