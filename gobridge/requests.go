@@ -47,6 +47,8 @@ func (b *Bridge) handleRequest(ctx context.Context, msg Envelope) Envelope {
 		payload, err = b.handleResolveParticipants(msg.Payload)
 	case "reconnect":
 		payload, err = b.handleReconnect()
+	case "check_on_whatsapp":
+		payload, err = b.handleCheckOnWhatsApp(ctx, msg.Payload)
 	default:
 		err = fmt.Errorf("unknown request type: %s", msg.Type)
 	}
