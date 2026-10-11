@@ -9,7 +9,8 @@ Photon connects to WhatsApp, Signal, and SMS and presents your messages in a mon
 - **WhatsApp**: Native protocol via [whatsmeow](https://github.com/tulir/whatsmeow): text, reactions, replies, media send/receive, group chats, business chats, call notifications
 - **Signal**: Native protocol via [libsignal-service-java](https://github.com/AsamK/signal-cli) as a linked device: text, reactions, replies, media, GroupV2 chats, call notifications
 - **SMS**: Reads from Android's SMS store: view and send text messages
-- **All Chats**: Default view, merges all platforms by recency. Tap the title to switch to one platform.
+- **All Chats**: Default view, merges all platforms by recency. Tap ALL CHATS in the bottom bar to switch to one platform.
+- **New message**: Find anyone by name or number across your LP3 contacts and every platform's chats, then open their chat or start one on WhatsApp, Signal or SMS.
 
 ### Ephemeral by design
 
@@ -17,13 +18,17 @@ Messages don't live forever. Photon keeps a configurable rolling window of recen
 
 ## Installation
 
-Photon needs Android 14 or later (the LP3 runs it).
+Photon needs Android 14 or later (the LP3 runs Android 14).
 
 ```bash
 adb install -r app-release.apk
 ```
 
 `-r` upgrades an existing install in place and keeps your chats and links. Downgrading isn't supported: an older build can't open the newer Signal database.
+
+### Upgrading to 0.4.0-rc.2
+
+After installing, re-pair WhatsApp: Settings → Connections → WhatsApp → Reset, then link again. Since June (v0.3.0), Photon dropped the first message of every new WhatsApp chat, sent or received, and a re-pair brought back no messages. rc.2 fixes this, but WhatsApp only sends history when you pair, so re-pairing is how you get those messages back. You get what WhatsApp sends at pairing, within your Storage settings (default 50 messages per chat, 7 days).
 
 ## Building from source
 
@@ -64,8 +69,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 │  Android app (Kotlin/Compose, Light SDK UI)   │
 │                                               │
 │  ChatListScreen ── ChatScreen ── Contact      │
-│   (All Chats or one platform; the title opens │
-│    the platform picker; Settings top right)   │
+│   (All Chats or one platform; bottom bar:     │
+│    Settings, platform filter, New message)    │
 │        │                                      │
 │        ▼                                      │
 │  ChatBackend: WhatsApp / Signal / SMS         │
@@ -113,6 +118,9 @@ Threads follow the LightOS look: no bubbles, received messages on the left, your
 - **DMs** use the LP3 thread style. A timestamp sits above the first message of each run (a change of sender, or a gap of more than 15 minutes). Tap any other message to see its time and delivery status.
 - **Groups** use the LP2 style: a "Name  12:36" line above each run of incoming messages. Your own messages are right-aligned without a name.
 - **Calls** show as one centred line, e.g. "Missed voice call · 14:02".
+- **Long-press** a WhatsApp or Signal message for its actions, whichever apply: Reply, React (not on your own messages), Retry, Delete (in Photon only) or Delete for Everyone (after a confirm page).
+- **Attach (+)** opens a sheet with Camera (when an app on the phone can take photos), Photos and Files. The voice-note mic stays beside the text field.
+- **Photos and videos** open full screen when tapped. Save is at the top right.
 
 ## Settings
 
@@ -123,23 +131,23 @@ Organized into sub-pages:
 |---|---|---|
 | Notifications | Sound / Vibrate / Silent / Off | Sound |
 | Thumbnails | On / Off | On |
-| Scroll dial | Off / Slow / Medium / Fast | Medium |
+| Scroll Dial | Off / Slow / Medium / Fast | Medium |
 | Compose | Inline / Full screen | Inline |
 | Keyboard | System / Light | System |
 
 - **Notifications** sets how messages and calls alert. Sound, Vibrate and Silent each post through their own Android channel ("Messages", "Messages (vibrate)", "Messages (silent)"), so any system settings you made for "Messages" still apply. Upgrading turns On into Sound.
-- **Scroll dial** sets how far one turn of the dial scrolls chats and menus. Off hands the dial back to LightOS, which uses it for brightness.
-- **Compose: Full screen** follows LightOS Messages: the thread has a bottom bar with attach, voice note and compose, and compose opens a full-screen editor. Inline keeps a text field under the thread.
+- **Scroll Dial** sets how far one turn of the dial scrolls chats and menus. Off hands the dial back to LightOS, which uses it for brightness.
+- **Compose: Full screen** follows LightOS Messages: the thread has a bottom bar with attach (+), voice note and compose, and compose opens a full-screen editor. Inline keeps a text field under the thread.
 - **Keyboard: Light** is the LP3 keyboard from the Light SDK. System is the phone's installed keyboard (Gboard, for example). Tap the text field to show the keyboard; tap the thread or turn the dial to hide it.
 
 ### Storage
 | Setting | Options | Default |
 |---|---|---|
-| Messages per chat | 25 / 50 / 100 / 200 | 50 |
-| Message history | 1 / 3 / 7 / 14 / 30 days | 7 |
+| Messages per Chat | 25 / 50 / 100 / 200 | 50 |
+| Message History | 1 / 3 / 7 / 14 / 30 days | 7 |
 
 ### Connections
-Per-platform status, refresh connection, and reset (clear data + re-pair). An unlinked platform offers LINK DEVICE.
+Per-platform status, Refresh Connection, and Reset (clear data + re-pair). An unlinked platform offers Link Device.
 
 ## Current features
 
@@ -151,17 +159,19 @@ Per-platform status, refresh connection, and reset (clear data + re-pair). An un
 - [x] SMS: read conversations, send messages (shown as sending, then sent or failed), per-conversation read tracking (local)
 - [x] Calls (WhatsApp + Signal): notifications and call rows for incoming, missed, and answered or declined on another device, including group calls. Photon can't answer calls.
 - [x] Display names follow one policy everywhere: LP3 contact, then the platform's address book (WhatsApp's synced contact name, or the Signal primary's contact name), then a verified business name, then the profile or push name, then the formatted number. Raw ids are never shown, and edits in the LP3 Contacts app show within seconds.
-- [x] All Chats: default home view; tap the title to switch between All / SMS / WhatsApp / Signal
-- [x] Reply-to-message: swipe right on any WhatsApp or Signal message (hidden on SMS). Quote tap scrolls to the original.
+- [x] All Chats: default home view; tap the filter in the bottom bar to switch between All / SMS / WhatsApp / Signal
+- [x] Reply-to-message: swipe right on a WhatsApp or Signal message, or long-press → Reply. Quote tap scrolls to the original.
 - [x] Failed-send recovery (WhatsApp, Signal, SMS): a failed message reads "failed · tap to retry". WhatsApp and Signal retries preserve the wire id/timestamp so recipients dedupe, and WhatsApp retry re-uploads media too.
-- [x] Delete messages (WhatsApp + Signal): long-press a message → Delete. Own sent messages offer "delete for everyone" (WhatsApp revoke / Signal remote-delete, with a confirm tap); failed/sending/incoming messages delete locally
+- [x] Message actions (WhatsApp + Signal): long-press a message for a LightOS menu of Reply, React, Retry, Delete and Delete for Everyone, offering only what applies. Delete removes it from Photon. Your own sent messages offer Delete for Everyone (WhatsApp revoke / Signal remote delete) after a confirm page. Reactions go on other people's messages only.
+- [x] New message: find anyone by name or number across LP3 contacts and every platform's chats, then open their chat or start one on WhatsApp, Signal or SMS
+- [x] Attachments (WhatsApp + Signal): Camera (when a camera app is available), Photos (the system photo picker) and Files (documents such as PDFs)
 - [x] Voice notes: record and send on WhatsApp and Signal; incoming voice notes autoplay on open
 - [x] In-app contact editor: tap a DM's title → save/update directly via `ContactsContract` (no AOSP handoff)
 - [x] Ephemeral retention (configurable count + days) on WhatsApp and Signal, kept across bridge restarts
 - [x] Message notifications (WhatsApp + Signal; Sound, Vibrate, Silent or Off). Chats muted on your primary stay silent on both platforms, with a muted mark in the chat list. Tapping one opens that chat, and the chat on screen never gets one.
 - [x] Connection status in settings
 - [x] Reset/refresh per connection
-- [x] Light SDK look: Akkurat font, LightOS menus and top bars, haptics, monochrome
+- [x] Light SDK look: Akkurat font, LightOS menus, top and bottom bars, margins and type sizes measured against LightOS, haptics, monochrome
 - [x] Thread styles: LP3 for DMs, LP2 for groups
 - [x] Inline or full-screen compose, with the system keyboard or the LP3 keyboard
 - [x] γ (gamma) app launcher icon
@@ -190,19 +200,24 @@ This section lists open bugs and by-design limitations, one line each. Fixes wai
 - **Voice notes untested**: recording and sending are wired up for WhatsApp and Signal, but neither has been tested on device.
 - **Signal group admin**: Photon sends and receives in GroupV2 groups but can't create groups, add or remove members, rename, or leave. Changes made on other devices are picked up through the revision check on the next message.
 - **Signal group sends fan out per recipient**: Photon doesn't use sender-key distribution, so sends to large groups are slower and `GroupSendEndorsements` are skipped.
+- **Signal can only start chats with people it already knows**: New message reaches a number on Signal only when Photon already has its Signal account from the primary's contact sync or an earlier chat, because Photon doesn't use Signal's contact discovery.
 - **No Signal history**: only messages received after linking appear. Importing history needs backup/restore support.
 - **No Signal read receipts to senders**: Photon syncs read state to your own devices but never sends read receipts to message authors, because it can't see the account's read-receipt privacy setting.
 - **Partial Signal verification state**: Photon only learns verified status from verification syncs received after linking. Accepting a changed safety number in Photon doesn't mark it verified on your other devices.
 - **WhatsApp history doesn't gain new message types**: business templates, missed-call stubs and edits/revokes in rows stored before this version only appear after a re-pair, because history sync only runs at pairing.
+- **WhatsApp reach check needs WhatsApp connected**: New message can only ask WhatsApp whether a number is on it while connected, and otherwise reads "WhatsApp disconnected", except for people you already have a WhatsApp chat with.
 - **WhatsApp call-log dedupe is unverified**: it assumes a call-log message's id equals the call's id, which hasn't been confirmed.
 - **A WhatsApp contact deleted on the phone keeps its name**, because whatsmeow ignores contact removals from app state.
 - **A WhatsApp @-mention of an unknown LID stays as digits**: a mentioned member with no known number or name keeps the raw digits in the text.
 - **SMS notifications come from the system SMS app** and linger after you read the chat in Photon, because Photon isn't the default SMS app.
 - **SMS delivery reports aren't requested**: an SMS shows as sent once it leaves the phone, never as delivered.
 - **SMS retry leaves the failed copy**: a failed SMS that the system already stored is sent again as a new message, and the failed one stays in the thread, because only the default SMS app can change the SMS store.
+- **Delete only removes a message in Photon**: it doesn't sync to your primary or other linked devices. Delete for Everyone does.
+- **Camera may be unavailable**: the attachment sheet only offers Camera when an app on the LP3 handles photo capture. Photos and Files still work.
+- **Fictional UK numbers written nationally aren't recognised** (low priority): Android's number parser rejects the reserved `07700 900xxx` range unless it's written with +44, so New message offers no "Send to" row for it.
 - **The LP3 keyboard has empty space above it**: docked inline, the Light keyboard leaves about 30dp of blank space above its first row.
 - **Media re-download expires**: viewed media is deleted after 5 minutes and downloaded again on tap. That fails once WhatsApp's CDN copy expires or Signal's attachment pointer lapses (about 45 days).
-- **Dictation unavailable**: the LP3 has no built-in speech-to-text, and the framework's `RecognitionService` permission check rejected third-party recognisers with error 9 (`ERROR_INSUFFICIENT_PERMISSIONS`) even with RECORD_AUDIO granted. This hasn't been retested since the LP3 moved to Android 14+.
+- **Dictation unavailable**: the LP3 has no built-in speech-to-text, and the framework's `RecognitionService` permission check rejected third-party recognisers with error 9 (`ERROR_INSUFFICIENT_PERMISSIONS`) even with RECORD_AUDIO granted. This hasn't been retested since the LP3 moved to Android 14.
 
 ## Planned features
 
@@ -213,7 +228,6 @@ This section lists open bugs and by-design limitations, one line each. Fixes wai
 - [ ] Sticker rendering
 - [ ] Option to set Photon as default SMS app (enables writing `read`/`seen` to the Android SMS provider so read state syncs with other SMS clients; currently tracked locally via SharedPreferences)
 - [ ] Message search
-- [ ] New conversation / compose message
 
 ### Light SDK readiness
 
