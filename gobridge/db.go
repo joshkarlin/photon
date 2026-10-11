@@ -21,7 +21,8 @@ func (b *Bridge) InitMessageDB(ctx context.Context) error {
 			is_muted        INTEGER NOT NULL DEFAULT 0,
 			avatar_url      TEXT,
 			updated_at      INTEGER NOT NULL DEFAULT 0,
-			muted_until     INTEGER NOT NULL DEFAULT 0
+			muted_until     INTEGER NOT NULL DEFAULT 0,
+			name_rank       INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS messages (
 			id              TEXT PRIMARY KEY,
@@ -55,6 +56,7 @@ func (b *Bridge) InitMessageDB(ctx context.Context) error {
 			jid              TEXT NOT NULL,
 			display_name     TEXT,
 			role             TEXT DEFAULT 'member',
+			name_rank        INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (conversation_jid, jid)
 		)`,
 	}
@@ -79,6 +81,7 @@ func (b *Bridge) InitMessageDB(ctx context.Context) error {
 var migrations = []func(b *Bridge, ctx context.Context, tx *sql.Tx) error{
 	(*Bridge).migrateMutedUntil,
 	(*Bridge).migrateIncomingReadState,
+	(*Bridge).migrateNameRanks,
 }
 
 // migrateMessageDB runs the migrations this database hasn't had yet.
@@ -141,6 +144,61 @@ func (b *Bridge) migrateIncomingReadState(ctx context.Context, tx *sql.Tx) error
 			WHERE m.n > COALESCE(c.unread_count, 0)
 		)`)
 	return err
+}
+
+// migrateNameRanks adds name_rank to conversations and participants: how
+// strongly each stored name is backed (see rankNone and the ranks after it),
+// so a weaker source never replaces a stronger one. Names stored before it
+// start at rankNone, which any named write replaces, and the reconcile after
+// connect re-ranks every DM and group member from whatsmeow's contact store.
+// A name that is really a number or a JID (the "+<number>" an @lid DM was
+// named with, say) is cleared, as Kotlin shows the number itself.
+func (b *Bridge) migrateNameRanks(ctx context.Context, tx *sql.Tx) error {
+	for _, table := range []string{"conversations", "participants"} {
+		if _, err := addColumnIfMissing(ctx, tx, table, "name_rank", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
+	}
+	for _, t := range []struct{ table, col string }{{"conversations", "name"}, {"participants", "display_name"}} {
+		if err := cleanStoredNames(ctx, tx, t.table, t.col); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// cleanStoredNames puts every name in table.col through cleanName.
+func cleanStoredNames(ctx context.Context, tx *sql.Tx, table, col string) error {
+	rows, err := tx.QueryContext(ctx, `SELECT _rowid_, `+col+` FROM `+table+` WHERE COALESCE(`+col+`, '') <> ''`)
+	if err != nil {
+		return err
+	}
+	type fix struct {
+		rowid int64
+		name  string
+	}
+	var fixes []fix
+	for rows.Next() {
+		var f fix
+		var name string
+		if err := rows.Scan(&f.rowid, &name); err != nil {
+			rows.Close()
+			return err
+		}
+		if f.name = cleanName(name); f.name != name {
+			fixes = append(fixes, f)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, f := range fixes {
+		if _, err := tx.ExecContext(ctx, `UPDATE `+table+` SET `+col+` = ?, name_rank = 0 WHERE _rowid_ = ?`, f.name, f.rowid); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // addColumnIfMissing adds a column unless the table already has it.

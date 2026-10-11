@@ -3,133 +3,156 @@ package main
 import (
 	"context"
 	"strings"
+	"unicode"
 
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
 
-func (b *Bridge) handlePushName(evt *events.PushName) {
-	// evt.JID.String() already carries the server suffix and may be a LID —
-	// resolve it so the key matches the conversation row.
-	jid := b.resolveLIDJID(evt.JID).String()
-	name := evt.NewPushName
-	if name == "" {
-		return
-	}
-	// Push names are the lowest-priority source: only fill in a name if the
-	// conversation currently has none (don't overwrite contact names).
-	b.UpdateConversationNameIfEmpty(jid, name)
-	b.log.Debugf("Push name update: %s -> %s", jid, name)
+// The bridge stores, for every conversation and group member, the best name
+// WhatsApp itself gives them, or "". Kotlin puts the user's LP3 phone contacts
+// above it and falls back to the formatted number, so a stored name is never
+// a number. Each stored name keeps the rank of its source, and a write only
+// replaces a name of lower or equal rank.
+const (
+	rankNone     = 0           // no name, or one stored before ranks were kept
+	rankPush     = 1           // the person's own push name, or history sync's name for a chat
+	rankBusiness = 2           // a business's verified name
+	rankContact  = 3           // the user's address-book name for them
+	rankSubject  = rankContact // a group's subject, the only name a group has
+)
+
+// rankedName is a name to store and how strongly its source backs it.
+type rankedName struct {
+	name string
+	rank int
+	// stale marks a name that may be older than the stored one (history
+	// sync, which can land long after live messages): it fills a missing or
+	// weaker name but never replaces one of equal rank.
+	stale bool
 }
 
-// BackfillContactNames reconciles DM conversation names with whatsmeow's
-// contact store. Runs when app state sync patches land (contacts arrive via
-// app state) and once as a delayed fallback after connect.
-//
-// Two passes in one loop:
-//   - Conversations whose contact has an address book FullName are upgraded
-//     to it even if they already carry a (push) name — the address book is
-//     authoritative and this repairs rows named before contacts synced.
-//   - Unnamed conversations are filled from the best remaining source
-//     (PushName, then BusinessName).
-func (b *Bridge) BackfillContactNames() {
-	contacts, err := b.client.Store.Contacts.GetAllContacts(context.Background())
-	if err != nil {
-		contacts = make(map[types.JID]types.ContactInfo)
+// cleanName is a name as it may be stored: trimmed, and "" when it is really
+// a phone number, a JID or WhatsApp's "-" placeholder.
+func cleanName(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "-" || isNumberLike(s) || isJIDLike(s) {
+		return ""
 	}
-	b.log.Infof("Backfill: %d contacts in store", len(contacts))
+	return s
+}
 
+// isNumberLike reports text made only of digits and what numbers are written
+// with: + - ( ) . spaces, and the invisible direction marks WhatsApp wraps
+// numbers in.
+func isNumberLike(s string) bool {
+	digits := false
+	for _, r := range s {
+		switch {
+		case unicode.IsDigit(r):
+			digits = true
+		case strings.ContainsRune("+-().", r), unicode.IsSpace(r), unicode.Is(unicode.Cf, r):
+		default:
+			return false
+		}
+	}
+	return digits
+}
+
+// isJIDLike reports text that is a WhatsApp JID.
+func isJIDLike(s string) bool {
+	at := strings.LastIndexByte(s, '@')
+	if at < 0 {
+		return false
+	}
+	switch s[at+1:] {
+	case types.DefaultUserServer, types.HiddenUserServer, types.GroupServer, types.LegacyUserServer,
+		types.BroadcastServer, types.NewsletterServer:
+		return true
+	}
+	return false
+}
+
+// personName is the best name WhatsApp gives a person: the user's address
+// book entry (synced from the primary), then a business's verified name,
+// then their push name. verifiedName and pushName are those a live message
+// carried ("" if none, or if the user sent it): they're newer than the
+// contact store's copies, which whatsmeow writes asynchronously.
+func personName(contact types.ContactInfo, verifiedName, pushName string) rankedName {
+	if n := firstNonEmpty(cleanName(contact.FullName), cleanName(contact.FirstName)); n != "" {
+		return rankedName{name: n, rank: rankContact}
+	}
+	if n := firstNonEmpty(cleanName(verifiedName), cleanName(contact.BusinessName)); n != "" {
+		return rankedName{name: n, rank: rankBusiness}
+	}
+	if n := firstNonEmpty(cleanName(pushName), cleanName(contact.PushName)); n != "" {
+		return rankedName{name: n, rank: rankPush}
+	}
+	return rankedName{}
+}
+
+// better returns whichever name ranks higher, a on a tie.
+func better(a, b rankedName) rankedName {
+	if b.name != "" && (a.name == "" || b.rank > a.rank) {
+		return b
+	}
+	return a
+}
+
+// handlePushName applies a changed push name to the person's DM. The rank
+// rules keep an address-book or business name.
+func (b *Bridge) handlePushName(evt *events.PushName) {
+	user := evt.JID.ToNonAD()
+	resolved := b.resolveLIDJID(user)
+	b.SetConversationName(resolved.String(), personName(b.lookupContact(resolved, user), "", evt.NewPushName))
+}
+
+// BackfillContactNames re-applies every DM's name from whatsmeow's contact
+// store, as the reconcile after connect and after a full app-state sync
+// (which stores contacts without an event per contact). The rank rules make
+// it upgrade names and never downgrade them; at equal rank the store, which
+// holds the current value, wins.
+func (b *Bridge) BackfillContactNames() {
 	// @lid rows are DMs whose phone number isn't known yet; whatsmeow keys
 	// their push/business names by the LID. Read everything before writing
 	// (a cursor held open across the updates deadlocks a single connection).
-	type convName struct{ jid, name string }
-	var convs []convName
-	rows, err := b.msgDB.Query(`SELECT jid, COALESCE(name, '') FROM conversations WHERE jid LIKE '%@s.whatsapp.net' OR jid LIKE '%@lid'`)
+	var jids []string
+	rows, err := b.msgDB.Query(`SELECT jid FROM conversations WHERE jid LIKE '%@s.whatsapp.net' OR jid LIKE '%@lid'`)
 	if err != nil {
 		return
 	}
 	for rows.Next() {
-		var c convName
-		if rows.Scan(&c.jid, &c.name) == nil {
-			convs = append(convs, c)
+		var jid string
+		if rows.Scan(&jid) == nil {
+			jids = append(jids, jid)
 		}
 	}
 	rows.Close()
 
 	updated := 0
-	for _, c := range convs {
-		parsedJID, parseErr := types.ParseJID(c.jid)
-		if parseErr != nil {
+	for _, jid := range jids {
+		parsed, err := types.ParseJID(jid)
+		if err != nil {
 			continue
 		}
-		contact, ok := contacts[parsedJID]
-		if !ok {
-			// Fallback: single lookup under the phone and LID keys (covers
-			// stores where GetAllContacts lags behind individual sync entries).
-			contact = b.lookupContact(b.resolveLIDJID(parsedJID), parsedJID)
-		}
-
-		name, authoritative := bestContactName(contact, "")
-		if !authoritative && c.name != "" {
-			continue // already named and nothing better than a push name — leave it
-		}
-
-		if name != "" && name != c.name {
-			b.UpdateConversationName(c.jid, name)
+		if b.SetConversationName(jid, personName(b.lookupContact(b.resolveLIDJID(parsed), parsed), "", "")) {
 			updated++
 		}
 	}
-
 	b.log.Infof("Backfill: updated %d contact names", updated)
 	if updated > 0 {
 		b.BroadcastEvent("conversation_updated", struct{}{})
 	}
 }
 
-// bestContactName picks a DM display name. The user's address book FullName
-// (synced from the primary device) wins, then a business's verified name
-// (WhatsApp shows it in place of the push name); both are authoritative —
-// they may overwrite an existing name. Push names (self-chosen, mutable) only
-// fill in when there's nothing better; eventPushName is the push name carried
-// by a live message event ("" when not applicable, e.g. our own messages).
-func bestContactName(contact types.ContactInfo, eventPushName string) (name string, authoritative bool) {
-	switch {
-	case contact.FullName != "":
-		return contact.FullName, true
-	case contact.BusinessName != "":
-		return contact.BusinessName, true
-	case eventPushName != "":
-		return eventPushName, false
-	case contact.PushName != "":
-		return contact.PushName, false
-	}
-	return "", false
-}
-
-// dmName is bestContactName for a live DM, with the verified business name
-// the message itself carries — whatsmeow stores it in the contact store
-// asynchronously, so the first message from a business can predate it there.
-func dmName(contact types.ContactInfo, verifiedName, eventPushName string) (name string, authoritative bool) {
-	if contact.FullName == "" && verifiedName != "" {
-		return verifiedName, true
-	}
-	return bestContactName(contact, eventPushName)
-}
-
-// handleBusinessName applies a business's (changed) verified name to its DM,
-// unless the user's address book names it.
+// handleBusinessName applies a business's (changed) verified name to its DM.
+// The rank rules keep an address-book name.
 func (b *Bridge) handleBusinessName(evt *events.BusinessName) {
-	if evt.NewBusinessName == "" {
-		return
-	}
 	user := evt.JID.ToNonAD()
 	resolved := b.resolveLIDJID(user)
-	if b.lookupContact(resolved, user).FullName != "" {
-		return
-	}
 	jid := resolved.String()
-	if b.UpdateConversationName(jid, evt.NewBusinessName) {
+	if b.SetConversationName(jid, personName(b.lookupContact(resolved, user), evt.NewBusinessName, "")) {
 		b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: jid})
 	}
 }
@@ -167,8 +190,7 @@ func (b *Bridge) resolveMentions(msg *waE2E.Message, convJID, text string) strin
 		if name := b.ParticipantName(convJID, resolved.String()); name != "" {
 			return name
 		}
-		name, _ := bestContactName(b.lookupContact(resolved, jid), "")
-		return name
+		return personName(b.lookupContact(resolved, jid), "", "").name
 	})
 }
 

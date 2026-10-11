@@ -131,7 +131,7 @@ func (b *Bridge) UploadAndSend(jid, filePath, mimeType, caption, replyToID strin
 		IsFromMe:        true,
 		Status:          "sending",
 	})
-	b.UpsertConversation(jid, "", id, ts)
+	b.UpsertConversation(jid, rankedName{}, id, ts)
 	b.BroadcastEvent("new_message", NewMessageEvent{
 		ConversationJID: jid, MessageID: id, TextBody: caption,
 		ContentType: contentType, IsFromMe: true,

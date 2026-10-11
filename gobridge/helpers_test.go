@@ -131,3 +131,17 @@ func textBody(t *testing.T, b *Bridge, id string) string {
 }
 
 func nullString(s string) sql.NullString { return sql.NullString{String: s, Valid: s != ""} }
+
+// named is a name as a test stores it directly: a push name, the weakest
+// source, unless the test says otherwise.
+func named(name string) rankedName { return rankedName{name: name, rank: rankPush} }
+
+// conversationRank reads a conversation's stored name and its rank.
+func conversationRank(t *testing.T, b *Bridge, jid string) rankedName {
+	t.Helper()
+	var n rankedName
+	if err := b.msgDB.QueryRow(`SELECT COALESCE(name, ''), name_rank FROM conversations WHERE jid = ?`, jid).Scan(&n.name, &n.rank); err != nil {
+		t.Fatalf("name for %s: %v", jid, err)
+	}
+	return n
+}

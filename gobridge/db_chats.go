@@ -7,27 +7,74 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-// UpsertConversation creates or updates a conversation record. A name only
-// fills a missing one (UpdateConversationName overwrites), and the preview
-// moves only forward. is_group always follows the JID's server.
-func (b *Bridge) UpsertConversation(jid, name, lastMsgID string, lastTS int64) {
+// UpsertConversation creates or updates a conversation record. The name is
+// written as setConversationName writes it, and the preview moves only
+// forward. is_group always follows the JID's server.
+func (b *Bridge) UpsertConversation(jid string, name rankedName, lastMsgID string, lastTS int64) {
 	if err := b.upsertConversation(b.msgDB, jid, name, lastMsgID, lastTS); err != nil {
 		b.log.Errorf("Failed to upsert conversation %s: %v", jid, err)
 	}
 }
 
-func (b *Bridge) upsertConversation(ex execer, jid, name, lastMsgID string, lastTS int64) error {
+func (b *Bridge) upsertConversation(ex execer, jid string, name rankedName, lastMsgID string, lastTS int64) error {
 	_, err := ex.Exec(`
 		INSERT INTO conversations (jid, name, is_group, last_message_id, last_timestamp, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		VALUES (?, '', ?, ?, ?, ?)
 		ON CONFLICT(jid) DO UPDATE SET
-			name = COALESCE(NULLIF(excluded.name, ''), conversations.name),
 			is_group = excluded.is_group,
 			last_message_id = CASE WHEN excluded.last_timestamp > conversations.last_timestamp THEN excluded.last_message_id ELSE conversations.last_message_id END,
 			last_timestamp = MAX(excluded.last_timestamp, conversations.last_timestamp),
 			updated_at = excluded.updated_at
-	`, jid, name, isGroupJID(jid), lastMsgID, lastTS, lastTS)
+	`, jid, isGroupJID(jid), lastMsgID, lastTS, lastTS)
+	if err != nil {
+		return err
+	}
+	_, err = setConversationName(ex, jid, name)
 	return err
+}
+
+// nameWriteAllowed is the condition under which a name write (args from
+// rankedName.writeArgs) replaces the name a row holds in col: something
+// would change, and the row's name is missing, ranks lower, or ranks the
+// same and the write isn't stale.
+func nameWriteAllowed(col string) string {
+	return `(` + col + ` IS NOT ? OR name_rank <> ?) AND (COALESCE(` + col + `, '') = '' OR name_rank < ? OR (name_rank = ? AND ?))`
+}
+
+func (n rankedName) writeArgs() []interface{} {
+	return []interface{}{n.name, n.rank, n.rank, n.rank, !n.stale}
+}
+
+// setConversationName stores a conversation's name if it beats the stored
+// one (see nameWriteAllowed). An empty name never clears one. Returns whether
+// the row changed.
+func setConversationName(ex execer, jid string, n rankedName) (bool, error) {
+	if n.name == "" {
+		return false, nil
+	}
+	args := append([]interface{}{n.name, n.rank, jid}, n.writeArgs()...)
+	res, err := ex.Exec(`UPDATE conversations SET name = ?, name_rank = ? WHERE jid = ? AND `+nameWriteAllowed("name"), args...)
+	if err != nil {
+		return false, err
+	}
+	changed, _ := res.RowsAffected()
+	return changed > 0, nil
+}
+
+// SetConversationName is setConversationName on the message DB.
+func (b *Bridge) SetConversationName(jid string, n rankedName) bool {
+	changed, err := setConversationName(b.msgDB, jid, n)
+	if err != nil {
+		b.log.Errorf("Failed to update name for %s: %v", jid, err)
+	}
+	return changed
+}
+
+// storedConversationName is a conversation's stored name and its rank.
+func (b *Bridge) storedConversationName(jid string) rankedName {
+	var n rankedName
+	b.msgDB.QueryRow(`SELECT COALESCE(name, ''), name_rank FROM conversations WHERE jid = ?`, jid).Scan(&n.name, &n.rank)
+	return n
 }
 
 // isGroupJID reports whether a chat is a group, which its JID's server alone
@@ -128,46 +175,52 @@ func updateMute(ex execer, jid string, mutedUntil int64) error {
 	return err
 }
 
-// UpsertParticipant inserts or updates a group participant.
-func (b *Bridge) UpsertParticipant(convJID, jid, displayName, role string) error {
-	_, err := b.msgDB.Exec(`
-		INSERT INTO participants (conversation_jid, jid, display_name, role)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(conversation_jid, jid) DO UPDATE SET
-			display_name = COALESCE(NULLIF(excluded.display_name, ''), participants.display_name),
-			role = excluded.role
-	`, convJID, jid, displayName, role)
-	return err
+// UpsertParticipant names a group member, adding their row if it's new. The
+// name replaces a stored one as in setConversationName; an empty name adds
+// nothing. Returns whether anything changed.
+func (b *Bridge) UpsertParticipant(convJID, jid string, n rankedName) bool {
+	changed, err := upsertParticipant(b.msgDB, convJID, jid, n)
+	if err != nil {
+		b.log.Errorf("Failed to name participant %s in %s: %v", jid, convJID, err)
+	}
+	return changed
+}
+
+func upsertParticipant(ex execer, convJID, jid string, n rankedName) (bool, error) {
+	if n.name == "" {
+		return false, nil
+	}
+	res, err := ex.Exec(`INSERT OR IGNORE INTO participants (conversation_jid, jid, display_name, name_rank)
+		VALUES (?, ?, ?, ?)`, convJID, jid, n.name, n.rank)
+	if err != nil {
+		return false, err
+	}
+	if inserted, _ := res.RowsAffected(); inserted > 0 {
+		return true, nil
+	}
+	args := append([]interface{}{n.name, n.rank, convJID, jid}, n.writeArgs()...)
+	res, err = ex.Exec(`UPDATE participants SET display_name = ?, name_rank = ?
+		WHERE conversation_jid = ? AND jid = ? AND `+nameWriteAllowed("display_name"), args...)
+	if err != nil {
+		return false, err
+	}
+	changed, _ := res.RowsAffected()
+	return changed > 0, nil
 }
 
 // ParticipantName returns a participant's stored display name in a conversation
 // (the value that drives the per-message sender label), or "" if absent/blank.
 // Reused by mention resolution so a mention reads identically to the label.
 func (b *Bridge) ParticipantName(convJID, jid string) string {
-	var name string
+	return b.storedParticipantName(convJID, jid).name
+}
+
+// storedParticipantName is a participant's stored name and its rank.
+func (b *Bridge) storedParticipantName(convJID, jid string) rankedName {
+	var n rankedName
 	b.msgDB.QueryRow(
-		`SELECT COALESCE(display_name, '') FROM participants WHERE conversation_jid = ? AND jid = ?`,
+		`SELECT COALESCE(display_name, ''), name_rank FROM participants WHERE conversation_jid = ? AND jid = ?`,
 		convJID, jid,
-	).Scan(&name)
-	return name
-}
-
-// UpdateConversationName updates a conversation's display name. Returns
-// whether the stored name changed.
-func (b *Bridge) UpdateConversationName(jid, name string) bool {
-	res, err := b.msgDB.Exec(`UPDATE conversations SET name = ? WHERE jid = ? AND name IS NOT ?`, name, jid, name)
-	if err != nil {
-		b.log.Errorf("Failed to update name for %s: %v", jid, err)
-		return false
-	}
-	n, _ := res.RowsAffected()
-	return n > 0
-}
-
-// UpdateConversationNameIfEmpty only sets the name if it's currently empty/null.
-func (b *Bridge) UpdateConversationNameIfEmpty(jid, name string) {
-	_, err := b.msgDB.Exec(`UPDATE conversations SET name = ? WHERE jid = ? AND (name IS NULL OR name = '')`, name, jid)
-	if err != nil {
-		b.log.Errorf("Failed to update name for %s: %v", jid, err)
-	}
+	).Scan(&n.name, &n.rank)
+	return n
 }

@@ -22,7 +22,7 @@ func newTestBridge(t *testing.T) *Bridge {
 	// database/sql treats each ":memory:" connection as a separate DB; pin to a
 	// single connection so every query hits the same one.
 	db.SetMaxOpenConns(1)
-	b := &Bridge{msgDB: db, log: waLog.Noop}
+	b := &Bridge{msgDB: db, log: waLog.Noop, groupNames: make(map[string]cachedGroupName)}
 	if err := b.InitMessageDB(context.Background()); err != nil {
 		t.Fatalf("init schema: %v", err)
 	}
@@ -30,49 +30,108 @@ func newTestBridge(t *testing.T) *Bridge {
 	return b
 }
 
-func TestBestContactName(t *testing.T) {
+func TestPersonName(t *testing.T) {
 	cases := []struct {
-		name          string
-		contact       types.ContactInfo
-		eventPushName string
-		wantName      string
-		wantAuth      bool
+		name     string
+		contact  types.ContactInfo
+		verified string
+		push     string
+		want     rankedName
 	}{
-		{"address book wins over everything", types.ContactInfo{FullName: "Alice", PushName: "ally", BusinessName: "ACME"}, "live", "Alice", true},
-		{"event push name beats stored push name", types.ContactInfo{PushName: "stored"}, "live", "live", false},
-		{"stored push name when no event name", types.ContactInfo{PushName: "stored"}, "", "stored", false},
-		{"verified business name beats push names", types.ContactInfo{BusinessName: "ACME", PushName: "acme"}, "live", "ACME", true},
-		{"business name alone", types.ContactInfo{BusinessName: "ACME"}, "", "ACME", true},
-		{"nothing known", types.ContactInfo{}, "", "", false},
+		{"address book wins over everything", types.ContactInfo{FullName: "Alice", PushName: "ally", BusinessName: "ACME"}, "ACME Ltd", "live", rankedName{name: "Alice", rank: rankContact}},
+		{"a first name alone is the address book's", types.ContactInfo{FirstName: "Al", PushName: "ally"}, "", "", rankedName{name: "Al", rank: rankContact}},
+		{"the message's verified name beats the store's", types.ContactInfo{BusinessName: "ACME"}, "ACME Ltd", "", rankedName{name: "ACME Ltd", rank: rankBusiness}},
+		{"verified business name beats push names", types.ContactInfo{BusinessName: "ACME", PushName: "acme"}, "", "live", rankedName{name: "ACME", rank: rankBusiness}},
+		{"the message's push name beats the store's", types.ContactInfo{PushName: "stored"}, "", "live", rankedName{name: "live", rank: rankPush}},
+		{"stored push name when the message has none", types.ContactInfo{PushName: "stored"}, "", "", rankedName{name: "stored", rank: rankPush}},
+		{"a number is no name", types.ContactInfo{FullName: "+44 7700 900001", PushName: "ally"}, "", "", rankedName{name: "ally", rank: rankPush}},
+		{"nothing known", types.ContactInfo{}, "", "", rankedName{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gotName, gotAuth := bestContactName(tc.contact, tc.eventPushName)
-			if gotName != tc.wantName || gotAuth != tc.wantAuth {
-				t.Errorf("bestContactName = (%q, %v), want (%q, %v)", gotName, gotAuth, tc.wantName, tc.wantAuth)
+			if got := personName(tc.contact, tc.verified, tc.push); got != tc.want {
+				t.Errorf("personName = %+v, want %+v", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestUpsertParticipantCoalesce(t *testing.T) {
-	b := newTestBridge(t)
-	const grp = "123@g.us"
-	const jid = "a@s.whatsapp.net"
+func TestCleanName(t *testing.T) {
+	for in, want := range map[string]string{
+		"  Alice  ":                   "Alice",
+		"+44 7700 900001":             "",
+		"\u202a+44 7700 900001\u202c": "",
+		"(020) 7946-0018":             "",
+		"447700900001":                "",
+		"447700900001@s.whatsapp.net": "",
+		"11223344@lid":                "",
+		"-":                           "",
+		"Flat 4":                      "Flat 4",
+		"R2-D2":                       "R2-D2",
+		"bob@example.com":             "bob@example.com",
+	} {
+		if got := cleanName(in); got != want {
+			t.Errorf("cleanName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
 
-	b.UpsertParticipant(grp, jid, "Alice", "member")
-	// An empty name must NOT clobber an existing name.
-	b.UpsertParticipant(grp, jid, "", "member")
-	if got := participantNames(t, b, grp)[jid]; got != "Alice" {
-		t.Errorf("after empty upsert = %q, want Alice (empty must not clobber)", got)
+// A name write replaces a stored name of lower rank, or of equal rank unless
+// it's stale (history), and never clears one.
+func TestNameRanks(t *testing.T) {
+	const dm = "447700900001@s.whatsapp.net"
+	const grp = "123@g.us"
+	steps := []struct {
+		write rankedName
+		want  rankedName
+	}{
+		{rankedName{name: "ally", rank: rankPush}, rankedName{name: "ally", rank: rankPush}},
+		{rankedName{name: "ally2", rank: rankPush}, rankedName{name: "ally2", rank: rankPush}}, // newer push name
+		{rankedName{name: "old ally", rank: rankPush, stale: true}, rankedName{name: "ally2", rank: rankPush}},
+		{rankedName{name: "ACME", rank: rankBusiness}, rankedName{name: "ACME", rank: rankBusiness}},
+		{rankedName{name: "ally3", rank: rankPush}, rankedName{name: "ACME", rank: rankBusiness}},
+		{rankedName{name: "Alice", rank: rankContact, stale: true}, rankedName{name: "Alice", rank: rankContact}}, // stale still upgrades
+		{rankedName{name: "ACME Ltd", rank: rankBusiness}, rankedName{name: "Alice", rank: rankContact}},
+		{rankedName{}, rankedName{name: "Alice", rank: rankContact}},
+		{rankedName{name: "Alice Smith", rank: rankContact}, rankedName{name: "Alice Smith", rank: rankContact}}, // renamed
 	}
-	// A non-empty name overwrites (this is what lets a real name replace a
-	// placeholder, and — the bug we fixed — would let a number clobber a name,
-	// which is why the number paths were removed at the call sites).
-	b.UpsertParticipant(grp, jid, "Alice Smith", "member")
-	if got := participantNames(t, b, grp)[jid]; got != "Alice Smith" {
-		t.Errorf("after rename = %q, want Alice Smith", got)
-	}
+
+	t.Run("conversation", func(t *testing.T) {
+		b := newTestBridge(t)
+		b.UpsertConversation(dm, rankedName{}, "m1", 100)
+		for i, st := range steps {
+			b.UpsertConversation(dm, st.write, "m1", 100)
+			if got := conversationRank(t, b, dm); got != st.want {
+				t.Fatalf("step %d: after %+v, stored %+v, want %+v", i, st.write, got, st.want)
+			}
+		}
+	})
+	t.Run("participant", func(t *testing.T) {
+		b := newTestBridge(t)
+		for i, st := range steps {
+			b.UpsertParticipant(grp, dm, st.write)
+			if got := b.storedParticipantName(grp, dm); got != st.want {
+				t.Fatalf("step %d: after %+v, stored %+v, want %+v", i, st.write, got, st.want)
+			}
+		}
+	})
+	t.Run("a stale name fills a missing one", func(t *testing.T) {
+		b := newTestBridge(t)
+		b.UpsertConversation(dm, rankedName{}, "m1", 100)
+		b.UpsertConversation(dm, rankedName{name: "ally", rank: rankPush, stale: true}, "m1", 100)
+		if got := conversationRank(t, b, dm); got.name != "ally" {
+			t.Errorf("stored %+v, want the stale name filled in", got)
+		}
+	})
+	t.Run("an unranked name from an older build is replaced", func(t *testing.T) {
+		b := newTestBridge(t)
+		b.UpsertConversation(dm, rankedName{}, "m1", 100)
+		b.msgDB.Exec(`UPDATE conversations SET name = 'legacy', name_rank = 0 WHERE jid = ?`, dm)
+		b.UpsertConversation(dm, rankedName{name: "ally", rank: rankPush, stale: true}, "m1", 100)
+		if got := conversationRank(t, b, dm); got.name != "ally" {
+			t.Errorf("stored %+v, want the legacy name replaced", got)
+		}
+	})
 }
 
 func TestCanonicalSenderJID(t *testing.T) {
@@ -101,7 +160,7 @@ func TestCanonicalSenderJID(t *testing.T) {
 func TestSendersForMessages(t *testing.T) {
 	b := newTestBridge(t)
 	const grp = "123@g.us"
-	b.UpsertConversation(grp, "Group", "", 0)
+	b.UpsertConversation(grp, named("Group"), "", 0)
 	rows := []*MessageRow{
 		{ID: "m1", ConversationJID: grp, SenderJID: "a@s.whatsapp.net", Timestamp: 1, ContentType: "text"},
 		{ID: "m2", ConversationJID: grp, SenderJID: "b@s.whatsapp.net", Timestamp: 2, ContentType: "text"},
@@ -122,8 +181,8 @@ func TestPruneMessages_capsPerConversationAndRemovesEmptyRows(t *testing.T) {
 	b := newTestBridge(t)
 	b.retention = RetentionConfig{MaxMessages: 2, MaxDays: 0}
 
-	b.UpsertConversation("chat@s.whatsapp.net", "Alice", "", 0)
-	b.UpsertConversation("ghost@s.whatsapp.net", "Ghost", "", 0) // no messages
+	b.UpsertConversation("chat@s.whatsapp.net", named("Alice"), "", 0)
+	b.UpsertConversation("ghost@s.whatsapp.net", named("Ghost"), "", 0) // no messages
 	if err := b.InsertMessages([]*MessageRow{
 		{ID: "m1", ConversationJID: "chat@s.whatsapp.net", SenderJID: "a", Timestamp: 1, ContentType: "text"},
 		{ID: "m2", ConversationJID: "chat@s.whatsapp.net", SenderJID: "a", Timestamp: 2, ContentType: "text"},
@@ -166,9 +225,9 @@ func TestPruneMessages_capsPerConversationAndRemovesEmptyRows(t *testing.T) {
 func TestConversation_isGroupFollowsTheJID(t *testing.T) {
 	b := newTestBridge(t)
 	b.UpdateMute("123-456@g.us", -1)
-	b.UpsertConversation("123-456@g.us", "", "m1", 1000)
-	b.UpsertConversation("789@s.whatsapp.net", "Bob", "dm1", 5000)
-	b.UpsertConversation("789@s.whatsapp.net", "", "dm2", 6000)
+	b.UpsertConversation("123-456@g.us", rankedName{}, "m1", 1000)
+	b.UpsertConversation("789@s.whatsapp.net", named("Bob"), "dm1", 5000)
+	b.UpsertConversation("789@s.whatsapp.net", rankedName{}, "dm2", 6000)
 	b.UpdateMute("999@s.whatsapp.net", -1)
 
 	isGroup := func(jid string) int {
@@ -182,7 +241,7 @@ func TestConversation_isGroupFollowsTheJID(t *testing.T) {
 
 	// A row an older build got wrong is put right by the chat's next write.
 	b.msgDB.Exec(`UPDATE conversations SET is_group = 0 WHERE jid = '123-456@g.us'`)
-	b.UpsertConversation("123-456@g.us", "", "m2", 2000)
+	b.UpsertConversation("123-456@g.us", rankedName{}, "m2", 2000)
 	if got := isGroup("123-456@g.us"); got != 1 {
 		t.Errorf("stale is_group = %d after the next write, want 1", got)
 	}
@@ -191,7 +250,7 @@ func TestConversation_isGroupFollowsTheJID(t *testing.T) {
 func TestDeleteMessageRow_movesThePreviewBack(t *testing.T) {
 	b := newTestBridge(t)
 	const jid = "789@s.whatsapp.net"
-	b.UpsertConversation(jid, "Bob", "m2", 200)
+	b.UpsertConversation(jid, named("Bob"), "m2", 200)
 	b.InsertMessages([]*MessageRow{
 		{ID: "m1", ConversationJID: jid, SenderJID: jid, Timestamp: 100, ContentType: "text"},
 		{ID: "m2", ConversationJID: jid, SenderJID: "me", Timestamp: 200, ContentType: "text", IsFromMe: true},
