@@ -15,6 +15,7 @@ import app.photon.ui.chat.ChatListScreen
 import app.photon.ui.chat.ChatScreen
 import app.photon.ui.contact.ContactScreen
 import app.photon.ui.home.PlatformsScreen
+import app.photon.ui.newmessage.NewMessageScreen
 import app.photon.ui.settings.SettingsScreen
 import app.photon.ui.signal.SignalPairingScreen
 import app.photon.ui.whatsapp.PairingScreen
@@ -138,6 +139,12 @@ fun PhotonNavGraph(
             ContactScreen(
                 phone = phone,
                 displayName = name,
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable(Routes.NEW_MESSAGE) {
+            NewMessageScreen(
+                onOpenChat = navController::openChatFromNewMessage,
                 onBack = { navController.popBackStack() },
             )
         }
