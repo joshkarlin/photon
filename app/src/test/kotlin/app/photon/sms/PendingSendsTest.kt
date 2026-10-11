@@ -20,49 +20,64 @@ class PendingSendsTest {
         status = if (fromMe) MessageStatus.SENT else MessageStatus.READ,
     )
 
+    private fun shown(stored: List<Message> = emptyList()) = sends.messages(chat, stored)
+
     @Test
-    fun aMultipartSendSettlesOnItsLastPartAndFailsIfAnyPartDid() {
-        val id = sends.add(chat, chat, "long", nowMillis = 10_000)
+    fun aSendIsForgottenOnceEveryPartHasReported() {
+        val id = sends.add(chat, chat, "long", nowMillis = 10_000, newestRowId = 0)
         sends.submitted(id, parts = 3)
-        assertFalse(sends.partSent(id, ok = true))
-        assertFalse(sends.partSent(id, ok = false))
-        assertTrue(sends.partSent(id, ok = true))
-        assertEquals(MessageStatus.FAILED, sends.messages(chat, emptyList()).single().status)
-        assertEquals(chat to "long", sends.retryable(id))
-        // A late result for a settled send changes nothing.
-        assertFalse(sends.partSent(id, ok = true))
+        assertFalse(sends.partSent(id))
+        assertFalse(sends.partSent(id))
+        assertEquals(MessageStatus.SENDING, shown().single().status)
+        assertTrue(sends.partSent(id))
+        assertEquals(emptyList(), shown(), "Android has stored it by now")
+        // A late report for a forgotten send changes nothing.
+        assertFalse(sends.partSent(id))
     }
 
     @Test
-    fun onlyAFailedSendIsRetryable() {
-        val id = sends.add(chat, chat, "hi", nowMillis = 10_000)
+    fun aRefusedSendShowsFailedAndIsRetriedOnceAsItself() {
+        val id = sends.add(chat, chat, "hi", nowMillis = 10_000, newestRowId = 0)
+        sends.failed(id)
+        assertEquals(MessageStatus.FAILED, shown().single().status)
+
+        assertEquals(chat to "hi", sends.retry(id))
+        assertNull(sends.retry(id), "a second tap doesn't send it twice")
+        assertEquals(MessageStatus.SENDING, shown().single().status)
+    }
+
+    @Test
+    fun onlyAFailedSendCanBeRetried() {
+        val id = sends.add(chat, chat, "hi", nowMillis = 10_000, newestRowId = 0)
         sends.submitted(id, parts = 1)
-        assertNull(sends.retryable(id))
-        sends.partSent(id, ok = true)
-        assertNull(sends.retryable(id))
+        assertNull(sends.retry(id))
     }
 
     @Test
-    fun eachStoredRowAccountsForOneSendMadeBeforeIt() {
-        val first = sends.add(chat, chat, "ok", nowMillis = 10_000)
-        val second = sends.add(chat, chat, "ok", nowMillis = 11_000)
+    fun aSendingRowTheProviderAlreadyHasIsLeftOutOneRowPerSend() {
+        // The chat showed row 1 when both were sent, in the same second.
+        val first = sends.add(chat, chat, "ok", nowMillis = 10_000, newestRowId = 1)
+        val second = sends.add(chat, chat, "ok", nowMillis = 10_000, newestRowId = 1)
+        listOf(first, second).forEach { sends.submitted(it, parts = 1) }
         val stored = listOf(
-            // An "ok" from before either send isn't one of them.
-            stored("1", "ok", atSeconds = 5),
+            // The "ok" already there isn't one of them.
+            stored("1", "ok", atSeconds = 10),
             stored("2", "ok", atSeconds = 10),
-            stored("3", "ok", atSeconds = 9, fromMe = false),
+            stored("3", "ok", atSeconds = 10, fromMe = false),
         )
+        assertEquals(listOf(second), shown(stored).map { it.id })
+    }
 
-        val shown = sends.messages(chat, stored)
-
-        assertEquals(listOf(second), shown.map { it.id })
-        assertEquals(listOf(second), sends.messages(chat, emptyList()).map { it.id }, "the stored one is forgotten")
-        assertNull(sends.retryable(first))
+    @Test
+    fun aFailedSendAlwaysShows() {
+        val id = sends.add(chat, chat, "ok", nowMillis = 10_000, newestRowId = 0)
+        sends.failed(id)
+        assertEquals(listOf(id), shown(listOf(stored("1", "ok", atSeconds = 10))).map { it.id })
     }
 
     @Test
     fun sendsShowOnlyInTheirOwnChat() {
-        sends.add(chat, chat, "hi", nowMillis = 10_000)
+        sends.add(chat, chat, "hi", nowMillis = 10_000, newestRowId = 0)
         assertEquals(emptyList(), sends.messages("+447700900999", emptyList()))
     }
 }

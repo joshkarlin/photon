@@ -60,5 +60,7 @@ class SmsBackend(private val repository: SmsRepository) : ChatBackend {
     // isn't one to save.
     override fun contactPhone(jid: String): String? = DisplayNames.phoneOf(jid, Platform.SMS)
 
+    override fun mayHaveContactPhone(jid: String) = contactPhone(jid) != null
+
     private fun unsupported(what: String): Nothing = throw ChatBackendException("SMS has no $what")
 }

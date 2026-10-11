@@ -73,11 +73,6 @@ internal fun ChatScreen(
     }
     VisibleConversationEffect(jid)
 
-    // A DM's title opens the contact editor, when it has a number to save.
-    val contactPhone = remember(backend, jid, conversation) {
-        if (!isGroup && capabilities.contactEditing) backend.contactPhone(jid) else null
-    }
-
     // What the user asks for. A failure needs nothing more here: a send
     // that failed stays in the thread, marked failed, for a retry.
     fun act(action: suspend () -> Unit) {
@@ -115,7 +110,11 @@ internal fun ChatScreen(
             { message, forEveryone -> act { backend.delete(jid, message.id, forEveryone) } }
         } else null,
         canDeleteForEveryone = capabilities.deleteForEveryone,
-        onTitleClick = contactPhone?.let { phone -> { onContact(phone, title) } },
+        // A DM's title opens the contact editor with its number, looked up
+        // when tapped (Signal learns numbers from contact sync).
+        onTitleClick = if (!isGroup && capabilities.contactEditing && backend.mayHaveContactPhone(jid)) {
+            { backend.contactPhone(jid)?.let { phone -> onContact(phone, title) } }
+        } else null,
         supportsReply = capabilities.reply,
     )
 

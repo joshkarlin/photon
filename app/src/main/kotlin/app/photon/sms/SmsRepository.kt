@@ -1,6 +1,5 @@
 package app.photon.sms
 
-import android.app.Activity
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.ContentResolver
@@ -21,6 +20,7 @@ import app.photon.data.names.DisplayNames
 import app.photon.data.names.LocalContacts
 import app.photon.data.repository.conversationsFlow
 import app.photon.data.repository.messagesFlow
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.awaitClose
@@ -64,6 +64,10 @@ class SmsRepository internal constructor(
     // chat's messages are read by thread_id rather than by scanning every
     // SMS on the phone.
     @Volatile private var threadIds: Map<String, Set<Long>> = emptyMap()
+
+    // The newest provider row each chat has shown, which a send made from
+    // it is newer than (see PendingSends).
+    private val newestRowIds = ConcurrentHashMap<String, Long>()
 
     private fun lastReadMillis(address: String): Long =
         readPrefs.getLong(normalizeAddress(address), 0L)
@@ -131,7 +135,8 @@ class SmsRepository internal constructor(
      * to), leaving it failed for a retry.
      */
     fun sendMessage(address: String, text: String) {
-        val id = pending.add(address, normalizeAddress(address), text, System.currentTimeMillis())
+        val normalized = normalizeAddress(address)
+        val id = pending.add(address, normalized, text, System.currentTimeMillis(), newestRowIds[normalized] ?: 0)
         submit(id, address, text)
     }
 
@@ -140,7 +145,7 @@ class SmsRepository internal constructor(
             val parts = radio.divide(text)
             val sentIntents = parts.map { sentIntent(id) }
             pending.submitted(id, parts.size)
-            radio.send(address, parts, sentIntents)
+            radio.send(address, text, parts, sentIntents)
         } catch (e: Exception) {
             pending.failed(id)
             throw e
@@ -157,7 +162,7 @@ class SmsRepository internal constructor(
      * of the limit window.
      */
     fun retryMessage(messageId: String) {
-        pending.retryable(messageId)?.let { (address, text) ->
+        pending.retry(messageId)?.let { (address, text) ->
             submit(messageId, address, text)
             return
         }
@@ -187,14 +192,14 @@ class SmsRepository internal constructor(
 
     private val sendResults = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val id = intent.getStringExtra(EXTRA_SEND_ID) ?: return
-            onSendResult(id, ok = resultCode == Activity.RESULT_OK)
+            // Sent or failed, Android has stored it in the provider by now.
+            onSendResult(intent.getStringExtra(EXTRA_SEND_ID) ?: return)
         }
     }
 
     private var hearingResults = false
 
-    /** Start hearing the radio's result for each part sent. Until then sends stay "sending". */
+    /** Start hearing the radio report each part sent. Until then sends stay "sending". */
     @Synchronized
     fun startSendResults() {
         if (hearingResults) return
@@ -209,8 +214,8 @@ class SmsRepository internal constructor(
         hearingResults = false
     }
 
-    internal fun onSendResult(id: String, ok: Boolean) {
-        if (pending.partSent(id, ok)) pendingChanges.tryEmit(Unit)
+    internal fun onSendResult(id: String) {
+        if (pending.partSent(id)) pendingChanges.tryEmit(Unit)
     }
 
     // One per part, each its own PendingIntent (extras don't tell them apart).
@@ -290,7 +295,9 @@ class SmsRepository internal constructor(
     private fun loadMessages(address: String): List<Message> {
         val normalized = normalizeAddress(address)
         val stored = storedMessages(normalized)
-        return (stored + pending.messages(normalized, stored))
+        stored.maxOfOrNull(PendingSends::rowId)?.let { newest -> newestRowIds.merge(normalized, newest, ::maxOf) }
+        // A send sorts above a stored row from the same second: it's newer.
+        return (pending.messages(normalized, stored) + stored)
             .sortedByDescending { it.timestamp }
             .take(MESSAGE_LIMIT)
     }

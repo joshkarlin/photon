@@ -25,8 +25,10 @@ import app.photon.ui.theme.PhotonTheme
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
 import com.thelightphone.sdk.ui.gridUnitsAsDp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -153,8 +155,9 @@ private fun SignalPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
                 }
             }
             MenuRow("RESET") {
-                scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    session?.reset()
+                scope.launch {
+                    // Unlinking waits on the network; navigating must happen on the main thread.
+                    withContext(Dispatchers.IO) { session?.reset() }
                     onReset()
                 }
             }
