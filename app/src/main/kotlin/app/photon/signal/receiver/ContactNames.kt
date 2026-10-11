@@ -1,7 +1,6 @@
 package app.photon.signal.receiver
 
 import android.util.Log
-import app.photon.signal.AndroidContactResolver
 import app.photon.signal.ConversationNaming
 import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.SignalProfileFetcher
@@ -28,7 +27,8 @@ internal class ContactNames(
     // Held while merging: the read loop holds it while processing an
     // envelope, so a merge can't land between two of its writes.
     private val storeLock: Any,
-    private val contactResolver: AndroidContactResolver,
+    // The LP3 contact name for a phone number (LocalContacts).
+    private val lp3: (String) -> String?,
     private val notifier: SignalNotifier,
     private val profileFetcher: () -> SignalProfileFetcher?,
     // After a merge: renamed call rows need their ring-expiry timers again.
@@ -53,7 +53,7 @@ internal class ContactNames(
                         } else {
                             // Fall back to Android contacts by phone number.
                             c.phone?.let { phone ->
-                                contactResolver.resolve(phone)?.let { androidName ->
+                                lp3(phone)?.let { androidName ->
                                     Log.i(TAG, "Backfilled ${c.jid} from Android contacts: $androidName")
                                     messageDb.upsertConversation(c.jid, androidName, false)
                                 }
@@ -69,10 +69,7 @@ internal class ContactNames(
 
     /** Re-resolve every conversation title from this device's local contacts. Returns how many changed. */
     fun reresolveFromLocalContacts(): Int {
-        contactResolver.invalidate()
-        return messageDb.reresolveConversationNames { phone ->
-            contactResolver.resolve(phone)
-        }
+        return messageDb.reresolveConversationNames(lp3)
     }
 
     /**
@@ -166,7 +163,8 @@ internal class ContactNames(
         return ConversationNaming.resolveFromContact(
             phone = e164 ?: contact?.phone,
             profileName = contact?.profileName,
-        ) { contactResolver.resolve(it) }
+            resolveByPhone = lp3,
+        )
     }
 
     fun maybeFetchProfile(aci: String) {

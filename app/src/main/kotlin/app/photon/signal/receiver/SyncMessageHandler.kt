@@ -1,7 +1,6 @@
 package app.photon.signal.receiver
 
 import android.util.Log
-import app.photon.signal.AndroidContactResolver
 import app.photon.signal.EarlyReadCache
 import app.photon.signal.SignalCredentials
 import app.photon.signal.SignalGroupV2Manager
@@ -34,7 +33,7 @@ internal class SyncMessageHandler(
     private val credentials: SignalCredentials,
     private val identityStore: PhotonIdentityKeyStore,
     private val messageDb: SignalMessageDatabase,
-    private val contactResolver: AndroidContactResolver,
+    private val lp3: (String) -> String?,
     private val contactNames: ContactNames,
     private val groupMetadata: GroupMetadata,
     private val calls: CallHandler,
@@ -172,7 +171,7 @@ internal class SyncMessageHandler(
                     ?.profileName?.takeIf { it.isNotBlank() }
                 val convName = when {
                     destinationAci == myAci -> "Note to Self"
-                    phone != null -> contactResolver.resolve(phone) ?: storedProfileName ?: phone
+                    phone != null -> lp3(phone) ?: storedProfileName ?: phone
                     else -> storedProfileName
                 }
 

@@ -13,6 +13,7 @@ import app.photon.MainActivity
 import app.photon.R
 import app.photon.PhotonApp
 import app.photon.data.db.PhotonDatabase
+import app.photon.data.names.LocalContacts
 import app.photon.data.model.boolean
 import app.photon.data.model.int
 import app.photon.data.model.Platform
@@ -82,8 +83,9 @@ class PhotonService : Service() {
         _signalManager = SignalAccountManager(signalProtocolStore, signalCreds, signalProtocolDb)
         val signalMessageDb = SignalMessageDatabase(this)
         _signalMessageDb = signalMessageDb
-        val signalContacts = app.photon.signal.AndroidContactResolver(this)
-        _signalSender = SignalMessageSender(signalCreds, signalProtocolStore, signalMessageDb, signalContacts::resolve)
+        _signalSender = SignalMessageSender(
+            signalCreds, signalProtocolStore, signalMessageDb, LocalContacts.get(this)::nameFor,
+        )
         _signalRepository = SignalRepository(signalMessageDb, _signalSender, scope)
         _signalReceiver = SignalMessageReceiver(this, signalCreds, signalProtocolStore, signalMessageDb)
 

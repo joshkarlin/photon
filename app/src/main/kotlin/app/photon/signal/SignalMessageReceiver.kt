@@ -2,6 +2,7 @@ package app.photon.signal
 
 import android.util.Base64
 import android.util.Log
+import app.photon.data.names.LocalContacts
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.db.pruneMessages
 import app.photon.signal.receiver.AndroidSignalNotifier
@@ -64,7 +65,7 @@ class SignalMessageReceiver(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val config = SignalConfig.createConfiguration()
-    private val contactResolver = AndroidContactResolver(context)
+    private val lp3: (String) -> String? = LocalContacts.get(context)::nameFor
     private val notifier: SignalNotifier = AndroidSignalNotifier(context)
     // Read syncs that arrived before their message (see EarlyReadCache).
     private val earlyReads = EarlyReadCache()
@@ -73,15 +74,15 @@ class SignalMessageReceiver(
     private val preKeyRefill = PreKeyRefill(protocolStore)
     private val sessionPings = SessionPings(context, credentials, messageDb, scope)
     private val contactNames: ContactNames = ContactNames(
-        messageDb, storeLock, contactResolver, notifier,
+        messageDb, storeLock, lp3, notifier,
         profileFetcher = { profileFetcher },
         // Runs only after construction, once calls is set.
         onMerged = { calls.expireStaleRinging() },
     )
-    private val groupMetadata = GroupMetadata(messageDb, contactResolver, scope, { groupManager }, sessionPings)
+    private val groupMetadata = GroupMetadata(messageDb, lp3, scope, { groupManager }, sessionPings)
     private val attachments = Attachments(context, messageDb) { pushSocket }
     private val contactsSync = ContactsSync(
-        context, messageDb, contactResolver,
+        context, messageDb, lp3,
         pushSocket = { pushSocket },
         onSynced = { contactNames.mergeResolvableServiceIds() },
     )
@@ -102,7 +103,7 @@ class SignalMessageReceiver(
         messageNotifications, scope,
     )
     private val syncMessages = SyncMessageHandler(
-        credentials, protocolStore.identityStore, messageDb, contactResolver, contactNames, groupMetadata,
+        credentials, protocolStore.identityStore, messageDb, lp3, contactNames, groupMetadata,
         calls, remoteEdits, contactsSync, earlyReads, notifier, scope,
     )
     private val sessionLock = SignalConfig.newSessionLock()

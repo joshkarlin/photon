@@ -2,7 +2,6 @@ package app.photon.signal.receiver
 
 import android.content.Context
 import android.util.Log
-import app.photon.signal.AndroidContactResolver
 import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.db.updateContactPhone
@@ -25,7 +24,7 @@ private const val MAX_CONTACTS_BLOB_BYTES: Long = 50L * 1024 * 1024
 internal class ContactsSync(
     private val context: Context,
     private val messageDb: SignalMessageDatabase,
-    private val contactResolver: AndroidContactResolver,
+    private val lp3: (String) -> String?,
     private val pushSocket: () -> PushServiceSocket?,
     // Runs after the contact book is ingested: new phone mappings can merge
     // PNI-keyed conversations.
@@ -114,7 +113,7 @@ internal class ContactsSync(
 
         // We intentionally do NOT ingest the name from the primary's address
         // book. The user wants this device's local contacts to be the source
-        // of truth — names get resolved via AndroidContactResolver at the
+        // of truth — names get resolved via LocalContacts at the
         // point of writing the conversation row. We only persist the
         // ACI<->phone mapping here so that resolution can happen on
         // incoming messages even before the contact has messaged us.
@@ -123,7 +122,7 @@ internal class ContactsSync(
             // Pre-resolve a name from local contacts and upsert the
             // conversation row. If there's no local match the conversation
             // stays nameless (UI will show the phone number).
-            val androidName = contactResolver.resolve(phone)
+            val androidName = lp3(phone)
             if (androidName != null) {
                 messageDb.upsertConversation(jid = aci, name = androidName, isGroup = false)
                 Log.d(TAG, "Synced contact $aci: phone=$phone, local name=$androidName")

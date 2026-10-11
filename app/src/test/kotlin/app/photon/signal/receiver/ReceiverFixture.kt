@@ -2,7 +2,6 @@ package app.photon.signal.receiver
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
-import app.photon.signal.AndroidContactResolver
 import app.photon.signal.SignalCredentials
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.store.SignalProtocolDatabase
@@ -56,9 +55,11 @@ internal class ReceiverFixture(localAci: String, localDeviceId: Int = 3) {
     }
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
     val notifier = RecordingNotifier()
-    private val resolver = AndroidContactResolver(context)
-    val contactNames = ContactNames(db, Any(), resolver, notifier, profileFetcher = { null })
-    val groupMetadata = GroupMetadata(db, resolver, scope, { null }, SessionPings(context, credentials, db, scope))
+    /** This device's address book: phone → LP3 contact name. */
+    val addressBook = mutableMapOf<String, String>()
+    private val lp3: (String) -> String? = { addressBook[it] }
+    val contactNames = ContactNames(db, Any(), lp3, notifier, profileFetcher = { null })
+    val groupMetadata = GroupMetadata(db, lp3, scope, { null }, SessionPings(context, credentials, db, scope))
 
     fun close() {
         scope.cancel()

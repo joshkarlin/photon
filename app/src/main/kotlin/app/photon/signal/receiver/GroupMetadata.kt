@@ -1,7 +1,6 @@
 package app.photon.signal.receiver
 
 import android.util.Log
-import app.photon.signal.AndroidContactResolver
 import app.photon.signal.ConversationNaming
 import app.photon.signal.SignalGroupV2Manager
 import app.photon.signal.SignalMessageReceiver
@@ -25,7 +24,7 @@ private const val PLACEHOLDER_GROUP_NAME = ConversationNaming.PLACEHOLDER_GROUP_
 /** GroupV2 conversations: master keys, titles and member lists. */
 internal class GroupMetadata(
     private val messageDb: SignalMessageDatabase,
-    private val contactResolver: AndroidContactResolver,
+    private val lp3: (String) -> String?,
     private val scope: CoroutineScope,
     private val groupManager: () -> SignalGroupV2Manager?,
     private val sessionPings: SessionPings,
@@ -100,7 +99,7 @@ internal class GroupMetadata(
         val acis = gm.memberAcis(group)
         for (memberAci in acis) {
             val aciString = memberAci.toString()
-            val name = messageDb.memberDisplayName(aciString) { contactResolver.resolve(it) }
+            val name = messageDb.memberDisplayName(aciString, lp3)
             messageDb.upsertParticipant(conversationJid, aciString, name, "member")
         }
         Log.i(TAG, "Resolved group ${conversationJid.take(12)}…: $title (${acis.size} members)")

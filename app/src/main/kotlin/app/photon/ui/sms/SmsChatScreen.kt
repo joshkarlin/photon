@@ -16,7 +16,7 @@ fun SmsChatScreen(address: String, onContact: (phone: String, name: String) -> U
     val repo = PhotonService._smsRepository ?: return
     val scope = rememberCoroutineScope()
     // Track the conversation reactively via the StateFlow so the title
-    // updates when SmsRepository re-emits after refreshContactNames().
+    // updates when a contact is saved or edited (LocalContacts).
     val convs by repo.conversations.collectAsState()
     val conversation = convs?.firstOrNull { it.jid == address }
         ?: remember(address) { repo.getConversation(address) }

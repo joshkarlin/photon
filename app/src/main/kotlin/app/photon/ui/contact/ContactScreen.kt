@@ -20,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import app.photon.data.names.LocalContacts
 import app.photon.ui.shared.components.LightInputField
 import app.photon.ui.shared.components.backButton
 import app.photon.ui.theme.PhotonGrid
@@ -104,11 +105,10 @@ fun ContactScreen(
                 }
             }
             if (ok) {
-                // Invalidate cached name lookups so the chat list
-                // and titles pick up the new contact immediately
-                // instead of after the next reconnect / refresh.
+                // Every platform's names re-resolve now, rather than when
+                // the provider's change notification arrives.
+                LocalContacts.get(context).invalidate()
                 app.photon.service.PhotonService._signalReceiver?.refreshContactNames()
-                app.photon.service.PhotonService._smsRepository?.refreshContactNames()
             }
             saving = false
             status = if (ok) "Saved." else "Save failed — check permissions."
