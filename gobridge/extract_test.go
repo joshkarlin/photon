@@ -254,7 +254,7 @@ func TestHandleMessage_callLogShownWithoutUnread(t *testing.T) {
 		CallLogMesssage: &waE2E.CallLogMessage{CallOutcome: waE2E.CallLogMessage_MISSED.Enum()},
 	}))
 
-	if got := textBody(t, b, "c1"); got != "Missed voice call" {
+	if got := textBody(t, b, callRowID("c1")); got != "Missed voice call" {
 		t.Errorf("text = %q", got)
 	}
 	if got := unreadCount(t, b, alice.String()); got != 0 {

@@ -51,6 +51,15 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 
 	content := contentMessage(msg)
 	row := b.buildMessageRow(content, msgID, chatJID, senderJID, ts, isFromMe, "sent")
+	if row.ContentType == "call" {
+		// The phone's log entry for a call, which Photon may already hold as
+		// a row from the call's own events. Keyed by call ID like those
+		// (and history-sync call stubs, on the same premise that the entry
+		// carries the call's ID), whichever arrives second is a redelivery.
+		// Call events own a call's unread count, so the entry is stored read.
+		row.ID, row.Status = callRowID(msgID), "read"
+		msgID = row.ID
+	}
 
 	// The phone's copy of a message it had masked from linked devices:
 	// upgrade the placeholder row in place (it was already counted).

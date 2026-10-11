@@ -7,6 +7,7 @@ import (
 
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waCommon"
+	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
@@ -278,5 +279,34 @@ func TestMarkRead_callsOnlyChat(t *testing.T) {
 	}
 	if got := messageStatus(t, b, callRowID("c1")); got != "read" {
 		t.Errorf("call row status = %q, want read", got)
+	}
+}
+
+func callLogEvent(chat, sender types.JID, id string, ts int64) *events.Message {
+	return messageEvent(chat, sender, id, ts, &waE2E.Message{
+		CallLogMesssage: &waE2E.CallLogMessage{CallOutcome: waE2E.CallLogMessage_MISSED.Enum()},
+	})
+}
+
+// A call seen ring and end, then logged in the chat by the phone, is one row.
+func TestCall_logMessageForARecordedCallIsNotADuplicate(t *testing.T) {
+	b := newClientBridge(t)
+	b.HandleEvent(&events.CallOffer{BasicCallMeta: callMeta("c1", caller, caller), Data: voiceOffer()})
+	b.HandleEvent(&events.CallTerminate{BasicCallMeta: callMeta("c1", caller, caller)})
+	b.handleMessage(callLogEvent(caller, caller, "c1", callTime.Unix()+30))
+
+	if n := rowCount(t, b, `SELECT COUNT(*) FROM messages WHERE content_type = 'call'`); n != 1 {
+		t.Errorf("call rows = %d, want 1", n)
+	}
+	if got := unreadCount(t, b, caller.String()); got != 1 {
+		t.Errorf("unread = %d, want the one missed call", got)
+	}
+
+	// The log entry first (Photon missed the ringing), then the call events.
+	b.handleMessage(callLogEvent(caller, caller, "c2", callTime.Unix()+100))
+	b.HandleEvent(&events.CallOffer{BasicCallMeta: callMeta("c2", caller, caller), Data: voiceOffer()})
+	b.HandleEvent(&events.CallTerminate{BasicCallMeta: callMeta("c2", caller, caller)})
+	if n := rowCount(t, b, `SELECT COUNT(*) FROM messages WHERE content_type = 'call'`); n != 2 {
+		t.Errorf("call rows = %d, want 2 (one per call)", n)
 	}
 }
