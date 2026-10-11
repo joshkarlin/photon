@@ -134,3 +134,49 @@ func messageStatus(t *testing.T, b *Bridge, id string) string {
 	}
 	return s
 }
+
+func TestApplyChatReadState(t *testing.T) {
+	b := newTestBridge(t)
+	events := captureEvents(b)
+	const jid = "447@s.whatsapp.net"
+	b.UpsertConversation(jid, "Alice", false, "m2", 20)
+	b.InsertMessages([]*MessageRow{
+		{ID: "m1", ConversationJID: jid, SenderJID: jid, Timestamp: 10, ContentType: "text", Status: "sent"},
+		{ID: "m2", ConversationJID: jid, SenderJID: jid, Timestamp: 20, ContentType: "text", Status: "sent"},
+	})
+	b.IncrementUnread(jid)
+	b.IncrementUnread(jid)
+
+	// Read on the primary when only m1 had arrived: m2 stays unread.
+	b.applyChatReadState(jid, true, 15)
+	if got := unreadCount(t, b, jid); got != 1 {
+		t.Errorf("unread after partial read = %d, want 1", got)
+	}
+	if messageStatus(t, b, "m1") != "read" || messageStatus(t, b, "m2") != "sent" {
+		t.Errorf("statuses = %s/%s, want read/sent", messageStatus(t, b, "m1"), messageStatus(t, b, "m2"))
+	}
+	if n := len(events.ofType("read_self")); n != 0 {
+		t.Errorf("read_self broadcast while still unread (%d)", n)
+	}
+
+	// Read everything: unread clears and Kotlin is told to drop the banner.
+	b.applyChatReadState(jid, true, 20)
+	if got := unreadCount(t, b, jid); got != 0 {
+		t.Errorf("unread after full read = %d, want 0", got)
+	}
+	if got := events.ofType("read_self"); len(got) != 1 || got[0]["conversation_jid"] != jid {
+		t.Errorf("read_self events = %v, want one for %s", got, jid)
+	}
+
+	// Marked unread on the primary: the chat shows unread again.
+	b.applyChatReadState(jid, false, 0)
+	if got := unreadCount(t, b, jid); got != 1 {
+		t.Errorf("unread after mark-unread = %d, want 1", got)
+	}
+	// Marking unread never lowers a real count.
+	b.IncrementUnread(jid)
+	b.applyChatReadState(jid, false, 0)
+	if got := unreadCount(t, b, jid); got != 2 {
+		t.Errorf("unread after second mark-unread = %d, want 2", got)
+	}
+}

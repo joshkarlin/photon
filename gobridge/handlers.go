@@ -128,6 +128,36 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 		b.handleGroupInfo(v)
 	case *events.Mute:
 		b.handleMute(v)
+	case *events.MarkChatAsRead:
+		b.handleMarkChatAsRead(v)
+	}
+}
+
+// handleMarkChatAsRead applies "mark as read/unread" done on another device.
+// The action carries the newest message the user had seen, so messages that
+// arrived after it stay unread.
+func (b *Bridge) handleMarkChatAsRead(evt *events.MarkChatAsRead) {
+	jid := b.resolveLIDJID(evt.JID).String()
+	readUpTo := evt.Action.GetMessageRange().GetLastMessageTimestamp()
+	if readUpTo == 0 && !evt.Timestamp.IsZero() {
+		readUpTo = evt.Timestamp.Unix()
+	}
+	if readUpTo == 0 {
+		readUpTo = time.Now().Unix()
+	}
+	b.applyChatReadState(jid, evt.Action.GetRead(), readUpTo)
+}
+
+func (b *Bridge) applyChatReadState(jid string, read bool, readUpTo int64) {
+	if !read {
+		b.MarkChatUnread(jid)
+		b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: jid})
+		return
+	}
+	if b.MarkChatReadUpTo(jid, readUpTo) == 0 {
+		b.BroadcastEvent("read_self", ReadSelfEvent{ConversationJID: jid})
+	} else {
+		b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: jid})
 	}
 }
 

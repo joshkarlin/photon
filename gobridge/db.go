@@ -180,6 +180,33 @@ func (b *Bridge) ResetUnread(jid string) {
 	}
 }
 
+// MarkChatReadUpTo marks the chat's incoming messages up to ts read and
+// lowers the unread count to the messages that arrived after ts (never raising
+// it — the count can include messages pruned or never stored). Returns the
+// remaining unread count.
+func (b *Bridge) MarkChatReadUpTo(jid string, ts int64) (remaining int) {
+	if _, err := b.msgDB.Exec(`UPDATE messages SET status = 'read'
+		WHERE conversation_jid = ? AND is_from_me = 0 AND status NOT IN ('read', 'deleted') AND timestamp <= ?`, jid, ts); err != nil {
+		b.log.Errorf("Failed to mark %s read: %v", jid, err)
+	}
+	if _, err := b.msgDB.Exec(`UPDATE conversations SET unread_count = MIN(unread_count, (
+			SELECT COUNT(*) FROM messages
+			WHERE conversation_jid = ? AND is_from_me = 0 AND status NOT IN ('read', 'deleted') AND timestamp > ?
+		)) WHERE jid = ?`, jid, ts, jid); err != nil {
+		b.log.Errorf("Failed to recount unread for %s: %v", jid, err)
+	}
+	b.msgDB.QueryRow(`SELECT unread_count FROM conversations WHERE jid = ?`, jid).Scan(&remaining)
+	return remaining
+}
+
+// MarkChatUnread mirrors WhatsApp's "mark as unread": the chat shows as unread
+// even though every message in it has been seen.
+func (b *Bridge) MarkChatUnread(jid string) {
+	if _, err := b.msgDB.Exec(`UPDATE conversations SET unread_count = MAX(unread_count, 1) WHERE jid = ?`, jid); err != nil {
+		b.log.Errorf("Failed to mark %s unread: %v", jid, err)
+	}
+}
+
 // UpdateMute sets is_muted for a conversation, inserting the row if it
 // doesn't exist yet (mute events can arrive before any message in a chat).
 func (b *Bridge) UpdateMute(jid string, muted bool) {
