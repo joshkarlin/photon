@@ -3,11 +3,16 @@ package app.photon.signal.db
 import app.photon.data.db.toConversation
 import app.photon.data.db.toConversations
 import app.photon.data.model.Conversation
-import app.photon.signal.ConversationNaming
+import app.photon.signal.db.SignalMessageDatabase.Contact
 import app.photon.signal.db.SignalMessageDatabase.GroupMeta
 
-// Conversation rows: names, last message, GroupV2 metadata.
+// Conversation rows: group subjects, last message, GroupV2 metadata.
 
+/**
+ * Create or update a conversation row. [name] is a group's subject (null
+ * keeps the stored one); DMs pass null, as a person's name is resolved from
+ * the contacts table when read (SignalNames).
+ */
 fun SignalMessageDatabase.upsertConversation(
     jid: String,
     name: String?,
@@ -87,49 +92,30 @@ fun SignalMessageDatabase.getConversations(): List<Conversation> {
     ).use { it.toConversations() }
 }
 
+// A conversation row and the contacts row of the person it's with (none
+// for a group), whose columns follow c.* in the cursor.
+private const val CONVERSATION_WITH_CONTACT =
+    "SELECT c.*, ct.jid AS ct_jid, ct.name AS ct_name, ct.phone_number AS ct_phone, ct.profile_name AS ct_profile " +
+        "FROM conversations c LEFT JOIN contacts ct ON ct.jid = c.jid"
+
+private fun android.database.Cursor.conversationWithContact(): Pair<Conversation, Contact?> =
+    toConversation() to nameSources(getColumnIndexOrThrow("ct_jid"))
+
+/** The conversation list, each with its name sources, newest first. */
+fun SignalMessageDatabase.getConversationsWithContacts(): List<Pair<Conversation, Contact?>> =
+    readableDatabase.rawQuery("$CONVERSATION_WITH_CONTACT ORDER BY c.last_timestamp DESC", null).use { c ->
+        buildList { while (c.moveToNext()) add(c.conversationWithContact()) }
+    }
+
+fun SignalMessageDatabase.getConversationWithContact(jid: String): Pair<Conversation, Contact?>? =
+    readableDatabase.rawQuery("$CONVERSATION_WITH_CONTACT WHERE c.jid = ?", arrayOf(jid)).use { c ->
+        if (c.moveToFirst()) c.conversationWithContact() else null
+    }
+
 fun SignalMessageDatabase.getConversation(jid: String): Conversation? {
     return readableDatabase.rawQuery(
         "SELECT * FROM conversations WHERE jid = ?", arrayOf(jid),
     ).use { if (it.moveToFirst()) it.toConversation() else null }
-}
-
-/**
- * For each existing conversation, look at the row's stored phone (from
- * the contacts table) and reset `name` to whatever the supplied resolver
- * returns. Used to re-derive conversation titles from local contacts
- * when the resolution policy changes. Conversations with no phone are
- * left alone.
- */
-fun SignalMessageDatabase.reresolveConversationNames(resolveByPhone: (String) -> String?): Int {
-    var updated = 0
-    readableDatabase.rawQuery(
-        "SELECT c.jid, c.name, ct.phone_number, ct.profile_name FROM conversations c " +
-            "LEFT JOIN contacts ct ON ct.jid = c.jid",
-        null,
-    ).use { cur ->
-        while (cur.moveToNext()) {
-            val jid = cur.getString(0)
-            val currentName = if (cur.isNull(1)) null else cur.getString(1)
-            val phone = if (cur.isNull(2)) null else cur.getString(2)
-            val profileName = if (cur.isNull(3)) null else cur.getString(3)
-            // Resolution priority: local LP3 contact → Signal profile
-            // name (when the fetcher could decrypt one) → phone number.
-            val resolved = ConversationNaming.resolveFromContact(phone, profileName, resolveByPhone)
-            // Only overwrite when we actually resolved a name. A null result
-            // means "no phone/profile" (every group, plus DMs we can't name
-            // yet) — nulling those wiped group titles, which then showed as a
-            // base64 JID in the UI.
-            if (resolved != null && resolved != currentName) {
-                writableDatabase.execSQL(
-                    "UPDATE conversations SET name = ? WHERE jid = ?",
-                    arrayOf<Any?>(resolved, jid),
-                )
-                updated++
-            }
-        }
-    }
-    if (updated > 0) notifyChanged()
-    return updated
 }
 
 /**

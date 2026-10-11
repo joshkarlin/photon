@@ -57,7 +57,7 @@ class PniMergeTest {
     fun anActualMergeAsksForRingingRowsToBeRewatched() {
         var merges = 0
         val names = ContactNames(
-            fx.db, Any(), { null }, fx.notifier,
+            fx.db, Any(), fx.notifier,
             profileFetcher = { null }, onMerged = { merges++ },
         )
         fx.db.updateContactPhone(aci, phone)

@@ -34,9 +34,6 @@ class SignalMessageSender internal constructor(
     private val credentials: SignalCredentials,
     private val protocolStore: PhotonProtocolStore,
     private val messageDb: SignalMessageDatabase,
-    // Phone → local address-book name, so member names written by the
-    // group-send bootstrap follow the same policy as the receiver's.
-    private val contactResolver: ((String) -> String?)? = null,
     // The network side of sends; replaced in tests.
     transport: SignalTransport? = null,
 ) {
@@ -49,7 +46,7 @@ class SignalMessageSender internal constructor(
     private val connection = SenderConnection(credentials, protocolStore) { config }
 
     private val transport: SignalTransport = transport ?: LibraryTransport(
-        credentials, messageDb, protocolStore.identityStore, contactResolver,
+        credentials, messageDb, protocolStore.identityStore,
         config = { config },
         sender = { connection.getOrCreateSender() },
     )

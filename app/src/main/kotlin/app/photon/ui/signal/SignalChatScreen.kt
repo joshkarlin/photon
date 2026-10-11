@@ -14,6 +14,7 @@ import app.photon.service.PhotonService
 import app.photon.ui.shared.ChatScreenContent
 import app.photon.ui.shared.VisibleConversationEffect
 import app.photon.ui.shared.components.MediaViewer
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
 @Composable
@@ -30,12 +31,10 @@ fun SignalChatScreen(jid: String, onContact: (phone: String, name: String) -> Un
     val title = DisplayNames.title(jid, conversation?.name, isGroup, Platform.SIGNAL)
     var viewingMedia by remember { mutableStateOf<Message?>(null) }
     VisibleConversationEffect(jid)
-    // Participant names are written by the receiver as group messages come
-    // in. Re-read on every conversation update so a new sender's name shows
-    // without a navigation away/back.
-    val participantNames = remember(jid, convs) {
-        if (isGroup) repo.getParticipantNames(jid) else emptyMap()
-    }
+    // Group sender names, re-resolved as names are learned or LP3 contacts change.
+    val participantNames by remember(jid, isGroup) {
+        if (isGroup) repo.participantNames(jid) else flowOf(emptyMap())
+    }.collectAsState(initial = emptyMap())
 
     ChatScreenContent(
         title = title,

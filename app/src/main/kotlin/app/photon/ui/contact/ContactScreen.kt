@@ -110,7 +110,6 @@ fun ContactScreen(
                 // Every platform's names re-resolve now, rather than when
                 // the provider's change notification arrives.
                 LocalContacts.get(context).invalidate()
-                app.photon.service.PhotonService._signalReceiver?.refreshContactNames()
             }
             saving = false
             status = if (ok) "Saved." else "Save failed — check permissions."

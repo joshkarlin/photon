@@ -46,7 +46,7 @@ class SignalProfileFetcher(
 
     private val inFlight = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
-    fun fetchAsync(aci: String, profileKeyBytes: ByteArray, onResult: (String?) -> Unit) {
+    fun fetchAsync(aci: String, profileKeyBytes: ByteArray) {
         if (!inFlight.add(aci)) return
         scope.launch(Dispatchers.IO) {
             val name = try {
@@ -62,7 +62,6 @@ class SignalProfileFetcher(
             } catch (e: Throwable) {
                 Log.w(TAG, "DB write failed for $aci profile: ${e.message}", e)
             }
-            try { onResult(name) } catch (_: Throwable) {}
         }
     }
 

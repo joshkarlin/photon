@@ -84,10 +84,10 @@ class PhotonService : Service() {
         _signalManager = SignalAccountManager(signalProtocolStore, signalCreds, signalProtocolDb)
         val signalMessageDb = SignalMessageDatabase(this)
         _signalMessageDb = signalMessageDb
-        _signalSender = SignalMessageSender(
-            signalCreds, signalProtocolStore, signalMessageDb, LocalContacts.get(this)::nameFor,
-        )
-        _signalRepository = SignalRepository(signalMessageDb, _signalSender, scope)
+        _signalSender = SignalMessageSender(signalCreds, signalProtocolStore, signalMessageDb)
+        _signalRepository = SignalRepository(
+            signalMessageDb, _signalSender, scope, LocalContacts.get(this),
+        ) { signalCreds.aciString }
         _signalReceiver = SignalMessageReceiver(this, signalCreds, signalProtocolStore, signalMessageDb)
 
         // Start Signal message receiver if already paired

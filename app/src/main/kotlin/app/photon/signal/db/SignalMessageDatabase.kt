@@ -13,7 +13,7 @@ import kotlinx.coroutines.flow.SharedFlow
  * SignalContacts, SignalReactions, SignalCallRows and SignalRetention.
  */
 class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
-    context, DATABASE_NAME, null, 4,
+    context, DATABASE_NAME, null, 5,
 ) {
     companion object {
         const val DATABASE_NAME = "signal_messages.db"
@@ -138,6 +138,26 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         if (oldVersion < 4) {
             markLocallySeenRows(db)
         }
+        if (oldVersion < 5) {
+            clearStoredDisplayNames(db)
+        }
+    }
+
+    /**
+     * v5 resolves names when they're read (SignalNames), from the contacts
+     * table, so a stored name can only go stale: older builds wrote whatever
+     * they resolved at the time (an LP3 name, a profile name, a number) into
+     * DM rows and member rows, and a profile fetch could overwrite the LP3
+     * name. Groups keep their subject; the "Signal group" placeholder (and a
+     * raw id) was never one, and a cleared name is re-fetched on connect.
+     */
+    private fun clearStoredDisplayNames(db: SQLiteDatabase) {
+        db.execSQL("UPDATE conversations SET name = NULL WHERE is_group = 0")
+        db.execSQL("UPDATE participants SET display_name = NULL")
+        db.execSQL(
+            "UPDATE conversations SET name = NULL " +
+                "WHERE is_group = 1 AND (TRIM(name) = '' OR name = jid OR name = 'Signal group')",
+        )
     }
 
     /**

@@ -4,6 +4,7 @@ import app.photon.data.model.Message
 import app.photon.signal.db.SignalMessageDatabase.RemoteDeleteChange
 import app.photon.signal.db.insertIncomingMessage
 import app.photon.signal.db.updateContactPhone
+import app.photon.signal.db.updateContactProfileName
 import app.photon.signal.db.upsertCallRow
 import app.photon.signal.db.upsertConversation
 import org.junit.After
@@ -33,9 +34,10 @@ class RemoteDeleteNotificationTest {
     @Before
     fun setUp() {
         fx = ReceiverFixture(local)
-        val notifications = MessageNotifications(fx.db, fx.contactNames, fx.groupMetadata, fx.notifier)
+        val notifications = MessageNotifications(fx.db, fx.names, fx.notifier)
         edits = RemoteEdits(fx.db, notifications)
-        fx.db.upsertConversation(jid = alice, name = "Alice", isGroup = false)
+        fx.db.upsertConversation(jid = alice, name = null, isGroup = false)
+        fx.db.updateContactProfileName(alice, "Alice")
         fx.db.upsertConversation(jid = group, name = "Climbing", isGroup = true)
     }
 
@@ -85,18 +87,19 @@ class RemoteDeleteNotificationTest {
 
         edits.applyRemoteDelete("${alice}_1700000100000")
 
-        assertEquals(listOf("message:$alice:${alice.take(8)}:see you at 8"), fx.notifier.events)
+        assertEquals(listOf("message:$alice:Alice:see you at 8"), fx.notifier.events)
     }
 
     @Test
     fun inAGroupTheRepostNamesTheGroupAndTheSender() {
         fx.db.updateContactPhone(alice, "+15550001111")
+        fx.addressBook["+15550001111"] = "Ally"
         receive(group, alice, 1_700_000_000_000, "first")
         receive(group, bob, 1_700_000_100_000, "deleted text")
 
         edits.applyRemoteDelete("${bob}_1700000100000")
 
-        assertEquals(listOf("message:$group:Climbing:+15550001111: first"), fx.notifier.events)
+        assertEquals(listOf("message:$group:Climbing:Ally: first"), fx.notifier.events)
     }
 
     /** The user swiped the notification away: a delete mustn't bring it back. */

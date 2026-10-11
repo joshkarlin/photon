@@ -3,6 +3,7 @@ package app.photon.signal.receiver
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import app.photon.signal.SignalCredentials
+import app.photon.signal.SignalNames
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.store.SignalProtocolDatabase
 import kotlinx.coroutines.CoroutineScope
@@ -17,6 +18,9 @@ internal class RecordingNotifier : SignalNotifier {
     /** Conversations whose message notification is up (not dismissed). */
     val showing = mutableSetOf<String>()
 
+    /** Who each ringing or missed call notification named, in order. */
+    val callers = mutableListOf<String>()
+
     override fun isShowingMessage(conversationJid: String) = conversationJid in showing
 
     override fun showMessage(title: String, body: String?, conversationJid: String) {
@@ -25,10 +29,12 @@ internal class RecordingNotifier : SignalNotifier {
 
     override fun showIncomingCall(callerName: String, conversationJid: String, isVideo: Boolean) {
         events += "ringing:$conversationJid"
+        callers += callerName
     }
 
     override fun showMissedCall(callerName: String, conversationJid: String, isVideo: Boolean) {
         events += "missed:$conversationJid"
+        callers += callerName
     }
 
     override fun cancelIncomingCall(conversationJid: String) {
@@ -58,8 +64,9 @@ internal class ReceiverFixture(localAci: String, localDeviceId: Int = 3) {
     /** This device's address book: phone → LP3 contact name. */
     val addressBook = mutableMapOf<String, String>()
     private val lp3: (String) -> String? = { addressBook[it] }
-    val contactNames = ContactNames(db, Any(), lp3, notifier, profileFetcher = { null })
-    val groupMetadata = GroupMetadata(db, lp3, scope, { null }, SessionPings(context, credentials, db, scope))
+    val names = SignalNames(db, lp3) { localAci }
+    val contactNames = ContactNames(db, Any(), notifier, profileFetcher = { null })
+    val groupMetadata = GroupMetadata(db, scope, { null }, SessionPings(context, credentials, db, scope))
 
     fun close() {
         scope.cancel()

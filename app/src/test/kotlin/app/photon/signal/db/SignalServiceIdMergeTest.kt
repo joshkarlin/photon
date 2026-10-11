@@ -63,7 +63,7 @@ class SignalServiceIdMergeTest {
         db.upsertReaction("${aci}_${t}", pni, "❤️", 1)
         db.upsertCallRow("call_${pni}_9", pni, pni, (t + 500) / 1000, "Missed voice call", unread = true)
         db.upsertConversation(jid = "group", name = "Group", isGroup = true)
-        db.upsertParticipant("group", pni, phone, "member")
+        db.upsertParticipant("group", pni)
     }
 
     @Test

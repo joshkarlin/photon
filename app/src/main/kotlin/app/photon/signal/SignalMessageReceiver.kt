@@ -66,6 +66,7 @@ class SignalMessageReceiver(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val config = SignalConfig.createConfiguration()
     private val lp3: (String) -> String? = LocalContacts.get(context)::nameFor
+    private val names = SignalNames(messageDb, lp3) { credentials.aciString }
     private val notifier: SignalNotifier = AndroidSignalNotifier(context)
     // Read syncs that arrived before their message (see EarlyReadCache).
     private val earlyReads = EarlyReadCache()
@@ -74,12 +75,12 @@ class SignalMessageReceiver(
     private val preKeyRefill = PreKeyRefill(protocolStore)
     private val sessionPings = SessionPings(context, credentials, messageDb, scope)
     private val contactNames: ContactNames = ContactNames(
-        messageDb, storeLock, lp3, notifier,
+        messageDb, storeLock, notifier,
         profileFetcher = { profileFetcher },
         // Runs only after construction, once calls is set.
         onMerged = { calls.expireStaleRinging() },
     )
-    private val groupMetadata = GroupMetadata(messageDb, lp3, scope, { groupManager }, sessionPings)
+    private val groupMetadata = GroupMetadata(messageDb, scope, { groupManager }, sessionPings)
     private val attachments = Attachments(context, messageDb) { pushSocket }
     private val contactsSync = ContactsSync(
         context, messageDb, lp3,
@@ -87,7 +88,7 @@ class SignalMessageReceiver(
         onSynced = { contactNames.mergeResolvableServiceIds() },
     )
     private val calls: CallHandler = CallHandler(
-        credentials, messageDb, contactNames, groupMetadata, notifier,
+        credentials, messageDb, contactNames, names, notifier,
         schedule = { delayMs, task ->
             scope.launch {
                 delay(delayMs)
@@ -96,14 +97,14 @@ class SignalMessageReceiver(
         },
     )
     private val receipts = Receipts(credentials, messageDb)
-    private val messageNotifications = MessageNotifications(messageDb, contactNames, groupMetadata, notifier)
+    private val messageNotifications = MessageNotifications(messageDb, names, notifier)
     private val remoteEdits = RemoteEdits(messageDb, messageNotifications)
     private val dataMessages = DataMessageHandler(
         messageDb, contactNames, groupMetadata, calls, remoteEdits, attachments, earlyReads,
         messageNotifications, scope,
     )
     private val syncMessages = SyncMessageHandler(
-        credentials, protocolStore.identityStore, messageDb, lp3, contactNames, groupMetadata,
+        credentials, protocolStore.identityStore, messageDb, contactNames, groupMetadata,
         calls, remoteEdits, contactsSync, earlyReads, notifier, scope,
     )
     private val sessionLock = SignalConfig.newSessionLock()
@@ -181,23 +182,6 @@ class SignalMessageReceiver(
                 contactNames.mergeResolvableServiceIds()
             } catch (e: Exception) {
                 Log.w(TAG, "PNI conversation merge failed: ${e.message}")
-            }
-        }
-    }
-
-    /**
-     * Drop the Android-contacts cache and re-resolve every conversation
-     * name from scratch. Called after Photon's contact editor writes a new
-     * entry so the chat title updates immediately instead of waiting for
-     * the next 30-second WS reconnect to trigger the routine refresh.
-     */
-    fun refreshContactNames() {
-        scope.launch {
-            try {
-                val n = contactNames.reresolveFromLocalContacts()
-                if (n > 0) Log.i(TAG, "Live refresh: re-resolved $n conversation names")
-            } catch (e: Exception) {
-                Log.w(TAG, "Live name refresh failed: ${e.message}")
             }
         }
     }
@@ -456,22 +440,6 @@ class SignalMessageReceiver(
         unauthWs: SignalWebSocket.UnauthenticatedWebSocket,
     ): Boolean {
         scope.launch { contactNames.sweepProfiles() }
-
-        // Refresh conversation names from this device's local contacts.
-        // Cheap: ~50 PhoneLookup queries (cached per session via the
-        // resolver) plus a DB write only when the resolved name differs from
-        // what's stored. A contact added in the LP3 address book is picked up
-        // here; Photon's own contact editor refreshes immediately instead
-        // (refreshContactNames).
-        scope.launch {
-            try {
-                val n = contactNames.reresolveFromLocalContacts()
-                if (n > 0) Log.i(TAG, "Re-resolved $n conversation names from local contacts")
-            } catch (e: Exception) {
-                Log.w(TAG, "Conversation name re-resolution failed: ${e.message}")
-            }
-        }
-
         scope.launch { groupMetadata.refreshGroupsNeedingMetadata() }
 
         // Upload one-time pre-keys if they haven't been uploaded yet
