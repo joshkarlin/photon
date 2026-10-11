@@ -144,6 +144,7 @@ internal fun ChatListSample() {
     ChatListLayout(
         title = "All Chats",
         conversations = PreviewSamples.conversations,
+        platformOf = PreviewSamples::platformOf,
         onChat = {},
         onTitleClick = {},
         onSettings = {},
@@ -164,12 +165,14 @@ internal fun ChatThreadSample(
     title: String,
     messages: List<Message>,
     isGroup: Boolean,
+    platform: Platform = Platform.WHATSAPP,
     participantNames: Map<String, String> = emptyMap(),
     composeStyle: ComposeStyle = ComposeStyle.INLINE,
     keyboardStyle: KeyboardStyle = KeyboardStyle.SYSTEM,
 ) {
     ChatThread(
         title = title,
+        platform = platform,
         messages = messages,
         isGroup = isGroup,
         participantNames = participantNames,
@@ -209,7 +212,7 @@ internal fun ComposeEditorSample(keyboard: KeyboardStyle = KeyboardStyle.LIGHT) 
         title = PreviewSamples.LONG_DM_TITLE,
         draft = rememberTextFieldState("No problem, see you soon"),
         keyboard = keyboard,
-        replyLabel = quoteLabel(quoted, quotedSenderName = null, nameOtherSender = false),
+        replyLabel = quoteLabel(quoted, quotedSenderName = null),
         onSend = {},
         onBack = {},
     )
@@ -232,7 +235,7 @@ private fun ChatListPreview() = PhotonPreview { ChatListSample() }
 @Preview(name = "Chat list – empty", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
 @Composable
 private fun EmptyChatListPreview() = PhotonPreview {
-    ChatListLayout(title = "Signal", conversations = emptyList(), onChat = {}, emptyMessage = "No messages yet", onTitleClick = {}, onSettings = {})
+    ChatListLayout(title = "Signal", conversations = emptyList(), platformOf = { Platform.SIGNAL }, onChat = {}, emptyMessage = "No messages yet", onTitleClick = {}, onSettings = {})
 }
 
 @Preview(name = "DM", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)

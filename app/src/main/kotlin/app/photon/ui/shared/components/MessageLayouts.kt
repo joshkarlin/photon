@@ -18,6 +18,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import app.photon.data.model.Message
+import app.photon.data.names.DisplayNames
 import app.photon.ui.theme.PhotonColors
 import app.photon.ui.theme.PhotonGrid
 import com.thelightphone.sdk.ui.LightHapticFeedback
@@ -63,13 +64,6 @@ internal fun startsBurst(msg: Message, previous: Message?): Boolean = when {
     msg.isFromMe != previous.isFromMe -> true
     !msg.isFromMe && msg.senderJid != previous.senderJid -> true
     else -> msg.timestamp - previous.timestamp > BURST_GAP_SECONDS
-}
-
-/** Display name for a message's sender in a group. */
-internal fun senderLabel(msg: Message, senderName: String?): String = when {
-    msg.isFromMe -> "You"
-    !senderName.isNullOrBlank() -> senderName
-    else -> msg.senderJid.substringBefore("@")
 }
 
 internal fun formatContent(msg: Message): String {
@@ -119,25 +113,12 @@ private fun formatReactions(msg: Message): String =
  * the per-message reply quote lines, the reply chip above the input and the
  * full-screen editor.
  *
- * @param quotedSenderName human-readable name for the quoted sender (ignored
- *   for self-messages, which always show "You")
- * @param jidFallbackChars how many leading JID characters to show when no
- *   name is known
- * @param nameOtherSender false leaves out who sent a message that isn't
- *   yours ("↳ preview"), for a DM where the title already says it
+ * @param quotedSenderName who sent the quoted message, as DisplayNames.sender
+ *   resolves it; null in a DM, where the title already names them
+ *   ("↳ preview"). A quote of your own message always says "You".
  */
-fun quoteLabel(
-    quoted: Message,
-    quotedSenderName: String?,
-    jidFallbackChars: Int = 8,
-    nameOtherSender: Boolean = true,
-): String {
-    val who = when {
-        quoted.isFromMe -> "You"
-        !nameOtherSender -> null
-        !quotedSenderName.isNullOrBlank() -> quotedSenderName
-        else -> quoted.senderJid.substringBefore("@").take(jidFallbackChars)
-    }
+fun quoteLabel(quoted: Message, quotedSenderName: String?): String {
+    val who = if (quoted.isFromMe) DisplayNames.YOU else quotedSenderName?.takeIf { it.isNotBlank() }
     val preview = when {
         !quoted.textBody.isNullOrBlank() -> quoted.textBody.replace('\n', ' ')
         else -> "[ ${quoted.contentType} ]"

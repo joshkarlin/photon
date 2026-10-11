@@ -5,6 +5,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import app.photon.data.model.Platform
+import app.photon.data.names.DisplayNames
 import app.photon.service.PhotonService
 import app.photon.ui.shared.ChatScreenContent
 import app.photon.ui.shared.VisibleConversationEffect
@@ -20,16 +22,18 @@ fun SmsChatScreen(address: String, onContact: (phone: String, name: String) -> U
     val convs by repo.conversations.collectAsState()
     val conversation = convs?.firstOrNull { it.jid == address }
         ?: remember(address) { repo.getConversation(address) }
-    val title = conversation?.name ?: address
+    val title = DisplayNames.title(address, conversation?.name, isGroup = false, Platform.SMS)
     VisibleConversationEffect(address)
 
     // SMS "address" IS the phone number for normal SMS; for alphanumeric
     // shortcodes (HSBC, Specsavers etc.) it isn't a dialable number and we
     // shouldn't offer adding it as a contact.
-    val looksLikePhone = address.firstOrNull()?.let { it == '+' || it.isDigit() } == true
+    val looksLikePhone = DisplayNames.phoneOf(address, Platform.SMS) != null
 
     ChatScreenContent(
         title = title,
+        platform = Platform.SMS,
+        conversationKey = address,
         messagesFlow = repo.messages(address),
         isGroup = false,
         onSendText = { text, _ -> scope.launch(Dispatchers.IO) { repo.sendMessage(address, text) } },

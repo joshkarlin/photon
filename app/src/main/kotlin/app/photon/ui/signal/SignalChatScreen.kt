@@ -8,6 +8,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import app.photon.data.model.Message
+import app.photon.data.model.Platform
+import app.photon.data.names.DisplayNames
 import app.photon.service.PhotonService
 import app.photon.ui.shared.ChatScreenContent
 import app.photon.ui.shared.VisibleConversationEffect
@@ -25,10 +27,7 @@ fun SignalChatScreen(jid: String, onContact: (phone: String, name: String) -> Un
     val convs by repo.conversations.collectAsState()
     val conversation = convs?.firstOrNull { it.jid == jid } ?: remember(jid) { repo.getConversation(jid) }
     val isGroup = conversation?.isGroup ?: false
-    // Never fall back to the raw base64 group id; a blank group title shows a
-    // readable placeholder until the real title is re-fetched.
-    val title = conversation?.name?.takeIf { it.isNotBlank() }
-        ?: if (isGroup) "Signal group" else jid.take(8) + "..."
+    val title = DisplayNames.title(jid, conversation?.name, isGroup, Platform.SIGNAL)
     var viewingMedia by remember { mutableStateOf<Message?>(null) }
     VisibleConversationEffect(jid)
     // Participant names are written by the receiver as group messages come
@@ -40,6 +39,8 @@ fun SignalChatScreen(jid: String, onContact: (phone: String, name: String) -> Un
 
     ChatScreenContent(
         title = title,
+        platform = Platform.SIGNAL,
+        conversationKey = jid,
         messagesFlow = repo.messages(jid),
         isGroup = isGroup,
         participantNames = participantNames,

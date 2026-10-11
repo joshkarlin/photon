@@ -71,6 +71,19 @@ class Lp3LayoutTest {
         rule.onNodeWithText("Missed group video call", substring = true).assertIsDisplayed()
     }
 
+    /** In a DM the title already names the other party. */
+    @Test
+    fun dmReplyQuotesDoNotRepeatTheName() {
+        rule.setContent { PhotonTheme { DmThreadSample() } }
+        rule.onNodeWithText("↳ Are we still on for tomorrow night?", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun groupReplyQuotesNameTheSender() {
+        rule.setContent { PhotonTheme { GroupThreadSample() } }
+        rule.onNodeWithText("↳ Alice: Who's driving on Saturday?", useUnmergedTree = true).assertIsDisplayed()
+    }
+
     @Test
     fun groupThreadNamesIncomingBurstsOnly() {
         rule.setContent { PhotonTheme { GroupThreadSample() } }

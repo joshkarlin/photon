@@ -20,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import app.photon.data.names.DisplayNames
 import app.photon.data.names.LocalContacts
 import app.photon.ui.shared.components.LightInputField
 import app.photon.ui.shared.components.backButton
@@ -54,7 +55,8 @@ fun ContactScreen(
 
     var existingLookupUri by remember { mutableStateOf<Uri?>(null) }
     var existingName by remember { mutableStateOf<String?>(null) }
-    var nameInput by remember { mutableStateOf(if (displayName.isNotBlank() && displayName != phone) displayName else "") }
+    // Only a real name: a number or "Signal contact" isn't one to save.
+    var nameInput by remember { mutableStateOf(DisplayNames.contactPrefill(displayName)) }
     var saving by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
 
@@ -131,7 +133,7 @@ fun ContactScreen(
         ) {
             // Phone number (read-only display).
             LightText(
-                text = phone,
+                text = DisplayNames.number(phone),
                 variant = LightTextVariant.Heading,
                 modifier = Modifier.padding(top = 1f.gridUnitsAsDp()),
             )

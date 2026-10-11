@@ -33,6 +33,8 @@ import app.photon.data.ComposeStyle
 import app.photon.data.KeyboardStyle
 import app.photon.data.PhotonPreferences
 import app.photon.data.model.Message
+import app.photon.data.model.Platform
+import app.photon.data.names.DisplayNames
 import app.photon.ui.shared.components.CallRow
 import app.photon.ui.shared.components.ComposeEditor
 import app.photon.ui.shared.components.MessageActions
@@ -44,7 +46,6 @@ import app.photon.ui.shared.components.backButton
 import app.photon.ui.shared.components.isCall
 import app.photon.ui.shared.components.quoteLabel
 import app.photon.ui.shared.components.rememberMediaInput
-import app.photon.ui.shared.components.senderLabel
 import app.photon.ui.shared.components.startsBurst
 import app.photon.ui.theme.PhotonGrid
 import com.thelightphone.sdk.ui.LightIcon
@@ -70,6 +71,8 @@ import kotlinx.coroutines.launch
  * full-screen editor; KEYBOARD writes with the system keyboard or the LP3
  * keyboard, in either style.
  *
+ * @param platform whose naming rules group senders and quotes follow
+ * @param participantNames resolved names of a group's senders, by JID
  * @param conversationKey identifies the chat (its JID or address), so
  *   per-chat state such as the compose draft can't carry over to another
  *   chat shown in the same place
@@ -77,6 +80,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun ChatScreenContent(
     title: String,
+    platform: Platform,
     messagesFlow: Flow<List<Message>>,
     isGroup: Boolean,
     participantNames: Map<String, String> = emptyMap(),
@@ -102,6 +106,7 @@ fun ChatScreenContent(
     val keyboardStyle by remember(prefs) { prefs.keyboardStyle }.collectAsState(initial = null)
     ChatThread(
         title = title,
+        platform = platform,
         messages = messages,
         isGroup = isGroup,
         participantNames = participantNames,
@@ -126,6 +131,7 @@ fun ChatScreenContent(
 @Composable
 internal fun ChatThread(
     title: String,
+    platform: Platform,
     messages: List<Message>,
     isGroup: Boolean,
     participantNames: Map<String, String>,
@@ -191,13 +197,11 @@ internal fun ChatThread(
         onSendText(text, replyingTo?.id)
         replyingTo = null
     }
-    // In a DM the title already names the other party.
-    fun replyLabel(target: Message) = quoteLabel(
-        quoted = target,
-        quotedSenderName = participantNames[target.senderJid],
-        jidFallbackChars = 10,
-        nameOtherSender = isGroup,
-    )
+    // Who a group message is from; in a DM the title already names them.
+    val senderName = { msg: Message ->
+        if (isGroup) DisplayNames.sender(platform, msg.isFromMe, participantNames[msg.senderJid], msg.senderJid) else null
+    }
+    fun replyLabel(target: Message) = quoteLabel(target, senderName(target))
 
     // Notify caller when messages load (e.g., for mark-as-read)
     LaunchedEffect(messages) {
@@ -253,9 +257,7 @@ internal fun ChatThread(
                         MessageItem(
                             msg = msg,
                             startsBurst = burstStart,
-                            isGroup = isGroup,
-                            title = title,
-                            participantNames = participantNames,
+                            senderName = senderName,
                             supportsReply = supportsReply,
                             onReply = {
                                 replyingTo = msg
@@ -335,9 +337,8 @@ internal fun ChatThread(
 private fun MessageItem(
     msg: Message,
     startsBurst: Boolean,
-    isGroup: Boolean,
-    title: String,
-    participantNames: Map<String, String>,
+    // Null in a DM: no sender labels, and quotes don't repeat the title.
+    senderName: (Message) -> String?,
     supportsReply: Boolean,
     onReply: () -> Unit,
     onMediaTap: () -> Unit,
@@ -349,21 +350,12 @@ private fun MessageItem(
         CallRow(msg, onLongPress = onLongPress)
         return
     }
-    val senderName = participantNames[msg.senderJid]
-    val quotedSenderName = msg.replyToPreview?.let { q ->
-        when {
-            q.isFromMe -> null
-            // DMs don't populate participantNames — the conversation
-            // title is the only other party, so use that.
-            else -> participantNames[q.senderJid] ?: title.takeIf { !isGroup }
-        }
-    }
     SwipeToReply(enabled = supportsReply, onReply = onReply) {
         MessageRow(
             msg = msg, startsBurst = startsBurst,
             onMediaTap = onMediaTap, onLongPress = onLongPress,
-            senderName = if (isGroup) senderLabel(msg, senderName) else null,
-            quotedSenderName = quotedSenderName,
+            senderName = senderName(msg),
+            quotedSenderName = msg.replyToPreview?.let(senderName),
             onReplyPreviewTap = onReplyPreviewTap,
             onRetry = onRetry,
         )

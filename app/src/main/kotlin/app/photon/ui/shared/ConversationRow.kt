@@ -15,6 +15,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.text.style.TextOverflow
 import app.photon.data.model.Conversation
+import app.photon.data.model.Platform
+import app.photon.data.names.DisplayNames
 import app.photon.ui.theme.PhotonGrid
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
@@ -37,11 +39,13 @@ private val dayMonthFormat = SimpleDateFormat("dd/MM", Locale.getDefault())
  * count. Fixed height ([PhotonGrid.LIST_ROW_HEIGHT]) so the list can use the
  * SDK's uniform-row scroll bar.
  *
+ * @param platform whose naming rules the title follows
  * @param icon platform icon, shown in All Chats
  */
 @Composable
 fun ConversationRow(
     conv: Conversation,
+    platform: Platform,
     onClick: () -> Unit,
     icon: Painter? = null,
 ) {
@@ -63,7 +67,7 @@ fun ConversationRow(
         }
 
         LightText(
-            text = conv.name?.takeIf { it.isNotBlank() } ?: conv.jid,
+            text = DisplayNames.title(conv, platform),
             variant = LightTextVariant.Copy,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
