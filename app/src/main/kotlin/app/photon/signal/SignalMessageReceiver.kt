@@ -72,7 +72,12 @@ class SignalMessageReceiver(
     private val groupMetadata = GroupMetadata(messageDb, contactResolver, scope, { groupManager }, sessionPings)
     private val attachments = Attachments(context, messageDb) { pushSocket }
     private val contactsSync = ContactsSync(context, messageDb, contactResolver) { pushSocket }
-    private val calls = CallHandler(credentials, messageDb, contactNames, groupMetadata, notifier)
+    private val calls = CallHandler(credentials, messageDb, contactNames, groupMetadata, notifier, { delayMs, task ->
+        scope.launch {
+            delay(delayMs)
+            task()
+        }
+    })
     private val receipts = Receipts(credentials, messageDb)
     private val remoteEdits = RemoteEdits(messageDb, notifier)
     private val dataMessages = DataMessageHandler(
@@ -135,6 +140,14 @@ class SignalMessageReceiver(
                 // the next start() joins it and must still wait for `previous`.
                 withContext(NonCancellable) { previous?.join() }
                 receiveLoop(gen)
+            }
+        }
+        // Calls left ringing when the process stopped.
+        scope.launch {
+            try {
+                calls.expireStaleRinging()
+            } catch (e: Exception) {
+                Log.w(TAG, "Ring expiry sweep failed: ${e.message}")
             }
         }
     }

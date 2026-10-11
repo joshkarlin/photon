@@ -1,6 +1,8 @@
 package app.photon.signal.db
 
 import android.content.ContentValues
+import app.photon.data.db.toMessages
+import app.photon.data.model.Message
 import app.photon.signal.db.SignalMessageDatabase.CallRowChange
 import app.photon.signal.db.SignalMessageDatabase.Companion.CONTENT_CALL
 import app.photon.signal.db.SignalMessageDatabase.Companion.STATUS_READ
@@ -106,6 +108,15 @@ fun SignalMessageDatabase.findCallRowId(callId: Long): String? =
         "SELECT id FROM messages WHERE content_type = ? AND id LIKE ? ESCAPE '\\' LIMIT 1",
         arrayOf(CONTENT_CALL, "%\\_$callId"),
     ).use { if (it.moveToFirst()) it.getString(0) else null }
+
+/** Call rows whose text is one of [texts], such as every row still ringing. */
+fun SignalMessageDatabase.getCallRowsWithText(texts: Collection<String>): List<Message> {
+    if (texts.isEmpty()) return emptyList()
+    return readableDatabase.rawQuery(
+        "SELECT * FROM messages WHERE content_type = ? AND text_body IN (${texts.joinToString(",") { "?" }})",
+        arrayOf(CONTENT_CALL, *texts.toTypedArray()),
+    ).use { it.toMessages() }
+}
 
 /**
  * Mark unread call rows up to [upToTimestamp] (seconds) read — a call-log

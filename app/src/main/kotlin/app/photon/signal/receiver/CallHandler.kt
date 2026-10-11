@@ -10,6 +10,7 @@ import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.db.deleteCallRow
 import app.photon.signal.db.findCallRowId
+import app.photon.signal.db.getCallRowsWithText
 import app.photon.signal.db.getConversation
 import app.photon.signal.db.getMessage
 import app.photon.signal.db.insertIncomingMessage
@@ -22,6 +23,7 @@ import org.whispersystems.signalservice.api.crypto.EnvelopeMetadata
 import org.whispersystems.signalservice.api.messages.EnvelopeResponse
 import org.whispersystems.signalservice.internal.push.CallMessage
 import org.whispersystems.signalservice.internal.push.SyncMessage
+import java.util.concurrent.ConcurrentHashMap
 
 private const val TAG = SignalMessageReceiver.TAG
 
@@ -32,7 +34,15 @@ internal class CallHandler(
     private val contactNames: ContactNames,
     private val groupMetadata: GroupMetadata,
     private val notifier: SignalNotifier,
+    // Runs a task after a delay (a coroutine on the receiver's scope).
+    private val schedule: (delayMs: Long, task: () -> Unit) -> Unit,
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
+    // Call rows are read, then rewritten from the read state: the read loop
+    // and ring-expiry timers mustn't interleave on one row.
+    private val callLock = Any()
+    private val pendingExpiries = ConcurrentHashMap.newKeySet<String>()
+
     /**
      * 1:1 call signalling. Photon can't take part in the call (no RingRTC),
      * so it only reports it: an offer rings via a notification and records
@@ -67,18 +77,25 @@ internal class CallHandler(
         when {
             offer != null -> {
                 val callId = offer.id ?: return
+                val now = clock()
                 val stale = SignalCalls.isStaleOffer(
                     serverReceivedMs = envelope.serverTimestamp,
                     serverDeliveredMs = envelopeResponse.serverDeliveredTimestamp,
-                    nowMs = System.currentTimeMillis(),
+                    nowMs = now,
                 )
                 if (stale) Log.i(TAG, "Call offer $callId is stale; recording as missed without ringing")
-                applyCallSignal(
+                val outcome = applyCallSignal(
                     peerAci, metadata.sourceE164, callId,
                     if (stale) CallSignal.STALE_OFFER else CallSignal.OFFER,
                     offerIsVideo = offer.type == CallMessage.Offer.Type.OFFER_VIDEO_CALL,
                     timestampMs = timestampMs,
                 )
+                if (outcome == CallOutcome.RINGING) {
+                    // Timed from the server's receipt of the offer, not the
+                    // caller's clock.
+                    val ringingSince = envelope.serverTimestamp?.takeIf { it > 0 } ?: now
+                    scheduleRingExpiry(SignalCalls.rowId(peerAci, callId), ringingSince + SignalCalls.RING_TIMEOUT_MS)
+                }
             }
             hangup != null -> {
                 val callId = hangup.id ?: return
@@ -92,6 +109,7 @@ internal class CallHandler(
         }
     }
 
+    /** Apply [signal] to the call's row. Returns the row's new outcome, or null if nothing changed. */
     private fun applyCallSignal(
         peerAci: String,
         peerE164: String?,
@@ -99,12 +117,12 @@ internal class CallHandler(
         signal: CallSignal,
         offerIsVideo: Boolean?,
         timestampMs: Long,
-    ) {
+    ): CallOutcome? = synchronized(callLock) {
         val id = SignalCalls.rowId(peerAci, callId)
         val existing = messageDb.getMessage(id)
         if (existing == null && signal != CallSignal.OFFER && signal != CallSignal.STALE_OFFER) {
             Log.d(TAG, "Call $callId: $signal for a call we never saw ringing; ignoring")
-            return
+            return null
         }
         if (existing == null) {
             // First sight of this caller may be the call itself.
@@ -115,6 +133,41 @@ internal class CallHandler(
         updateCallRow(id, peerAci, existing?.textBody, signal, offerIsVideo, timestampMs / 1000)
     }
 
+    /**
+     * Rows still ringing from before a restart: expire those whose ring
+     * timeout has passed and schedule the rest.
+     */
+    fun expireStaleRinging() {
+        for (row in messageDb.getCallRowsWithText(SignalCalls.RINGING_TEXTS)) {
+            scheduleRingExpiry(row.id, row.timestamp * 1000 + SignalCalls.RING_TIMEOUT_MS)
+        }
+    }
+
+    /**
+     * Nothing guarantees a hangup or call-event sync reaches this device, so
+     * a ringing row is given up on at [dueAtMs]: by then the call is over.
+     */
+    private fun scheduleRingExpiry(id: String, dueAtMs: Long) {
+        if (!pendingExpiries.add(id)) return
+        val task: () -> Unit = {
+            pendingExpiries.remove(id)
+            try {
+                expireRinging(id)
+            } catch (e: Exception) {
+                Log.w(TAG, "Ring expiry failed for call ${id.takeLast(12)}: ${e.message}")
+            }
+        }
+        val delayMs = dueAtMs - clock()
+        if (delayMs <= 0) task() else schedule(delayMs, task)
+    }
+
+    private fun expireRinging(id: String) {
+        synchronized(callLock) {
+            val row = messageDb.getMessage(id) ?: return
+            updateCallRow(id, row.conversationJid, row.textBody, CallSignal.RING_EXPIRED, null, row.timestamp)
+        }
+    }
+
     private fun updateCallRow(
         id: String,
         conversationJid: String,
@@ -122,9 +175,9 @@ internal class CallHandler(
         signal: CallSignal,
         offerIsVideo: Boolean?,
         timestampSeconds: Long,
-    ) {
+    ): CallOutcome? {
         val current = SignalCalls.parse(currentText)
-        val outcome = SignalCalls.next(current?.outcome, signal) ?: return
+        val outcome = SignalCalls.next(current?.outcome, signal) ?: return null
         val state = CallState(outcome, current?.isVideo ?: offerIsVideo ?: false)
         val change = messageDb.upsertCallRow(
             id = id,
@@ -149,6 +202,7 @@ internal class CallHandler(
                 }
             }
         }
+        return outcome
     }
 
     private fun callerName(conversationJid: String): String =
@@ -162,35 +216,37 @@ internal class CallHandler(
      * matched to Photon's group-call rows and are skipped.
      */
     fun processCallEventSync(event: SyncMessage.CallEvent) {
-        val callId = event.callId ?: return
-        if (event.type == SyncMessage.CallEvent.Type.GROUP_CALL ||
-            event.type == SyncMessage.CallEvent.Type.AD_HOC_CALL
-        ) {
-            Log.d(TAG, "Ignoring ${event.type} call event sync")
-            return
-        }
-        val conversationJid = event.conversationId?.toByteArray()?.let { SignalCalls.conversationJidFor(it) }
-        val id = conversationJid?.let { SignalCalls.rowId(it, callId) }
-            ?.takeIf { messageDb.getMessage(it) != null }
-            ?: messageDb.findCallRowId(callId)
-            ?: run {
-                Log.d(TAG, "Call event ${event.event} for unknown call $callId")
+        synchronized(callLock) {
+            val callId = event.callId ?: return
+            if (event.type == SyncMessage.CallEvent.Type.GROUP_CALL ||
+                event.type == SyncMessage.CallEvent.Type.AD_HOC_CALL
+            ) {
+                Log.d(TAG, "Ignoring ${event.type} call event sync")
                 return
             }
-        val row = messageDb.getMessage(id) ?: return
-        when (event.event) {
-            SyncMessage.CallEvent.Event.DELETE -> {
-                val change = messageDb.deleteCallRow(id) ?: return
-                notifier.cancelIncomingCall(change.conversationJid)
-                if (change.wasUnread && change.unreadCount == 0) {
-                    notifier.cancelConversation(change.conversationJid)
+            val conversationJid = event.conversationId?.toByteArray()?.let { SignalCalls.conversationJidFor(it) }
+            val id = conversationJid?.let { SignalCalls.rowId(it, callId) }
+                ?.takeIf { messageDb.getMessage(it) != null }
+                ?: messageDb.findCallRowId(callId)
+                ?: run {
+                    Log.d(TAG, "Call event ${event.event} for unknown call $callId")
+                    return
                 }
+            val row = messageDb.getMessage(id) ?: return
+            when (event.event) {
+                SyncMessage.CallEvent.Event.DELETE -> {
+                    val change = messageDb.deleteCallRow(id) ?: return
+                    notifier.cancelIncomingCall(change.conversationJid)
+                    if (change.wasUnread && change.unreadCount == 0) {
+                        notifier.cancelConversation(change.conversationJid)
+                    }
+                }
+                SyncMessage.CallEvent.Event.ACCEPTED ->
+                    updateCallRow(id, row.conversationJid, row.textBody, CallSignal.ANSWERED_ELSEWHERE, null, row.timestamp)
+                SyncMessage.CallEvent.Event.NOT_ACCEPTED ->
+                    updateCallRow(id, row.conversationJid, row.textBody, CallSignal.DECLINED_ELSEWHERE, null, row.timestamp)
+                else -> Log.d(TAG, "Ignoring call event ${event.event}")
             }
-            SyncMessage.CallEvent.Event.ACCEPTED ->
-                updateCallRow(id, row.conversationJid, row.textBody, CallSignal.ANSWERED_ELSEWHERE, null, row.timestamp)
-            SyncMessage.CallEvent.Event.NOT_ACCEPTED ->
-                updateCallRow(id, row.conversationJid, row.textBody, CallSignal.DECLINED_ELSEWHERE, null, row.timestamp)
-            else -> Log.d(TAG, "Ignoring call event ${event.event}")
         }
     }
 

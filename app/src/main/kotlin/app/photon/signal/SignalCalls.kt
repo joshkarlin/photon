@@ -27,6 +27,8 @@ internal enum class CallSignal {
     ANSWERED_ELSEWHERE,
     /** Another of the user's devices declined (Hangup DECLINED / sync NOT_ACCEPTED). */
     DECLINED_ELSEWHERE,
+    /** Still ringing after [SignalCalls.RING_TIMEOUT_MS]: no hangup or call-event sync reached this device. */
+    RING_EXPIRED,
 }
 
 internal object SignalCalls {
@@ -35,6 +37,11 @@ internal object SignalCalls {
     // RingRTC treats offers older than this as expired; ringing for one
     // would announce a call that has already given up.
     const val OFFER_MAX_AGE_MS = 120_000L
+
+    // A row still ringing this long after the call started is missed: the
+    // caller's app has given up by then, so the hangup just never reached
+    // this device.
+    const val RING_TIMEOUT_MS = OFFER_MAX_AGE_MS
 
     fun rowId(peerAci: String, callId: Long): String = "call_${peerAci}_$callId"
 
@@ -62,6 +69,9 @@ internal object SignalCalls {
         return null
     }
 
+    /** Row texts of a call that is still ringing. */
+    val RINGING_TEXTS: List<String> = listOf(false, true).map { text(CallState(CallOutcome.RINGING, it)) }
+
     /** Missed calls are the only call rows that count as unread. */
     fun isUnread(outcome: CallOutcome): Boolean = outcome == CallOutcome.MISSED
 
@@ -77,6 +87,7 @@ internal object SignalCalls {
         CallSignal.ANSWERED_ELSEWHERE ->
             if (current == CallOutcome.RINGING || current == CallOutcome.MISSED) CallOutcome.ANSWERED else null
         CallSignal.DECLINED_ELSEWHERE -> if (current == CallOutcome.RINGING) CallOutcome.DECLINED else null
+        CallSignal.RING_EXPIRED -> if (current == CallOutcome.RINGING) CallOutcome.MISSED else null
     }
 
     /**
