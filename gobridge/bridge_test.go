@@ -68,6 +68,7 @@ func TestCleanName(t *testing.T) {
 		"-":                           "",
 		"Flat 4":                      "Flat 4",
 		"R2-D2":                       "R2-D2",
+		"2024":                        "2024",
 		"bob@example.com":             "bob@example.com",
 	} {
 		if got := cleanName(in); got != want {

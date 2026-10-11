@@ -43,22 +43,26 @@ func cleanName(s string) string {
 	return s
 }
 
-// isNumberLike reports text made only of digits and what numbers are written
-// with: + - ( ) . spaces, and the invisible direction marks WhatsApp wraps
-// numbers in.
+// isNumberLike reports a phone number or LID: at least minNumberDigits
+// digits and only what numbers are written with besides — + - ( ) . spaces,
+// and the invisible direction marks WhatsApp wraps numbers in. Fewer digits
+// make a name, like a group called "2024".
 func isNumberLike(s string) bool {
-	digits := false
+	digits := 0
 	for _, r := range s {
 		switch {
 		case unicode.IsDigit(r):
-			digits = true
+			digits++
 		case strings.ContainsRune("+-().", r), unicode.IsSpace(r), unicode.Is(unicode.Cf, r):
 		default:
 			return false
 		}
 	}
-	return digits
+	return digits >= minNumberDigits
 }
+
+// minNumberDigits is the fewest digits a phone number (or LID) has.
+const minNumberDigits = 7
 
 // isJIDLike reports text that is a WhatsApp JID.
 func isJIDLike(s string) bool {

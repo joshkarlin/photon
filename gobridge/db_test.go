@@ -150,6 +150,7 @@ func TestMigrateNameRanks_upgradesInPlace(t *testing.T) {
 			('11223344@lid', '11223344'),
 			('447700900006@s.whatsapp.net', '447700900006@s.whatsapp.net'),
 			('` + grp + `', 'Book club'),
+			('120363000000000002@g.us', '2024'),
 			('447700900003@s.whatsapp.net', NULL)`,
 		`INSERT INTO participants (conversation_jid, jid, display_name) VALUES
 			('` + grp + `', '447700900004@s.whatsapp.net', 'Dave'),
@@ -171,6 +172,7 @@ func TestMigrateNameRanks_upgradesInPlace(t *testing.T) {
 		"11223344@lid":                "",
 		"447700900006@s.whatsapp.net": "",
 		grp:                           "Book club",
+		"120363000000000002@g.us":     "2024",
 		"447700900003@s.whatsapp.net": "",
 	} {
 		if got := conversationRank(t, b, jid); got != (rankedName{name: want}) {
