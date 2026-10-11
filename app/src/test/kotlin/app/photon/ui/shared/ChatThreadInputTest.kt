@@ -194,15 +194,24 @@ class ChatThreadInputTest {
     }
 
     @Test
-    fun longPressAndSwipeKeepTheKeyboard() {
+    fun swipingToReplyKeepsTheKeyboard() {
         showDm()
         focusField()
         message("No rush, I'm at the bar already").performTouchInput { swipeRight() }
         described("Cancel reply").assertExists()
         field().assertIsFocused()
-        message("Running ten minutes late, sorry!").performTouchInput { longClick() }
-        field().assertIsFocused()
         assertTrue(softKeyboardUp)
+    }
+
+    /** Long-press opens a full-screen page of actions, which no keyboard covers. */
+    @Test
+    fun longPressPutsTheKeyboardAwayForTheActions() {
+        showDm()
+        focusField()
+        message("Running ten minutes late, sorry!").performTouchInput { longClick() }
+        rule.onNodeWithText("React").assertExists()
+        field().assertIsNotFocused()
+        assertFalse(softKeyboardUp)
     }
 
     @Test

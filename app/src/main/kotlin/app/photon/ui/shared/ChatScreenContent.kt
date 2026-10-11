@@ -37,6 +37,8 @@ import app.photon.data.model.Platform
 import app.photon.data.names.DisplayNames
 import app.photon.ui.shared.components.CallRow
 import app.photon.ui.shared.components.ComposeEditor
+import app.photon.ui.shared.components.MessageAction
+import app.photon.ui.shared.components.MessageActionSupport
 import app.photon.ui.shared.components.MessageActions
 import app.photon.ui.shared.components.MessageInputBar
 import app.photon.ui.shared.components.MessageRow
@@ -44,6 +46,7 @@ import app.photon.ui.shared.components.SwipeToReply
 import app.photon.ui.shared.components.ThreadBottomBar
 import app.photon.ui.shared.components.backButton
 import app.photon.ui.shared.components.isCall
+import app.photon.ui.shared.components.messageActions
 import app.photon.ui.shared.components.quoteLabel
 import app.photon.ui.shared.components.rememberMediaInput
 import app.photon.ui.shared.components.startsBurst
@@ -169,7 +172,6 @@ internal fun ChatThread(
     }
     val listState = rememberLazyListState()
     val scrollScope = rememberCoroutineScope()
-    var actionsFor by remember { mutableStateOf<Message?>(null) }
     var replyingTo by remember { mutableStateOf<Message?>(null) }
 
     // One draft per conversation, shared by both input styles. FULL SCREEN
@@ -210,6 +212,22 @@ internal fun ChatThread(
     }
     fun replyLabel(target: Message) = quoteLabel(target, senderName(target))
 
+    // What a long-press offers. The menu follows its message as the thread
+    // updates, and closes if the message goes.
+    val actionSupport = MessageActionSupport(
+        reply = supportsReply,
+        react = onReact != null,
+        retry = onRetry != null,
+        delete = onDelete != null,
+        deleteForEveryone = canDeleteForEveryone,
+    )
+    var actionsForId by remember { mutableStateOf<String?>(null) }
+    val actionsFor = actionsForId?.let { id -> messages.firstOrNull { it.id == id } }
+    fun reply(msg: Message) {
+        replyingTo = msg
+        if (fullScreen) openCompose()
+    }
+
     // Notify caller when messages load (e.g., for mark-as-read)
     LaunchedEffect(messages) {
         if (messages.isNotEmpty()) {
@@ -226,7 +244,7 @@ internal fun ChatThread(
         }
     }
 
-    ChatScrollDialEffect(listState, enabled = !editorOpen, onTurn = dismissKeyboard)
+    ChatScrollDialEffect(listState, enabled = !editorOpen && actionsFor == null, onTurn = dismissKeyboard)
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -260,18 +278,23 @@ internal fun ChatThread(
                 itemsIndexed(messages, key = { _, msg -> msg.id }) { index, msg ->
                     val burstStart = startsBurst(msg, messages.getOrNull(index + 1))
                     val gap = if (burstStart) PhotonGrid.BURST_GAP else PhotonGrid.IN_BURST_GAP
+                    val actions = messageActions(msg, actionSupport)
                     Box(modifier = Modifier.padding(top = gap.gridUnitsAsDp())) {
                         MessageItem(
                             msg = msg,
                             startsBurst = burstStart,
                             senderName = senderName,
-                            supportsReply = supportsReply,
-                            onReply = {
-                                replyingTo = msg
-                                if (fullScreen) openCompose()
-                            },
+                            // Swiping replies wherever the menu would offer Reply.
+                            canReply = MessageAction.REPLY in actions,
+                            onReply = { reply(msg) },
                             onMediaTap = { onMediaTap?.invoke(msg) },
-                            onLongPress = { actionsFor = msg },
+                            // A full-screen menu: the keyboard goes, as for any page.
+                            onLongPress = if (actions.isEmpty()) null else {
+                                {
+                                    dismissKeyboard()
+                                    actionsForId = msg.id
+                                }
+                            },
                             onReplyPreviewTap = msg.replyToPreview?.let { quoted ->
                                 {
                                     val idx = messages.indexOfFirst { it.id == quoted.id }
@@ -300,22 +323,16 @@ internal fun ChatThread(
             }
         }
 
-        // Message actions (react + delete), shown on long-press.
+        // The long-pressed message's actions, as full-screen LightOS pages.
         actionsFor?.let { msg ->
             MessageActions(
                 message = msg,
-                canReact = onReact != null && !isCall(msg) && !msg.status.isUnsent,
-                canDelete = onDelete != null,
-                canDeleteForEveryone = canDeleteForEveryone,
-                onPick = { emoji ->
-                    onReact?.invoke(msg.id, msg.senderJid, emoji)
-                    actionsFor = null
-                },
-                onDelete = { forEveryone ->
-                    onDelete?.invoke(msg, forEveryone)
-                    actionsFor = null
-                },
-                onDismiss = { actionsFor = null },
+                actions = messageActions(msg, actionSupport),
+                onReply = { reply(msg) },
+                onReact = { emoji -> onReact?.invoke(msg.id, msg.senderJid, emoji) },
+                onRetry = { onRetry?.invoke(msg.id) },
+                onDelete = { forEveryone -> onDelete?.invoke(msg, forEveryone) },
+                onDismiss = { actionsForId = null },
             )
         }
 
@@ -346,10 +363,10 @@ private fun MessageItem(
     startsBurst: Boolean,
     // Null in a DM: no sender labels, and quotes don't repeat the title.
     senderName: (Message) -> String?,
-    supportsReply: Boolean,
+    canReply: Boolean,
     onReply: () -> Unit,
     onMediaTap: () -> Unit,
-    onLongPress: () -> Unit,
+    onLongPress: (() -> Unit)?,
     onReplyPreviewTap: (() -> Unit)?,
     onRetry: (() -> Unit)?,
 ) {
@@ -357,7 +374,7 @@ private fun MessageItem(
         CallRow(msg, onLongPress = onLongPress)
         return
     }
-    SwipeToReply(enabled = supportsReply, onReply = onReply) {
+    SwipeToReply(enabled = canReply, onReply = onReply) {
         MessageRow(
             msg = msg, startsBurst = startsBurst,
             onMediaTap = onMediaTap, onLongPress = onLongPress,
