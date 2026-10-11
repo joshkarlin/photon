@@ -256,20 +256,57 @@ func (b *Bridge) UpdateMessageStatus(id, status string) error {
 	return err
 }
 
-// UpdateMessageStatusBatch updates the delivery status of several messages in
-// one statement (receipts often cover many IDs at once).
-func (b *Bridge) UpdateMessageStatusBatch(ids []string, status string) error {
-	if len(ids) == 0 {
+// sqlInList returns "?,?,…" for n placeholders.
+func sqlInList(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return "?" + strings.Repeat(",?", n-1)
+}
+
+// outgoingStatusesBelow lists the statuses a receipt may advance from. Status
+// only moves forward (a late "delivered" never downgrades "read"), a receipt
+// proves a "failed" send actually went through, and "deleted" is final.
+var outgoingStatusesBelow = map[string][]string{
+	"delivered": {"sending", "sent", "failed"},
+	"read":      {"sending", "sent", "failed", "delivered"},
+}
+
+// AdvanceOutgoingStatus applies a contact's delivered/read receipt to our own
+// outgoing rows (receipts often cover many IDs at once). Incoming rows with a
+// matching ID are never touched.
+func (b *Bridge) AdvanceOutgoingStatus(ids []string, status string) error {
+	from := outgoingStatusesBelow[status]
+	if len(ids) == 0 || len(from) == 0 {
 		return nil
 	}
-	args := make([]interface{}, 0, len(ids)+1)
+	args := make([]interface{}, 0, 1+len(ids)+len(from))
 	args = append(args, status)
 	for _, id := range ids {
 		args = append(args, id)
 	}
-	query := `UPDATE messages SET status = ? WHERE id IN (?` + strings.Repeat(",?", len(ids)-1) + `)`
-	_, err := b.msgDB.Exec(query, args...)
+	for _, s := range from {
+		args = append(args, s)
+	}
+	_, err := b.msgDB.Exec(`UPDATE messages SET status = ? WHERE id IN (`+sqlInList(len(ids))+
+		`) AND is_from_me = 1 AND status IN (`+sqlInList(len(from))+`)`, args...)
 	return err
+}
+
+// MarkIncomingRead records that the user read a conversation on another
+// device: the listed incoming rows become "read" and the unread badge clears.
+func (b *Bridge) MarkIncomingRead(jid string, ids []string) {
+	if len(ids) > 0 {
+		args := make([]interface{}, 0, len(ids)+1)
+		args = append(args, jid)
+		for _, id := range ids {
+			args = append(args, id)
+		}
+		if _, err := b.msgDB.Exec(`UPDATE messages SET status = 'read' WHERE conversation_jid = ? AND is_from_me = 0 AND status <> 'deleted' AND id IN (`+sqlInList(len(ids))+`)`, args...); err != nil {
+			b.log.Errorf("Failed to mark messages read in %s: %v", jid, err)
+		}
+	}
+	b.ResetUnread(jid)
 }
 
 // UpdateMessageStatusAndTimestamp updates both fields together. Used when a

@@ -184,15 +184,13 @@ class PhotonService : Service() {
                         this@PhotonService, name, evt.string("text_body"), app.photon.data.model.Platform.WHATSAPP, convJid,
                     )
                 }
-                "receipt" -> {
-                    // Reading on any linked device fires a read receipt; clear the
-                    // Photon notification for that conversation so the banner doesn't
-                    // linger after the message has been consumed.
-                    if (evt.string("type") == "read") {
-                        val convJid = evt.string("conversation_jid")
-                        if (!convJid.isNullOrBlank()) {
-                            NotificationHelper.cancelForConversation(this@PhotonService, convJid)
-                        }
+                "read_self" -> {
+                    // The user read (or marked read) this chat on another device;
+                    // the banner shouldn't linger. Plain "receipt" events are the
+                    // other person reading OUR messages and must not cancel.
+                    val convJid = evt.string("conversation_jid")
+                    if (!convJid.isNullOrBlank()) {
+                        NotificationHelper.cancelForConversation(this@PhotonService, convJid)
                     }
                 }
             }

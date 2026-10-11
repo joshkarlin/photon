@@ -21,7 +21,7 @@ import kotlinx.coroutines.withContext
 // Go bridge events that mean rendered data changed. The bridge broadcasts
 // after each DB write, so these replace the old 500ms poll.
 private val REFRESH_EVENTS = setOf(
-    "new_message", "message_updated", "conversation_updated", "receipt",
+    "new_message", "message_updated", "conversation_updated", "receipt", "read_self",
     "history_sync_progress", "history_sync_complete", "connection_state",
 )
 

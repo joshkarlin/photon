@@ -290,29 +290,51 @@ func (b *Bridge) handleReceipt(evt *events.Receipt) {
 	// Without this, ReadSelf receipts for LID chats fail to clear unread.
 	chatJID := b.resolveLIDJID(evt.Chat).String()
 
-	status := ""
-	switch evt.Type {
-	case types.ReceiptTypeRead, types.ReceiptTypeReadSelf:
-		status = "read"
-		// Reset unread count when messages are read (including on other devices).
-		b.ResetUnread(chatJID)
-	case types.ReceiptTypeDelivered:
-		status = "delivered"
-	default:
-		return
-	}
-
 	ids := make([]string, len(evt.MessageIDs))
 	for i, id := range evt.MessageIDs {
 		ids[i] = string(id)
 	}
-	b.UpdateMessageStatusBatch(ids, status)
+	b.applyReceipt(chatJID, ids, evt.Type, evt.IsFromMe)
+}
 
-	b.BroadcastEvent("receipt", ReceiptEvent{
-		ConversationJID: chatJID,
-		MessageIDs:      ids,
-		Type:            status,
-	})
+// receiptEffect classifies a receipt. ownRead means the user read incoming
+// messages on another of their devices: "read-self" when read receipts are
+// off, or a plain "read" sent from our own JID when they're on. Every other
+// read/delivered receipt is a contact acknowledging one of OUR messages, so it
+// only advances the outgoing status — it must never clear our unread count
+// (that once made a chat look read the moment the other person read our
+// reply). Anything else (played, sender, retry, …) has no effect.
+func receiptEffect(t types.ReceiptType, isFromMe bool) (ownRead bool, outgoingStatus string) {
+	switch {
+	case t == types.ReceiptTypeReadSelf, t == types.ReceiptTypeRead && isFromMe:
+		return true, ""
+	case isFromMe:
+		return false, ""
+	case t == types.ReceiptTypeRead:
+		return false, "read"
+	case t == types.ReceiptTypeDelivered:
+		return false, "delivered"
+	}
+	return false, ""
+}
+
+func (b *Bridge) applyReceipt(chatJID string, ids []string, t types.ReceiptType, isFromMe bool) {
+	ownRead, status := receiptEffect(t, isFromMe)
+	switch {
+	case ownRead:
+		b.MarkIncomingRead(chatJID, ids)
+		b.BroadcastEvent("read_self", ReadSelfEvent{
+			ConversationJID: chatJID,
+			MessageIDs:      ids,
+		})
+	case status != "":
+		b.AdvanceOutgoingStatus(ids, status)
+		b.BroadcastEvent("receipt", ReceiptEvent{
+			ConversationJID: chatJID,
+			MessageIDs:      ids,
+			Type:            status,
+		})
+	}
 }
 
 func (b *Bridge) handleChatPresence(evt *events.ChatPresence) {

@@ -123,10 +123,20 @@ type MessageUpdatedEvent struct {
 	MessageID       string `json:"message_id"`
 }
 
+// ReceiptEvent reports a contact's delivered/read receipt for our outgoing
+// messages. It never means the user read anything — see ReadSelfEvent.
 type ReceiptEvent struct {
 	ConversationJID string   `json:"conversation_jid"`
 	MessageIDs      []string `json:"message_ids"`
 	Type            string   `json:"type"` // "delivered", "read"
+}
+
+// ReadSelfEvent means the user read the conversation on another of their
+// devices (or marked it read there): unread is now 0, so its notification can
+// go. MessageIDs is empty when a whole chat was marked read.
+type ReadSelfEvent struct {
+	ConversationJID string   `json:"conversation_jid"`
+	MessageIDs      []string `json:"message_ids,omitempty"`
 }
 
 type TypingEvent struct {
