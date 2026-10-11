@@ -70,7 +70,10 @@ class SignalRepository(
 
     fun getContactPhone(aci: String): String? = db.getContact(aci)?.phone
 
-    /** A group's sender names by ACI, re-resolved whenever a source changes. */
+    /**
+     * A group's sender names by ACI, re-resolved whenever a source changes
+     * (LocalContacts' changes emit at once, so this reads on subscription too).
+     */
     fun participantNames(conversationJid: String): Flow<Map<String, String>> =
         nameChanges
             .map {

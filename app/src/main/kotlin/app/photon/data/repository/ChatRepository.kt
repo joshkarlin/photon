@@ -16,7 +16,6 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
-import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.withContext
 
 // Go bridge events that mean rendered data changed. The bridge broadcasts
@@ -51,12 +50,13 @@ class ChatRepository(
         // on every reconnect.
         bridge.isConnected.drop(1).filter { it }.map { },
         localChanges,
-        // An LP3 contact saved or edited.
-        localContacts.changes,
     )
 
+    // What names depend on: the bridge's rows, and the LP3 address book.
+    private val nameChanges: Flow<Unit> = merge(changes, localContacts.changes)
+
     val conversations: StateFlow<List<Conversation>?> =
-        conversationsFlow(scope, "ChatRepository", changes) { db.getConversations().map(names::resolve) }
+        conversationsFlow(scope, "ChatRepository", nameChanges) { db.getConversations().map(names::resolve) }
 
     fun messages(conversationJid: String, limit: Int = 50): Flow<List<Message>> =
         messagesFlow(
@@ -76,10 +76,10 @@ class ChatRepository(
     // conversations StateFlow: participant-name changes don't alter the
     // Conversation rows, so its distinctUntilChanged swallows them. This flow
     // dedupes on the name map itself, so names show as soon as they resolve
-    // (e.g. after resolve_participants runs on group open).
+    // (e.g. after resolve_participants runs on group open). LocalContacts'
+    // changes emit at once, so this reads on subscription too.
     fun participantNames(jid: String): Flow<Map<String, String>> =
-        changes
-            .onStart { emit(Unit) }
+        nameChanges
             .map {
                 withContext(Dispatchers.IO) {
                     names.participantNames(db.getParticipants(jid), db.getMessageSenders(jid))

@@ -198,8 +198,10 @@ internal fun ChatThread(
         replyingTo = null
     }
     // Who a group message is from; in a DM the title already names them.
-    val senderName = { msg: Message ->
-        if (isGroup) DisplayNames.sender(platform, msg.isFromMe, participantNames[msg.senderJid], msg.senderJid) else null
+    val senderName = remember(isGroup, platform, participantNames) {
+        { msg: Message ->
+            if (isGroup) DisplayNames.sender(platform, msg.isFromMe, participantNames[msg.senderJid], msg.senderJid) else null
+        }
     }
     fun replyLabel(target: Message) = quoteLabel(target, senderName(target))
 
