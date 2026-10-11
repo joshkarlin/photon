@@ -8,8 +8,15 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import app.photon.MainActivity
 import app.photon.PhotonApp
+import app.photon.data.NotificationLevel
 import app.photon.data.PhotonPreferences
 import app.photon.data.model.Platform
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 object NotificationHelper {
     // Notifications are keyed by tag=conversationJid. Using a tag (instead of a
@@ -47,6 +54,36 @@ object NotificationHelper {
 
     fun isVisible(conversationJid: String): Boolean = visibleConversation == conversationJid
 
+    // The NOTIFICATIONS setting, cached so posting doesn't wait on DataStore.
+    // Null while nothing keeps it current.
+    @Volatile private var cachedLevel: NotificationLevel? = null
+
+    /**
+     * Keeps the cached NOTIFICATIONS level current from [levels] for the life
+     * of [scope]. `PhotonApp` follows the stored setting at startup.
+     */
+    fun followLevel(levels: Flow<NotificationLevel>, scope: CoroutineScope): Job = scope.launch {
+        try {
+            levels.collect { cachedLevel = it }
+        } finally {
+            cachedLevel = null
+        }
+    }
+
+    // Before the first value arrives (moments after startup, well before a
+    // session can deliver anything), read the setting directly. Posting
+    // happens off the main thread.
+    private fun level(context: Context): NotificationLevel =
+        cachedLevel ?: runBlocking { PhotonPreferences(context).notificationLevel.first() }
+
+    /** The channel a level posts messages and calls to; null at [NotificationLevel.OFF]. */
+    internal fun channelFor(level: NotificationLevel): String? = when (level) {
+        NotificationLevel.SOUND -> PhotonApp.CHANNEL_MESSAGES
+        NotificationLevel.VIBRATE -> PhotonApp.CHANNEL_MESSAGES_VIBRATE
+        NotificationLevel.SILENT -> PhotonApp.CHANNEL_MESSAGES_SILENT
+        NotificationLevel.OFF -> null
+    }
+
     /**
      * Post (or replace) the conversation's message notification.
      *
@@ -54,7 +91,8 @@ object NotificationHelper {
      *   (e.g. a delete-for-everyone took away the message it showed) rather
      *   than announcing a new message: it then replaces it without sounding
      *   or buzzing again. A new message always alerts, even over an
-     *   existing notification.
+     *   existing notification. With notifications OFF, a correction removes
+     *   the notification instead, so it can't keep showing what it corrects.
      */
     fun showMessageNotification(
         context: Context,
@@ -65,9 +103,14 @@ object NotificationHelper {
         update: Boolean = false,
     ) {
         if (isVisible(conversationJid)) return
+        val channel = channelFor(level(context))
+        if (channel == null) {
+            if (update) NotificationManagerCompat.from(context).cancel(conversationJid, MESSAGE_NOTIF_ID)
+            return
+        }
         post(
             context, conversationJid, MESSAGE_NOTIF_ID,
-            builder(context, platform, conversationJid)
+            builder(context, channel, platform, conversationJid)
                 .setContentTitle("$title · ${platform.label}")
                 .setContentText(body ?: NEW_MESSAGE)
                 .setCategory(NotificationCompat.CATEGORY_MESSAGE)
@@ -78,7 +121,8 @@ object NotificationHelper {
     /**
      * A call is ringing on the user's other devices. Photon can't answer it;
      * this tells the user someone is calling. Not suppressed for the visible
-     * conversation — a ringing call is time-sensitive even mid-chat.
+     * conversation — a ringing call is time-sensitive even mid-chat. Posted
+     * at every level but OFF, so at SILENT it shows without ringing.
      */
     fun showIncomingCall(
         context: Context,
@@ -87,9 +131,10 @@ object NotificationHelper {
         conversationJid: String,
         isVideo: Boolean,
     ) {
+        val channel = channelFor(level(context)) ?: return
         post(
             context, conversationJid, INCOMING_CALL_NOTIF_ID,
-            builder(context, platform, conversationJid)
+            builder(context, channel, platform, conversationJid)
                 .setContentTitle("$callerName · ${platform.label}")
                 .setContentText(if (isVideo) "Incoming video call" else "Incoming voice call")
                 .setCategory(NotificationCompat.CATEGORY_CALL)
@@ -107,9 +152,10 @@ object NotificationHelper {
     ) {
         cancelIncomingCall(context, conversationJid)
         if (isVisible(conversationJid)) return
+        val channel = channelFor(level(context)) ?: return
         post(
             context, conversationJid, MISSED_CALL_NOTIF_ID,
-            builder(context, platform, conversationJid)
+            builder(context, channel, platform, conversationJid)
                 .setContentTitle("$callerName · ${platform.label}")
                 .setContentText(if (isVideo) "Missed video call" else "Missed voice call")
                 .setCategory(NotificationCompat.CATEGORY_MISSED_CALL),
@@ -133,7 +179,8 @@ object NotificationHelper {
      * whose unread count is zero. Catches notifications left behind by any path
      * that cleared unread state without cancelling (reads on another device,
      * deletes, a previous process). Conversations not in the map are untouched,
-     * so a single platform's list can reconcile its own notifications.
+     * so a single platform's list can reconcile its own notifications. Matches
+     * by tag and id, so it finds them on every level's channel.
      */
     fun reconcile(context: Context, unreadByConversation: Map<String, Int>) {
         val active = try {
@@ -152,6 +199,7 @@ object NotificationHelper {
 
     private fun builder(
         context: Context,
+        channel: String,
         platform: Platform,
         conversationJid: String,
     ): NotificationCompat.Builder {
@@ -167,7 +215,7 @@ object NotificationHelper {
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        return NotificationCompat.Builder(context, PhotonApp.CHANNEL_MESSAGES)
+        return NotificationCompat.Builder(context, channel)
             .setSmallIcon(android.R.drawable.ic_dialog_email)
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
@@ -175,7 +223,6 @@ object NotificationHelper {
     }
 
     private fun post(context: Context, tag: String, id: Int, builder: NotificationCompat.Builder) {
-        if (!PhotonPreferences(context).getNotificationsEnabledSync()) return
         try {
             NotificationManagerCompat.from(context).notify(tag, id, builder.build())
         } catch (_: SecurityException) {
