@@ -30,6 +30,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.style.TextOverflow
 import app.photon.data.ComposeStyle
+import app.photon.data.KeyboardStyle
 import app.photon.data.PhotonPreferences
 import app.photon.data.model.Message
 import app.photon.ui.shared.components.CallRow
@@ -64,9 +65,10 @@ import kotlinx.coroutines.launch
  * the LP3 thread ([MessageRow]); groups add the sender above each incoming
  * burst, as the LP2 group thread does.
  *
- * The input follows Settings › Chat › Compose: an inline bar under the
+ * The input follows Settings › Chat: COMPOSE puts an inline bar under the
  * thread, or (FULL SCREEN) a LightOS bottom bar whose compose action opens a
- * full-screen editor with the LP3 keyboard.
+ * full-screen editor; KEYBOARD writes with the system keyboard or the LP3
+ * keyboard, in either style.
  *
  * @param conversationKey identifies the chat (its JID or address), so
  *   per-chat state such as the compose draft can't carry over to another
@@ -94,9 +96,10 @@ fun ChatScreenContent(
 ) {
     val messages by messagesFlow.collectAsState(initial = emptyList())
     val context = LocalContext.current
-    // Null until the setting loads, so neither input style flashes first.
-    val composeStyle by remember(context) { PhotonPreferences(context).composeStyle }
-        .collectAsState(initial = null)
+    // Null until the settings load, so no input style flashes first.
+    val prefs = remember(context) { PhotonPreferences(context) }
+    val composeStyle by remember(prefs) { prefs.composeStyle }.collectAsState(initial = null)
+    val keyboardStyle by remember(prefs) { prefs.keyboardStyle }.collectAsState(initial = null)
     ChatThread(
         title = title,
         messages = messages,
@@ -115,6 +118,7 @@ fun ChatScreenContent(
         supportsReply = supportsReply,
         headerContent = headerContent,
         composeStyle = composeStyle,
+        keyboardStyle = keyboardStyle,
         conversationKey = conversationKey,
     )
 }
@@ -138,6 +142,7 @@ internal fun ChatThread(
     supportsReply: Boolean,
     headerContent: (@Composable () -> Unit)?,
     composeStyle: ComposeStyle? = ComposeStyle.INLINE,
+    keyboardStyle: KeyboardStyle? = KeyboardStyle.SYSTEM,
     conversationKey: String? = null,
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -156,8 +161,8 @@ internal fun ChatThread(
     var actionsFor by remember { mutableStateOf<Message?>(null) }
     var replyingTo by remember { mutableStateOf<Message?>(null) }
 
-    // FULL SCREEN: compose is an overlay over the thread. The draft lives
-    // here, per conversation, so Back from the editor keeps it.
+    // One draft per conversation, shared by both input styles. FULL SCREEN
+    // compose is an overlay over the thread, so Back from it keeps the draft.
     val fullScreen = composeStyle == ComposeStyle.FULL_SCREEN
     val draft = rememberSaveable(conversationKey, saver = TextFieldState.Saver) { TextFieldState() }
     var composing by rememberSaveable(conversationKey) { mutableStateOf(false) }
@@ -277,10 +282,12 @@ internal fun ChatThread(
                 ReplyChip(label = replyLabel(target), onCancel = { replyingTo = null })
             }
 
-            when (composeStyle) {
-                ComposeStyle.INLINE -> MessageInputBar(onSendText = sendText, media = media)
-                ComposeStyle.FULL_SCREEN -> ThreadBottomBar(media = media, onCompose = openCompose)
-                null -> Unit
+            if (keyboardStyle != null) {
+                when (composeStyle) {
+                    ComposeStyle.INLINE -> MessageInputBar(draft, keyboardStyle, onSendText = sendText, media = media)
+                    ComposeStyle.FULL_SCREEN -> ThreadBottomBar(media = media, onCompose = openCompose)
+                    null -> Unit
+                }
             }
         }
 
@@ -307,13 +314,18 @@ internal fun ChatThread(
             ComposeEditor(
                 title = title,
                 draft = draft,
+                keyboard = keyboardStyle ?: KeyboardStyle.DEFAULT,
                 replyLabel = replyingTo?.let(::replyLabel),
                 onSend = { text ->
                     sendText(text)
                     draft.clearText()
+                    dismissKeyboard()
                     composing = false
                 },
-                onBack = { composing = false },
+                onBack = {
+                    dismissKeyboard()
+                    composing = false
+                },
             )
         }
     }

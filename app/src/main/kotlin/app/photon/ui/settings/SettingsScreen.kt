@@ -13,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import app.photon.data.ComposeStyle
+import app.photon.data.KeyboardStyle
 import app.photon.data.PhotonPreferences
 import app.photon.data.ScrollDial
 import app.photon.service.PhotonService
@@ -175,6 +176,7 @@ private fun ChatPage(onBack: () -> Unit) {
     val notificationsEnabled by prefs.notificationsEnabled.collectAsState(initial = true)
     val scrollDial by prefs.scrollDial.collectAsState(initial = ScrollDial.DEFAULT)
     val composeStyle by prefs.composeStyle.collectAsState(initial = ComposeStyle.DEFAULT)
+    val keyboardStyle by prefs.keyboardStyle.collectAsState(initial = KeyboardStyle.DEFAULT)
 
     BackHandler { onBack() }
     ChatSettingsContent(
@@ -182,11 +184,13 @@ private fun ChatPage(onBack: () -> Unit) {
         showThumbnails = showThumbnails,
         scrollDial = scrollDial,
         composeStyle = composeStyle,
+        keyboardStyle = keyboardStyle,
         onBack = onBack,
         onToggleNotifications = { scope.launch { prefs.setNotificationsEnabled(!notificationsEnabled) } },
         onToggleThumbnails = { scope.launch { prefs.setShowThumbnails(!showThumbnails) } },
         onCycleScrollDial = { scope.launch { prefs.setScrollDial(scrollDial.next()) } },
         onCycleComposeStyle = { scope.launch { prefs.setComposeStyle(composeStyle.next()) } },
+        onCycleKeyboardStyle = { scope.launch { prefs.setKeyboardStyle(keyboardStyle.next()) } },
     )
 }
 
@@ -196,17 +200,20 @@ private fun ChatSettingsContent(
     showThumbnails: Boolean,
     scrollDial: ScrollDial,
     composeStyle: ComposeStyle,
+    keyboardStyle: KeyboardStyle,
     onBack: () -> Unit,
     onToggleNotifications: () -> Unit,
     onToggleThumbnails: () -> Unit,
     onCycleScrollDial: () -> Unit,
     onCycleComposeStyle: () -> Unit,
+    onCycleKeyboardStyle: () -> Unit,
 ) {
     MenuScreen("Chat", onBack) {
         MenuRow("NOTIFICATIONS", if (notificationsEnabled) "ON" else "OFF", onClick = onToggleNotifications)
         MenuRow("THUMBNAILS", if (showThumbnails) "ON" else "OFF", onClick = onToggleThumbnails)
         MenuRow("SCROLL DIAL", scrollDial.label, onClick = onCycleScrollDial)
         MenuRow("COMPOSE", composeStyle.label, onClick = onCycleComposeStyle)
+        MenuRow("KEYBOARD", keyboardStyle.label, onClick = onCycleKeyboardStyle)
     }
 }
 
@@ -275,11 +282,13 @@ private fun ChatSettingsPreview() = PhotonTheme {
         showThumbnails = false,
         scrollDial = ScrollDial.MEDIUM,
         composeStyle = ComposeStyle.INLINE,
+        keyboardStyle = KeyboardStyle.SYSTEM,
         onBack = {},
         onToggleNotifications = {},
         onToggleThumbnails = {},
         onCycleScrollDial = {},
         onCycleComposeStyle = {},
+        onCycleKeyboardStyle = {},
     )
 }
 

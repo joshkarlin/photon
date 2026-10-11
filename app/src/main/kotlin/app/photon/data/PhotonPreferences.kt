@@ -67,6 +67,24 @@ enum class ComposeStyle(val label: String) {
     }
 }
 
+/**
+ * Which keyboard writes messages. [SYSTEM] is the phone's input method (e.g.
+ * Gboard); [LIGHT] is the LP3 keyboard from the Light SDK, drawn by Photon,
+ * so the system keyboard never shows.
+ */
+enum class KeyboardStyle(val label: String) {
+    SYSTEM("SYSTEM"),
+    LIGHT("LIGHT");
+
+    fun next(): KeyboardStyle = entries[(ordinal + 1) % entries.size]
+
+    companion object {
+        val DEFAULT = SYSTEM
+
+        fun resolve(stored: String?): KeyboardStyle = entries.firstOrNull { it.name == stored } ?: DEFAULT
+    }
+}
+
 class PhotonPreferences(private val context: Context) {
 
     private val maxMessagesKey = intPreferencesKey("max_messages")
@@ -75,6 +93,7 @@ class PhotonPreferences(private val context: Context) {
     private val notificationsKey = booleanPreferencesKey("notifications_enabled")
     private val scrollDialKey = stringPreferencesKey("scroll_dial")
     private val composeStyleKey = stringPreferencesKey("compose_style")
+    private val keyboardStyleKey = stringPreferencesKey("keyboard_style")
     // Superseded by scroll_dial; read for migration, removed on the next write.
     private val legacyChatScrollSpeedKey = stringPreferencesKey("chat_scroll_speed")
     private val legacyMenuScrollSpeedKey = stringPreferencesKey("menu_scroll_speed")
@@ -87,6 +106,7 @@ class PhotonPreferences(private val context: Context) {
         ScrollDial.resolve(it[scrollDialKey], it[legacyChatScrollSpeedKey], it[legacyMenuScrollSpeedKey])
     }
     val composeStyle: Flow<ComposeStyle> = context.dataStore.data.map { ComposeStyle.resolve(it[composeStyleKey]) }
+    val keyboardStyle: Flow<KeyboardStyle> = context.dataStore.data.map { KeyboardStyle.resolve(it[keyboardStyleKey]) }
 
     suspend fun setMaxMessages(value: Int) {
         context.dataStore.edit { it[maxMessagesKey] = value }
@@ -114,6 +134,10 @@ class PhotonPreferences(private val context: Context) {
 
     suspend fun setComposeStyle(value: ComposeStyle) {
         context.dataStore.edit { it[composeStyleKey] = value.name }
+    }
+
+    suspend fun setKeyboardStyle(value: KeyboardStyle) {
+        context.dataStore.edit { it[keyboardStyleKey] = value.name }
     }
 
     fun getNotificationsEnabledSync(): Boolean {
