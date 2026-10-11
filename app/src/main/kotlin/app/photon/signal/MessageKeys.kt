@@ -26,6 +26,16 @@ object MessageKeys {
     }
 
     /**
+     * The wire (sent) timestamp in ms of a stored message. The id carries the
+     * exact value; the `timestamp` column is truncated to seconds, so
+     * rebuilding from it (`seconds * 1000`) yields a different timestamp that
+     * recipients can't dedupe against and receipts/reactions won't match.
+     * [fallbackSeconds] is only used for ids that don't parse.
+     */
+    fun sentTimestampMs(messageId: String, fallbackSeconds: Long): Long =
+        parse(messageId)?.second ?: (fallbackSeconds * 1000)
+
+    /**
      * Remap values keyed by message-id *prefix* back onto the full message ids
      * supplied. Used to attach reactions (stored by prefix) to the full ids the
      * UI indexes by. Preserves input order.

@@ -56,4 +56,22 @@ class MessageKeysTest {
         val out = MessageKeys.remapByPrefix(listOf("a_100_x"), mapOf("z_999" to listOf("👍")))
         assertEquals(0, out.size)
     }
+
+    /**
+     * A retry must resend with the original wire timestamp. The seconds column
+     * loses the ms part (1700000000123 → 1700000000), and `seconds * 1000`
+     * produced a different timestamp the recipient couldn't dedupe.
+     */
+    @Test
+    fun sentTimestampComesFromIdNotSecondsColumn() {
+        assertEquals(
+            1700000000123L,
+            MessageKeys.sentTimestampMs("aci-uuid_1700000000123_ab12cd34", fallbackSeconds = 1700000000L),
+        )
+    }
+
+    @Test
+    fun sentTimestampFallsBackToSecondsForUnparseableIds() {
+        assertEquals(1700000000000L, MessageKeys.sentTimestampMs("legacy", fallbackSeconds = 1700000000L))
+    }
 }

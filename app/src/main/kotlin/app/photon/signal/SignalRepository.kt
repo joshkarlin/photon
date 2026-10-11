@@ -68,28 +68,21 @@ class SignalRepository(
     }
 
     suspend fun markRead(jid: String, messageIds: List<String>) {
-        db.resetUnread(jid)
-        val sender = sender ?: return
         withContext(Dispatchers.IO) {
+            db.markConversationSeen(jid)
+            val sender = sender ?: return@withContext
             // Sync read state to our other devices so the primary's unread
-            // badge clears. Message ids encode "{authorAci}_{timestampMs}_…",
-            // which is exactly the (author, sent-timestamp) pair the sync
-            // carries. Rows only flip to status='read' after a successful
-            // send, so failures retry on the next chat open.
-            val pending = db.getUnsyncedIncomingReads(jid)
-            if (pending.isEmpty()) return@withContext
-            val parsed = pending.mapNotNull { id ->
-                MessageKeys.parse(id)?.let { id to it }
+            // badge clears. Rows only flip from 'seen' to 'read' when they
+            // were in a payload that was actually sent, so failures — and
+            // rows that can't be expressed in a read sync — retry on the
+            // next chat open instead of being marked read silently.
+            val plan = planReadSync(db.getUnsyncedIncomingReads(jid))
+            if (plan.skippedIds.isNotEmpty()) {
+                Log.w(TAG, "Cannot sync read state for ${plan.skippedIds.size} message(s) without an ACI key")
             }
-            if (parsed.isEmpty()) {
-                // Never treat an empty wire payload as success: sendReadSync
-                // intentionally ignores malformed ids, and marking all rows
-                // read here would permanently lose the retry opportunity.
-                Log.w(TAG, "Cannot sync read state for ${pending.size} malformed message id(s)")
-                return@withContext
-            }
-            if (sender.sendReadSync(parsed.map { it.second })) {
-                db.markMessagesRead(parsed.map { it.first })
+            if (plan.entries.isEmpty()) return@withContext
+            if (sender.sendReadSync(plan.entries)) {
+                db.markMessagesRead(plan.rowIds)
             }
         }
     }

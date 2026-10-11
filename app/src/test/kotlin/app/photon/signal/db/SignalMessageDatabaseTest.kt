@@ -163,9 +163,11 @@ class SignalMessageDatabaseTest {
         db.incrementUnread(aci)
         db.incrementUnread(aci)
 
-        val affected = db.markIncomingReadByPrefix("${aci}_1700")
+        val result = db.markIncomingReadByPrefix("${aci}_1700")
 
-        assertEquals(listOf(aci), affected)
+        assertEquals(true, result.matched)
+        // The newer message is still unread, so its notification stays.
+        assertEquals(emptyList(), result.clearedConversations)
         assertEquals("read", db.getMessage("${aci}_1700_abc")?.status)
         assertEquals("received", db.getMessage("${aci}_1800_def")?.status)
         assertEquals(1, db.getConversation(aci)?.unreadCount)
@@ -190,8 +192,8 @@ class SignalMessageDatabaseTest {
         val first = db.markIncomingReadByPrefix("${author}_1700")
         val duplicate = db.markIncomingReadByPrefix("${author}_1700")
 
-        assertEquals(listOf(group), first)
-        assertEquals(emptyList(), duplicate)
+        assertEquals(SignalMessageDatabase.ReadSyncResult(true, emptyList()), first)
+        assertEquals(SignalMessageDatabase.ReadSyncResult(true, emptyList()), duplicate)
         assertEquals("read", db.getMessage("${author}_1700_abc")?.status)
         assertEquals("received", db.getMessage("${author}_1800_def")?.status)
         assertEquals(1, db.getConversation(group)?.unreadCount)
@@ -207,9 +209,11 @@ class SignalMessageDatabaseTest {
             isFromMe = true, status = "sent",
         )
 
-        val affected = db.markIncomingReadByPrefix("${aci}_1700")
+        val result = db.markIncomingReadByPrefix("${aci}_1700")
 
-        assertEquals(emptyList(), affected)
+        // An outgoing row with the same key isn't the incoming message the
+        // read refers to, so the read is still unmatched.
+        assertEquals(SignalMessageDatabase.ReadSyncResult(false, emptyList()), result)
         assertEquals("sent", db.getMessage("${aci}_1700_abc")?.status)
     }
 
@@ -299,5 +303,30 @@ class SignalMessageDatabaseTest {
             .toSet()
 
         assertEquals(setOf(dmAci, groupMemberA, groupMemberB), targets)
+    }
+
+    /**
+     * Group member names follow the documented policy: this device's local
+     * contacts win over the Signal profile name, which wins over the phone.
+     * (The old order put the profile name first, so a saved contact name was
+     * overridden by whatever the member called themselves on Signal.)
+     */
+    @Test
+    fun memberDisplayName_prefersLocalContactThenProfileThenPhone() {
+        val saved = "member-saved"
+        val profileOnly = "member-profile"
+        val phoneOnly = "member-phone"
+        db.updateContactPhone(saved, "+15550003333")
+        db.updateContactProfileName(saved, "Signal Profile Name")
+        db.updateContactPhone(profileOnly, "+15550004444")
+        db.updateContactProfileName(profileOnly, "Profile Only")
+        db.updateContactPhone(phoneOnly, "+15550005555")
+        val resolver = { phone: String -> if (phone == "+15550003333") "Saved Contact" else null }
+
+        assertEquals("Saved Contact", db.memberDisplayName(saved, resolver))
+        assertEquals("Profile Only", db.memberDisplayName(profileOnly, resolver))
+        assertEquals("+15550005555", db.memberDisplayName(phoneOnly, resolver))
+        assertEquals("Signal Profile Name", db.memberDisplayName(saved))
+        assertEquals("member-u", db.memberDisplayName("member-unknown"))
     }
 }

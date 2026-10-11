@@ -63,6 +63,9 @@ class SignalMessageSender(
     private val credentials: SignalCredentials,
     private val protocolStore: PhotonProtocolStore,
     private val messageDb: SignalMessageDatabase,
+    // Phone → local address-book name, so member names written by the
+    // group-send bootstrap follow the same policy as the receiver's.
+    private val contactResolver: ((String) -> String?)? = null,
 ) {
     companion object {
         private const val TAG = "SignalMessageSender"
@@ -199,7 +202,7 @@ class SignalMessageSender(
      */
     fun sendTextMessage(conversationJid: String, text: String, replyToId: String? = null) {
         val timestamp = System.currentTimeMillis()
-        val replyPrefix = replyToId?.substringBeforeLast("_")
+        val replyPrefix = replyPrefixFor(replyToId)
         // Prefix "{authorAci}_{timestampMs}" must stay stable so quote lookups
         // via findMessageByPrefix still match. The random suffix only exists
         // to avoid local PK collisions on rapid-fire sends with the same ms.
@@ -258,7 +261,7 @@ class SignalMessageSender(
         replyToId: String? = null,
     ) {
         val timestamp = System.currentTimeMillis()
-        val replyPrefix = replyToId?.substringBeforeLast("_")
+        val replyPrefix = replyPrefixFor(replyToId)
         val messageId = "${credentials.aciString}_${timestamp}_${UUID.randomUUID().toString().take(8)}"
         val contentType = when {
             mimeType.startsWith("image/") -> "image"
@@ -336,11 +339,23 @@ class SignalMessageSender(
         return stream.use { sender.uploadAttachment(it) }
     }
 
+    /**
+     * Quote key for a reply. Call rows aren't messages other devices know
+     * about (their ids aren't "{author}_{ts}" keys), so a reply to one is
+     * sent as a plain message.
+     */
+    private fun replyPrefixFor(replyToId: String?): String? {
+        if (replyToId == null) return null
+        if (messageDb.getMessage(replyToId)?.contentType == SignalMessageDatabase.CONTENT_CALL) return null
+        return MessageKeys.prefixOf(replyToId)
+    }
+
     fun sendReaction(conversationJid: String, messageId: String, emoji: String): Boolean {
         val row = messageDb.getMessage(messageId)
         val reaction = signalReactionFor(messageId, emoji)
         val myAci = credentials.aciString
         if (row == null || row.conversationJid != conversationJid ||
+            row.contentType == SignalMessageDatabase.CONTENT_CALL ||
             row.status == "failed" || row.status == "sending" || reaction == null || myAci == null
         ) return false
 
@@ -493,7 +508,7 @@ class SignalMessageSender(
             for (memberAci in groupManager.memberAcis(group)) {
                 val aciString = memberAci.toString()
                 messageDb.upsertParticipant(
-                    conversationJid, aciString, messageDb.memberDisplayName(aciString), "member",
+                    conversationJid, aciString, messageDb.memberDisplayName(aciString, contactResolver), "member",
                 )
             }
             groupManager.memberAcis(group).filter { it != myAci }
@@ -635,8 +650,9 @@ class SignalMessageSender(
         messageDb.updateMessageStatus(messageId, "sending")
         // Keep the same wire timestamp by reusing the original — a retry
         // that actually went through the first time would otherwise bypass
-        // recipient-side dedupe and produce a duplicate.
-        val timestamp = row.timestamp * 1000
+        // recipient-side dedupe and produce a duplicate. The exact ms value
+        // lives in the id; the timestamp column only has seconds.
+        val timestamp = MessageKeys.sentTimestampMs(messageId, row.timestamp)
         return try {
             val attachments = if (isText) emptyList() else listOf(
                 uploadAttachment(mediaFile!!, row.mediaMime ?: defaultMimeFor(row.contentType), voiceNote = row.contentType == "audio"),
@@ -667,8 +683,11 @@ class SignalMessageSender(
      * the network delete couldn't be sent, so the user can retry.
      */
     fun deleteMessage(conversationJid: String, messageId: String, forEveryone: Boolean): Boolean {
-        if (forEveryone) {
-            val targetTs = messageId.split("_").getOrNull(1)?.toLongOrNull()
+        // Call rows exist only in Photon: there's nothing to delete remotely,
+        // and their ids don't carry a sent timestamp to target.
+        val isCallRow = messageDb.getMessage(messageId)?.contentType == SignalMessageDatabase.CONTENT_CALL
+        if (forEveryone && !isCallRow) {
+            val targetTs = MessageKeys.parse(messageId)?.second
                 ?: messageDb.getMessage(messageId)?.let { it.timestamp * 1000 }
                 ?: run {
                     Log.w(TAG, "deleteMessage: can't derive target timestamp for $messageId")
@@ -790,21 +809,24 @@ class SignalMessageSender(
      * consistent across devices, mirroring what official clients send.
      *
      * Each entry is (authorAci, sentTimestampMs) of an incoming message —
-     * the pair other devices use to locate it. Returns false on failure so
-     * the caller can leave the messages marked unsynced and retry later.
+     * the pair other devices use to locate it (see [planReadSync]). Returns
+     * true only when a non-empty payload went out, so the caller marks
+     * exactly those rows synced; anything else stays pending for a retry.
      *
      * Note: this is the self-sync only. Official clients also send a READ
      * receipt to the message author, but that's gated on the user's
      * read-receipts privacy setting, which Photon doesn't know — so we
      * deliberately don't.
      */
-    fun sendReadSync(reads: List<Pair<String, Long>>): Boolean {
-        val readMessages = reads.mapNotNull { (aci, timestampMs) ->
-            ServiceId.ACI.parseOrNull(aci)?.let { ReadMessage(it, timestampMs) }
-        }
-        if (readMessages.isEmpty()) return true
+    fun sendReadSync(reads: List<Pair<ServiceId.ACI, Long>>): Boolean {
+        if (reads.isEmpty()) return false
+        val readMessages = reads.map { (aci, timestampMs) -> ReadMessage(aci, timestampMs) }
         return try {
-            getOrCreateSender().sendSyncMessage(SignalServiceSyncMessage.forRead(readMessages))
+            val result = getOrCreateSender().sendSyncMessage(SignalServiceSyncMessage.forRead(readMessages))
+            if (!result.isSuccess) {
+                Log.w(TAG, "Read sync not delivered (${readMessages.size} message(s))")
+                return false
+            }
             Log.i(TAG, "Sent read sync for ${readMessages.size} message(s)")
             true
         } catch (e: Exception) {

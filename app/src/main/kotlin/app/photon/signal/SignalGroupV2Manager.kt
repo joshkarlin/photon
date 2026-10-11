@@ -52,30 +52,35 @@ class SignalGroupV2Manager(
         // and credentials stay valid for a 7-day window, so an instance-level
         // cache would refetch on each reconnect for nothing.
         private val credentialsByDay = ConcurrentHashMap<Long, AuthCredentialWithPniResponse>()
+
+        /** Credentials belong to the linked account; drop them when it's unlinked. */
+        fun clearCredentialCache() = credentialsByDay.clear()
+
+        /**
+         * Derive the stable, encrypted-then-hashed group identifier from a
+         * master key. This is the same identifier that libsignal's
+         * SignalServiceCipher reports as `metadata.groupId` on incoming
+         * envelopes, so we can build a single conversation_jid from either
+         * source without one routing into a different thread than the other.
+         * Pure crypto: it doesn't need a connection, so messages processed
+         * while the receiver is between connections still route correctly.
+         */
+        fun groupIdFromMasterKey(masterKey: ByteArray): ByteArray {
+            val mk = GroupMasterKey(masterKey)
+            return GroupSecretParams.deriveFromMasterKey(mk)
+                .publicParams
+                .groupIdentifier
+                .serialize()
+        }
+
+        /** Base64-URL-safe encoding of the group id — matches receiver's existing jid format. */
+        fun jidFromMasterKey(masterKey: ByteArray): String =
+            Base64.encodeToString(groupIdFromMasterKey(masterKey), Base64.NO_WRAP or Base64.URL_SAFE)
     }
 
     private val clientZk: ClientZkOperations = ClientZkOperations.create(config)
     private val operations: GroupsV2Operations = GroupsV2Operations(clientZk, GroupsV2Operations.HIGHEST_KNOWN_EPOCH)
     private val groupsApi: GroupsV2Api = GroupsV2Api(authWs, pushSocket, operations)
-
-    /**
-     * Derive the stable, encrypted-then-hashed group identifier from a
-     * master key. This is the same identifier that libsignal's
-     * SignalServiceCipher reports as `metadata.groupId` on incoming
-     * envelopes, so we can build a single conversation_jid from either
-     * source without one routing into a different thread than the other.
-     */
-    fun groupIdFromMasterKey(masterKey: ByteArray): ByteArray {
-        val mk = GroupMasterKey(masterKey)
-        return GroupSecretParams.deriveFromMasterKey(mk)
-            .publicParams
-            .groupIdentifier
-            .serialize()
-    }
-
-    /** Base64-URL-safe encoding of the group id — matches receiver's existing jid format. */
-    fun jidFromMasterKey(masterKey: ByteArray): String =
-        Base64.encodeToString(groupIdFromMasterKey(masterKey), Base64.NO_WRAP or Base64.URL_SAFE)
 
     /**
      * Fetch and decrypt the current group state. Returns null on any

@@ -12,11 +12,16 @@ import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.store.PhotonProtocolStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.signal.core.models.ServiceId
 import org.signal.libsignal.metadata.ProtocolDuplicateMessageException
 import org.signal.libsignal.metadata.ProtocolException
@@ -37,10 +42,13 @@ import org.whispersystems.signalservice.api.push.SignalServiceAddress
 import org.whispersystems.signalservice.api.util.AttachmentPointerUtil
 import org.whispersystems.signalservice.api.websocket.SignalWebSocket
 import org.whispersystems.signalservice.internal.push.AttachmentPointer
+import org.whispersystems.signalservice.internal.push.CallMessage
+import org.whispersystems.signalservice.internal.push.Content
 import org.whispersystems.signalservice.internal.push.DataMessage
 import org.whispersystems.signalservice.internal.push.Envelope
 import org.whispersystems.signalservice.internal.push.SyncMessage
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.UUID
 
 class SignalMessageReceiver(
@@ -63,11 +71,17 @@ class SignalMessageReceiver(
         private const val MEDIA_TTL_MS: Long = 5L * 60 * 1000
         // Conversation name used until the GroupV2 state fetch resolves the
         // real title. Also doubles as the "needs fetch" sentinel.
-        private const val PLACEHOLDER_GROUP_NAME = "Signal group"
+        private const val PLACEHOLDER_GROUP_NAME = ConversationNaming.PLACEHOLDER_GROUP_NAME
         // SignalWebSocket exposes inbound frames through a blocking long-poll
         // API. Its Object.wait() releases the socket monitor, so outbound
         // MessageApi/KeysApi requests can proceed while this waits.
         private const val MESSAGE_POLL_TIMEOUT_MS = 30_000L
+        // In-process retry delay for an envelope left un-acked after a local
+        // processing failure (see retryHeldEnvelopes).
+        private const val HELD_ENVELOPE_RETRY_MS = 10_000L
+        // How long a Signal reset waits for in-flight receiver work before
+        // the databases are deleted.
+        private const val RESET_DRAIN_TIMEOUT_MS = 10_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -82,19 +96,66 @@ class SignalMessageReceiver(
     private val _state = MutableStateFlow("disconnected")
     val state: StateFlow<String> = _state
 
-    private var webSocket: SignalWebSocket.AuthenticatedWebSocket? = null
-    private var unauthWebSocket: SignalWebSocket.UnauthenticatedWebSocket? = null
-    private var running = false
-    private var profileFetcher: SignalProfileFetcher? = null
-    private var pushSocket: PushServiceSocket? = null
+    // Lifecycle. Every start() begins a new generation and a loop only runs
+    // while its generation is current, so "Refresh connection" (stop();
+    // start()) can never leave an old loop reconnecting next to the new one.
+    // Guarded by lifecycleLock; @Volatile for the lock-free isCurrent() reads.
+    private val lifecycleLock = Any()
+    @Volatile private var running = false
+    @Volatile private var generation = 0L
+    private var receiveJob: Job? = null
+    @Volatile private var lastMaintenanceAt = 0L
+
+    /**
+     * One connection attempt's socket pair. [alive] gates both sockets'
+     * canConnect: SignalWebSocket transparently reopens a closed connection on
+     * the next request, so anything still holding a superseded socket (an
+     * in-flight profile fetch, a late ack) would otherwise open a second
+     * authenticated connection and displace the live one.
+     */
+    private class SocketPair(
+        val auth: SignalWebSocket.AuthenticatedWebSocket,
+        val unauth: SignalWebSocket.UnauthenticatedWebSocket,
+        val alive: AtomicBoolean,
+    )
+
+    @Volatile private var sockets: SocketPair? = null
+    @Volatile private var profileFetcher: SignalProfileFetcher? = null
+    @Volatile private var pushSocket: PushServiceSocket? = null
     @Volatile private var groupManager: SignalGroupV2Manager? = null
     @Volatile private var contactsSyncRequested = false
     @Volatile private var activeContactsPinged = false
     @Volatile private var activeContactsPingInFlight = false
 
+    // Read syncs that arrived before their message (see EarlyReadCache).
+    private val earlyReads = EarlyReadCache()
+    // Envelopes left un-acked after a local processing failure.
+    private val envelopeRetries = EnvelopeRetryTracker<DecryptedEnvelope>()
+    // Their in-process retries, run by the read loop on its own thread.
+    private class HeldRetry(
+        val response: EnvelopeResponse,
+        val socket: SignalWebSocket.AuthenticatedWebSocket,
+        val dueAt: Long,
+    )
+    private val heldRetries = mutableListOf<HeldRetry>()
+
     fun start() {
-        if (running) return
-        running = true
+        synchronized(lifecycleLock) {
+            if (running) return
+            running = true
+            val gen = ++generation
+            // A fresh start (including "Refresh connection") re-runs upkeep.
+            lastMaintenanceAt = 0L
+            val previous = receiveJob
+            receiveJob = scope.launch {
+                // stop() cancelled the previous loop and closed its socket, so
+                // it exits promptly; wait for it so two loops never overlap.
+                // NonCancellable: if this job is itself stopped while waiting,
+                // the next start() joins it and must still wait for `previous`.
+                withContext(NonCancellable) { previous?.join() }
+                receiveLoop(gen)
+            }
+        }
         scope.launch {
             try { messageDb.repairConversationTimestamps() }
             catch (e: Exception) { Log.w(TAG, "Timestamp repair failed: ${e.message}") }
@@ -121,7 +182,6 @@ class SignalMessageReceiver(
                 Log.w(TAG, "Local-contacts migration failed: ${e.message}")
             }
         }
-        scope.launch { receiveLoop() }
     }
 
     /**
@@ -145,92 +205,263 @@ class SignalMessageReceiver(
     }
 
     fun stop() {
-        running = false
-        val authWs = webSocket
-        val unauthWs = unauthWebSocket
-        app.photon.service.PhotonService._signalSender?.detachReceiverWebSockets(authWs, unauthWs)
-        try { authWs?.disconnect() } catch (_: Exception) {}
-        try { unauthWs?.disconnect() } catch (_: Exception) {}
-        webSocket = null
-        unauthWebSocket = null
-        profileFetcher = null
-        groupManager = null
-        app.photon.service.PhotonService._signalGroupManager = null
+        stopInternal()
     }
 
-    private suspend fun receiveLoop() {
-        while (running) {
-            try {
-                _state.value = "connecting"
-                // Disconnect old socket before creating new one
-                try { webSocket?.disconnect() } catch (_: Exception) {}
-                webSocket = null
+    /** Stop and return the cancelled receive loop's job. */
+    private fun stopInternal(): Job? {
+        val pair: SocketPair?
+        val loop: Job?
+        synchronized(lifecycleLock) {
+            running = false
+            generation++
+            loop = receiveJob
+            loop?.cancel()
+            pair = sockets
+            sockets = null
+            profileFetcher = null
+            groupManager = null
+            _state.value = "disconnected"
+        }
+        app.photon.service.PhotonService._signalGroupManager = null
+        closeSockets(pair)
+        return loop
+    }
 
-                connectWebSocket()
-                _state.value = "connected"
-                Log.i(TAG, "WebSocket connected, reading messages... stateSnapshot=${webSocket?.stateSnapshot}")
-                readMessages()
-            } catch (e: Exception) {
-                Log.e(TAG, "Message receive error", e)
-                _state.value = "disconnected"
-            }
-            if (running) {
-                val state = webSocket?.stateSnapshot
-                Log.i(TAG, "Reconnecting in 5s... (last state: $state)")
-                if (state == org.whispersystems.signalservice.api.websocket.WebSocketConnectionState.AUTHENTICATION_FAILED) {
-                    Log.e(TAG, "Signal server rejected our credentials (HTTP 401/403). " +
-                        "This usually means the device was unlinked on the primary — " +
-                        "user needs to re-pair Photon from Settings → Connections → Signal → RESET.")
-                }
-                delay(5000)
-            }
+    /**
+     * Forget per-account session state once the device is unlinked (Signal
+     * reset), so a re-pair starts clean: ask the primary for contacts again,
+     * re-ping every contact for the new device id, and drop held envelopes,
+     * early reads and the group credential cache.
+     *
+     * Blocks (call off the main thread) until in-flight receiver work — the
+     * envelope batch being processed, contacts ingest, profile fetches — has
+     * finished or been cancelled, so none of it writes the old account's data
+     * into the databases the caller is about to delete.
+     */
+    fun resetAccountState() {
+        stopInternal()
+        val work = scope.coroutineContext[Job]?.children?.toList().orEmpty()
+        work.forEach { it.cancel() }
+        val drained = runBlocking {
+            withTimeoutOrNull(RESET_DRAIN_TIMEOUT_MS) { work.forEach { it.join() } } != null
+        }
+        if (!drained) Log.w(TAG, "Reset: receiver work still running after ${RESET_DRAIN_TIMEOUT_MS}ms")
+        contactsSyncRequested = false
+        activeContactsPinged = false
+        earlyReads.clear()
+        envelopeRetries.clearAll()
+        synchronized(heldRetries) { heldRetries.clear() }
+        context.getSharedPreferences("signal_ping_state", android.content.Context.MODE_PRIVATE)
+            .edit().clear().apply()
+        SignalGroupV2Manager.clearCredentialCache()
+    }
+
+    private fun isCurrent(gen: Long): Boolean = running && generation == gen
+
+    /** Publish a connection state, unless this loop has been superseded. */
+    private fun setState(gen: Long, value: String) {
+        synchronized(lifecycleLock) {
+            if (isCurrent(gen)) _state.value = value
         }
     }
 
-    private fun connectWebSocket() {
+    private fun closeSockets(pair: SocketPair?) {
+        if (pair == null) return
+        pair.alive.set(false)
+        app.photon.service.PhotonService._signalSender?.detachReceiverWebSockets(pair.auth, pair.unauth)
+        try { pair.auth.disconnect() } catch (_: Exception) {}
+        try { pair.unauth.disconnect() } catch (_: Exception) {}
+    }
+
+    /** When this attempt's socket was first seen connected (0 = not yet). */
+    private class Attempt {
+        var connectedAt = 0L
+    }
+
+    private suspend fun receiveLoop(gen: Long) {
+        var failures = 0
+        var authFailures = 0
+        while (isCurrent(gen)) {
+            var ws: SignalWebSocket.AuthenticatedWebSocket? = null
+            val attempt = Attempt()
+            try {
+                setState(gen, "connecting")
+                ws = connectWebSocket(gen)
+                // connect() is asynchronous: report "connected" only once the
+                // handshake has actually completed.
+                markConnectedIfLive(gen, ws, attempt)
+                Log.i(TAG, "WebSocket opened, reading messages... stateSnapshot=${ws.stateSnapshot}")
+                readMessages(gen, ws, attempt)
+            } catch (e: Exception) {
+                if (isCurrent(gen)) Log.e(TAG, "Message receive error", e)
+            }
+            if (!isCurrent(gen)) return
+
+            val wsState = ws?.stateSnapshot
+            if (wsState == org.whispersystems.signalservice.api.websocket.WebSocketConnectionState.AUTHENTICATION_FAILED) {
+                authFailures++
+                if (authFailures >= SignalReconnect.AUTH_FAILURES_BEFORE_LOGOUT) {
+                    Log.e(TAG, "Signal server rejected our credentials (HTTP 401/403) $authFailures times. " +
+                        "This usually means the device was unlinked on the primary — stopping until " +
+                        "Photon is re-paired from Settings → Connections → Signal → RESET.")
+                    markLoggedOut(gen)
+                    return
+                }
+            } else {
+                authFailures = 0
+            }
+
+            failures = SignalReconnect.nextFailureCount(
+                failures, attempt.connectedAt.takeIf { it > 0 }?.let { System.currentTimeMillis() - it },
+            )
+            val wait = SignalReconnect.delayMs(failures)
+            setState(gen, "disconnected")
+            Log.i(TAG, "Reconnecting in ${wait / 1000}s (attempt $failures, last state: $wsState)")
+            delay(wait)
+        }
+    }
+
+    /**
+     * Credentials rejected: stop reconnecting and report "logged_out" (shown
+     * as NOT LINKED in settings). "Refresh connection" or a re-pair starts a
+     * new generation.
+     */
+    private fun markLoggedOut(gen: Long) {
+        val pair: SocketPair?
+        synchronized(lifecycleLock) {
+            if (generation != gen) return
+            running = false
+            pair = sockets
+            sockets = null
+            profileFetcher = null
+            groupManager = null
+            _state.value = "logged_out"
+        }
+        app.photon.service.PhotonService._signalGroupManager = null
+        closeSockets(pair)
+    }
+
+    private fun markConnectedIfLive(gen: Long, ws: SignalWebSocket.AuthenticatedWebSocket, attempt: Attempt) {
+        if (attempt.connectedAt > 0) return
+        if (ws.stateSnapshot != org.whispersystems.signalservice.api.websocket.WebSocketConnectionState.CONNECTED) return
+        attempt.connectedAt = System.currentTimeMillis()
+        setState(gen, "connected")
+    }
+
+    private fun connectWebSocket(gen: Long): SignalWebSocket.AuthenticatedWebSocket {
+        // Close the previous attempt's pair first — both sockets; the
+        // unauthenticated one used to leak on every reconnect.
+        val oldPair = synchronized(lifecycleLock) { sockets.also { sockets = null } }
+        closeSockets(oldPair)
+
         val factory = SignalConfig.webSocketFactory(config, "photon-recv", credentials) { status ->
             Log.w(TAG, "Message error: $status")
         }
 
+        // canConnect is per generation and per pair: a superseded socket
+        // must never silently reconnect itself.
+        val alive = AtomicBoolean(true)
+        val canConnect = { isCurrent(gen) && alive.get() }
         val ws = SignalWebSocket.AuthenticatedWebSocket(
             factory,
-            { running },
+            canConnect,
             SignalConfig.sleepTimer,
             30_000L,
         )
         ws.connect()
         ws.registerKeepAliveToken("PhotonReceiver")
-        webSocket = ws
 
         // Unauthenticated socket is used by profile fetches and key uploads.
         val unauthFactory = SignalConfig.webSocketFactory(config, "photon-recv-unauth", null)
         val unauthWs = SignalWebSocket.UnauthenticatedWebSocket(
-            unauthFactory, { running },
+            unauthFactory, canConnect,
             SignalConfig.sleepTimer,
             30_000L,
         )
         unauthWs.connect()
         unauthWs.registerKeepAliveToken("PhotonReceiverUnauth")
-        unauthWebSocket = unauthWs
-
-        // Sending sync messages through a second authenticated WebSocket can
-        // cause Signal to close this receiver socket. Share the receiver pair
-        // so reads and sends are multiplexed over one linked-device session.
-        app.photon.service.PhotonService._signalSender?.attachReceiverWebSockets(ws, unauthWs)
+        val pair = SocketPair(ws, unauthWs, alive)
 
         // Used by the contacts sync to download the encrypted blob from CDN.
         val ps = PushServiceSocket(config, credentials, SignalConfig.USER_AGENT, false)
-        pushSocket = ps
-
-        profileFetcher = SignalProfileFetcher(config, ws, unauthWs, messageDb, scope)
-
+        val fetcher = SignalProfileFetcher(config, ws, unauthWs, messageDb, scope)
         // GroupV2 fetcher — reuses the same auth WS / push socket. Shared
         // via PhotonService so the sender can also consult it when sending
         // into a group without rebuilding the credential cache.
         val gm = SignalGroupV2Manager(config, credentials, ws, ps)
-        groupManager = gm
-        app.photon.service.PhotonService._signalGroupManager = gm
 
+        // Publish everything under the lock together with the generation
+        // check, so a concurrent stop() can't be followed by this attempt
+        // re-attaching sockets it has just closed.
+        val current = synchronized(lifecycleLock) {
+            isCurrent(gen).also { current ->
+                if (!current) return@also
+                sockets = pair
+                pushSocket = ps
+                profileFetcher = fetcher
+                groupManager = gm
+                app.photon.service.PhotonService._signalGroupManager = gm
+                // Sending sync messages through a second authenticated
+                // WebSocket can cause Signal to close this receiver socket.
+                // Share the receiver pair so reads and sends are multiplexed
+                // over one linked-device session.
+                app.photon.service.PhotonService._signalSender?.attachReceiverWebSockets(ws, unauthWs)
+            }
+        }
+        if (!current) {
+            closeSockets(pair)
+            throw IllegalStateException("Receiver stopped while connecting")
+        }
+
+        // Linked devices don't have native access to the user's address book.
+        // Ask the primary for it once per process so any contact whose Signal
+        // profile is anonymous still shows up as the locally-saved name.
+        // Throttled to a single request per session — repeating on every WS
+        // reconnect would re-download the same blob every ~30s.
+        if (!contactsSyncRequested) {
+            contactsSyncRequested = true
+            scope.launch {
+                try {
+                    delay(1500)   // let the WS settle first
+                    app.photon.service.PhotonService._signalSender?.requestContactsSync()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Couldn't request contacts sync: ${e.message}")
+                }
+            }
+        }
+
+        // Send a NullMessage to each active Signal ACI we know about. Without
+        // this, those contacts' apps don't know our linked deviceId exists and
+        // won't include us in their encrypted recipient list, so their messages
+        // never reach Photon. DM conversations cover direct contacts; GroupV2
+        // participants cover group-only members. Once per contact (persisted
+        // in SharedPreferences), with a 7-day refresh so sessions don't go stale.
+        if (!activeContactsPinged) {
+            activeContactsPinged = true
+            scheduleActiveContactPing(8000) // let contacts sync ingest first
+        }
+
+        val now = System.currentTimeMillis()
+        if (SignalReconnect.maintenanceDue(lastMaintenanceAt, now)) {
+            // Only a round trip that actually reached the server uses up the
+            // slot; an attempt made while offline mustn't defer upkeep for
+            // the connection that follows it.
+            if (runConnectMaintenance(ws, unauthWs)) lastMaintenanceAt = now
+        }
+        return ws
+    }
+
+    /**
+     * Upkeep after a (re)connect, throttled to once per
+     * [SignalReconnect.MAINTENANCE_INTERVAL_MS] so a flapping connection
+     * doesn't redo it on every attempt. Returns whether the pre-key check
+     * reached the server.
+     */
+    private fun runConnectMaintenance(
+        ws: SignalWebSocket.AuthenticatedWebSocket,
+        unauthWs: SignalWebSocket.UnauthenticatedWebSocket,
+    ): Boolean {
         // After (re)connecting, sweep for contacts that have a profile key
         // but no resolved name — earlier fetches may have failed silently
         // (e.g. because this very WS was never connected before today). Also
@@ -262,29 +493,12 @@ class SignalMessageReceiver(
             }
         }
 
-        // Linked devices don't have native access to the user's address book.
-        // Ask the primary for it once per process so any contact whose Signal
-        // profile is anonymous still shows up as the locally-saved name.
-        // Throttled to a single request per session — repeating on every WS
-        // reconnect would re-download the same blob every ~30s.
-        if (!contactsSyncRequested) {
-            contactsSyncRequested = true
-            scope.launch {
-                try {
-                    delay(1500)   // let the WS settle first
-                    app.photon.service.PhotonService._signalSender?.requestContactsSync()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Couldn't request contacts sync: ${e.message}")
-                }
-            }
-        }
-
-        // Refresh conversation names from this device's local contacts on
-        // every reconnect. Cheap: ~50 PhoneLookup queries (cached per
-        // session via the resolver) plus a DB write only when the resolved
-        // name differs from what's stored. This means adding a contact in
-        // the LP3 address book causes Photon to pick up the new name on
-        // the next WS reconnect (~30s) without needing a fresh message.
+        // Refresh conversation names from this device's local contacts.
+        // Cheap: ~50 PhoneLookup queries (cached per session via the
+        // resolver) plus a DB write only when the resolved name differs from
+        // what's stored. A contact added in the LP3 address book is picked up
+        // here; Photon's own contact editor refreshes immediately instead
+        // (refreshContactNames).
         scope.launch {
             try {
                 contactResolver.invalidate()
@@ -318,24 +532,15 @@ class SignalMessageReceiver(
             }
         }
 
-        // Send a NullMessage to each active Signal ACI we know about. Without
-        // this, those contacts' apps don't know our linked deviceId exists and
-        // won't include us in their encrypted recipient list, so their messages
-        // never reach Photon. DM conversations cover direct contacts; GroupV2
-        // participants cover group-only members. Once per contact (persisted
-        // in SharedPreferences), with a 7-day refresh so sessions don't go stale.
-        if (!activeContactsPinged) {
-            activeContactsPinged = true
-            scheduleActiveContactPing(8000) // let contacts sync ingest first
-        }
-
         // Upload one-time pre-keys if they haven't been uploaded yet
-        uploadPreKeysIfNeeded(ws)
+        return uploadPreKeysIfNeeded(ws, unauthWs)
     }
 
-    private fun uploadPreKeysIfNeeded(ws: SignalWebSocket.AuthenticatedWebSocket) {
-        try {
-            val unauthWs = unauthWebSocket ?: return
+    private fun uploadPreKeysIfNeeded(
+        ws: SignalWebSocket.AuthenticatedWebSocket,
+        unauthWs: SignalWebSocket.UnauthenticatedWebSocket,
+    ): Boolean {
+        return try {
             val keysApi = KeysApi(ws, unauthWs)
 
             val countResult = keysApi.getAvailablePreKeyCounts(ServiceIdType.ACI)
@@ -348,7 +553,7 @@ class SignalMessageReceiver(
 
             if (counts.ecCount >= 10 && counts.kyberCount >= 10) {
                 Log.i(TAG, "Server has enough pre-keys")
-                return
+                return true
             }
             Log.w(
                 TAG,
@@ -418,7 +623,7 @@ class SignalMessageReceiver(
                 result.successOrThrow()
                 Log.i(TAG, "Uploaded fresh keys via KeysApi: signed=$signedPreKeyId " +
                     "lastResortKyber=$lastResortId ec=${ecPreKeys.size} kyber=${kyberPreKeys.size}")
-                return
+                return true
             } catch (e: Exception) {
                 Log.w(TAG, "KeysApi.setPreKeys failed (${e.message}); trying PushServiceSocket fallback")
             }
@@ -446,13 +651,14 @@ class SignalMessageReceiver(
             push.serviceRequest("/v2/keys?identity=aci", "PUT", json)
             Log.i(TAG, "Uploaded fresh keys via PushServiceSocket fallback: signed=$signedPreKeyId " +
                 "lastResortKyber=$lastResortId ec=${ecPreKeys.size} kyber=${kyberPreKeys.size}")
+            true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to upload pre-keys", e)
+            false
         }
     }
 
-    private fun readMessages() {
-        val ws = webSocket ?: return
+    private fun readMessages(gen: Long, ws: SignalWebSocket.AuthenticatedWebSocket, attempt: Attempt) {
         val aci = credentials.aci ?: return
         val localAddress = SignalServiceAddress(aci)
         val deviceId = credentials.deviceId
@@ -478,7 +684,7 @@ class SignalMessageReceiver(
         )
 
         Log.d(TAG, "Starting message read loop")
-        while (running) {
+        while (isCurrent(gen)) {
             try {
                 val hasMore = ws.readMessageBatch(MESSAGE_POLL_TIMEOUT_MS, 10) { envelopes ->
                     Log.i(TAG, "Received batch of ${envelopes.size} envelopes")
@@ -500,92 +706,141 @@ class SignalMessageReceiver(
                 Log.e(TAG, "Error reading messages", e)
                 throw e
             }
+            markConnectedIfLive(gen, ws, attempt)
+            retryHeldEnvelopes(cipher, ws)
         }
     }
 
+    /** A decrypted envelope, held across redeliveries if processing fails. */
+    private class DecryptedEnvelope(val content: Content, val metadata: EnvelopeMetadata)
+
+    /**
+     * Decrypt, store, then ack. The ack tells the server to delete the
+     * envelope, so it only goes out once the content is safely processed, or
+     * when retrying can't help (decrypt failures, duplicates). If local
+     * processing throws, the envelope is left un-acked for the server to
+     * redeliver, with the decrypted payload held for that redelivery (see
+     * [EnvelopeRetryTracker]) and an in-process retry queued; a poison
+     * envelope is acked after 3 failures. Reprocessing is safe: inserts
+     * dedupe on the (author, timestamp) key.
+     */
     private fun processEnvelope(
         envelopeResponse: EnvelopeResponse,
         cipher: SignalServiceCipher,
         ws: SignalWebSocket.AuthenticatedWebSocket,
     ) {
-        try {
-            val envelope = envelopeResponse.envelope
-            val serverTimestamp = envelopeResponse.serverDeliveredTimestamp
-
-            val result = cipher.decrypt(envelope, serverTimestamp)
-            if (result == null) {
-                // Contentless envelope — the server's own delivery receipt.
-                // There's nothing to decrypt; the envelope itself is the
-                // signal that our message (sent at clientTimestamp) reached
-                // the recipient's server queue. Without this branch, the
-                // unguarded result.content NPE'd and delivery ticks from the
-                // server were lost.
-                val myAci = credentials.aciString
-                val ts = envelope.clientTimestamp
-                if (envelope.type == org.whispersystems.signalservice.internal.push.Envelope.Type.SERVER_DELIVERY_RECEIPT &&
-                    myAci != null && ts != null
-                ) {
-                    messageDb.updateStatusByIdPrefix("${myAci}_$ts", "delivered")
+        val envelope = envelopeResponse.envelope
+        val retryKey = envelopeRetryKey(envelope)
+        var decrypted: DecryptedEnvelope? = envelopeRetries.pending(retryKey)
+        val ack = try {
+            if (decrypted == null) {
+                val result = cipher.decrypt(envelope, envelopeResponse.serverDeliveredTimestamp)
+                if (result == null) {
+                    processContentlessEnvelope(envelope)
                 } else {
-                    Log.d(TAG, "Contentless envelope (type=${envelope.type}); acking")
+                    decrypted = DecryptedEnvelope(result.content, result.metadata)
                 }
-                ws.sendAck(envelopeResponse)
-                return
+            } else {
+                Log.i(TAG, "Reprocessing held envelope ${retryKey.take(12)}… (decrypted on an earlier delivery)")
             }
-            val content = result.content
-            val metadata = result.metadata
-
-            Log.i(TAG, "Decrypted envelope from ${metadata.sourceServiceId}, " +
-                "hasData=${content.dataMessage != null}, " +
-                "hasSync=${content.syncMessage != null}, " +
-                "hasReceipt=${content.receiptMessage != null}, " +
-                "hasTyping=${content.typingMessage != null}, " +
-                "hasSenderKeyDistribution=${content.senderKeyDistributionMessage != null}")
-
-            content.senderKeyDistributionMessage?.let {
-                processSenderKeyDistribution(it.toByteArray(), metadata)
-            }
-
-            when {
-                content.dataMessage != null -> processDataMessage(content.dataMessage!!, metadata)
-                content.syncMessage != null -> processSyncMessage(content.syncMessage!!, metadata)
-                content.receiptMessage != null -> processReceipt(content.receiptMessage!!, metadata)
-                content.typingMessage != null -> {} // ignore
-                content.senderKeyDistributionMessage != null -> {} // already stored above
-                else -> Log.d(TAG, "Unhandled content type")
-            }
-
-            ws.sendAck(envelopeResponse)
+            decrypted?.let { processContent(it.content, it.metadata, envelopeResponse) }
+            envelopeRetries.clear(retryKey)
+            true
         } catch (e: org.signal.libsignal.metadata.SelfSendException) {
             Log.d(TAG, "Self-send exception (normal for sync), acking")
-            ws.sendAck(envelopeResponse)
+            true
         } catch (e: ProtocolDuplicateMessageException) {
             Log.d(TAG, "Duplicate message, acking")
-            ws.sendAck(envelopeResponse)
+            true
         } catch (e: ProtocolException) {
-            val env = envelopeResponse.envelope
             Log.w(
                 TAG,
-                "Protocol decrypt failed (type=${env.type}, sender=${e.sender}, " +
-                    "senderDevice=${e.senderDevice}, clientTs=${env.clientTimestamp}): " +
+                "Protocol decrypt failed (type=${envelope.type}, sender=${e.sender}, " +
+                    "senderDevice=${e.senderDevice}, clientTs=${envelope.clientTimestamp}): " +
                     "${e.javaClass.simpleName}: ${e.message}",
             )
             maybeSendRetryReceipt(e, envelopeResponse)
-            ws.sendAck(envelopeResponse)
+            true
         } catch (e: org.signal.libsignal.protocol.DuplicateMessageException) {
             Log.d(TAG, "Duplicate message, acking")
-            ws.sendAck(envelopeResponse)
+            true
         } catch (e: Exception) {
-            val env = envelopeResponse.envelope
-            Log.e(
-                TAG,
-                "Failed to process envelope (type=${env.type}, sourceServiceId=${env.sourceServiceId}, " +
-                    "sourceDevice=${env.sourceDeviceId}, clientTs=${env.clientTimestamp}, " +
-                    "serverTs=${env.serverTimestamp}, urgent=${env.urgent}): " +
-                    "${e.javaClass.name}: ${e.message}",
-                e,
-            )
-            try { ws.sendAck(envelopeResponse) } catch (_: Exception) {}
+            val giveUp = envelopeRetries.recordFailure(retryKey, decrypted)
+            val description = "envelope (type=${envelope.type}, sourceServiceId=${envelope.sourceServiceId}, " +
+                "sourceDevice=${envelope.sourceDeviceId}, clientTs=${envelope.clientTimestamp}, " +
+                "serverTs=${envelope.serverTimestamp}, urgent=${envelope.urgent}): " +
+                "${e.javaClass.name}: ${e.message}"
+            if (giveUp) {
+                Log.e(TAG, "Giving up on $description — acking after repeated failures", e)
+            } else {
+                Log.w(TAG, "Failed to process $description — leaving un-acked, retrying", e)
+                synchronized(heldRetries) {
+                    heldRetries.add(HeldRetry(envelopeResponse, ws, System.currentTimeMillis() + HELD_ENVELOPE_RETRY_MS))
+                }
+            }
+            giveUp
+        }
+        if (ack) ws.sendAck(envelopeResponse)
+    }
+
+    /**
+     * The server only redelivers an un-acked envelope after a reconnect, which
+     * can be hours away on a healthy connection. The read loop retries held
+     * envelopes itself, between batches and on its own thread (so a retry
+     * can't race other processing), through the same path: it counts towards
+     * the poison limit and is acked once processed. Only envelopes received
+     * on the current socket can be acked on it; the server redelivers the
+     * others on the new connection, and one a redelivery already handled is
+     * no longer held.
+     */
+    private fun retryHeldEnvelopes(cipher: SignalServiceCipher, ws: SignalWebSocket.AuthenticatedWebSocket) {
+        val now = System.currentTimeMillis()
+        val due = synchronized(heldRetries) {
+            heldRetries.filter { it.dueAt <= now }.also { heldRetries.removeAll(it) }
+        }
+        for (held in due) {
+            if (held.socket !== ws) continue
+            if (!envelopeRetries.isHeld(envelopeRetryKey(held.response.envelope))) continue
+            processEnvelope(held.response, cipher, ws)
+        }
+    }
+
+    /**
+     * Contentless envelope — the server's own delivery receipt. There's
+     * nothing to decrypt; the envelope itself is the signal that our message
+     * (sent at clientTimestamp) reached the recipient's server queue.
+     */
+    private fun processContentlessEnvelope(envelope: Envelope) {
+        val myAci = credentials.aciString
+        val ts = envelope.clientTimestamp
+        if (envelope.type == Envelope.Type.SERVER_DELIVERY_RECEIPT && myAci != null && ts != null) {
+            messageDb.updateStatusByIdPrefix("${myAci}_$ts", "delivered")
+        } else {
+            Log.d(TAG, "Contentless envelope (type=${envelope.type}); acking")
+        }
+    }
+
+    private fun processContent(content: Content, metadata: EnvelopeMetadata, envelopeResponse: EnvelopeResponse) {
+        Log.i(TAG, "Decrypted envelope from ${metadata.sourceServiceId}, " +
+            "hasData=${content.dataMessage != null}, " +
+            "hasSync=${content.syncMessage != null}, " +
+            "hasCall=${content.callMessage != null}, " +
+            "hasReceipt=${content.receiptMessage != null}, " +
+            "hasTyping=${content.typingMessage != null}, " +
+            "hasSenderKeyDistribution=${content.senderKeyDistributionMessage != null}")
+
+        content.senderKeyDistributionMessage?.let {
+            processSenderKeyDistribution(it.toByteArray(), metadata)
+        }
+
+        when {
+            content.dataMessage != null -> processDataMessage(content.dataMessage!!, metadata)
+            content.syncMessage != null -> processSyncMessage(content.syncMessage!!, metadata)
+            content.callMessage != null -> processCallMessage(content.callMessage!!, metadata, envelopeResponse)
+            content.receiptMessage != null -> processReceipt(content.receiptMessage!!, metadata)
+            content.typingMessage != null -> {} // ignore
+            content.senderKeyDistributionMessage != null -> {} // already stored above
+            else -> Log.d(TAG, "Unhandled content type")
         }
     }
 
@@ -761,7 +1016,7 @@ class SignalMessageReceiver(
 
         val metaGroupId = metadata.groupId
         val derivedGroupId = groupMasterKey?.let { mk ->
-            try { groupManager?.groupIdFromMasterKey(mk) } catch (_: Exception) { null }
+            try { SignalGroupV2Manager.groupIdFromMasterKey(mk) } catch (_: Exception) { null }
         }
 
         val groupIdBytes = derivedGroupId ?: metaGroupId
@@ -793,14 +1048,9 @@ class SignalMessageReceiver(
             seedGroupConversation(conversationJid, groupMasterKey, groupRevision)
         }
 
-        // Handle reactions
-        if (data.reaction != null) {
-            val reaction = data.reaction!!
-            val emoji = reaction.emoji ?: return
-            val targetTs = reaction.targetSentTimestamp ?: return
-            val targetAuthor = reaction.targetAuthorAci ?: senderAci
-            // Best-effort match — look for messages with matching sender+timestamp prefix
-            messageDb.upsertReaction("${targetAuthor}_$targetTs", senderAci, emoji, timestamp)
+        // Handle reactions (and reaction removals)
+        data.reaction?.let { reaction ->
+            applyReaction(reaction, senderAci, timestamp)
             return
         }
 
@@ -809,7 +1059,18 @@ class SignalMessageReceiver(
         // the delete proto doesn't carry, so an exact-id match never matched.
         if (data.delete != null) {
             val targetTs = data.delete!!.targetSentTimestamp ?: return
-            messageDb.markDeletedByPrefix("${senderAci}_$targetTs")
+            applyRemoteDelete("${senderAci}_$targetTs")
+            return
+        }
+
+        // A group call started (or someone joined one). Photon can't join;
+        // record it like a message so the chat shows it. Group-call update
+        // messages have no body, so this must run before the empty check.
+        data.groupCallUpdate?.let { update ->
+            if (isGroup) {
+                val name = displayNameFor(senderAci, senderE164)
+                recordGroupCall(conversationJid, senderAci, name, update.eraId, timestamp)
+            }
             return
         }
 
@@ -829,13 +1090,7 @@ class SignalMessageReceiver(
             else -> "sticker"
         }
 
-        // Resolve a friendly name for the sender. Order: Android local
-        // contacts (this device's address book) → Signal profile name (when
-        // it actually returns one) → bare E.164. The user does not want
-        // names from the primary device's address book to leak in here.
-        val senderName = senderE164?.let { contactResolver.resolve(it) }
-            ?: messageDb.getContact(senderAci)?.profileName?.takeIf { it.isNotBlank() }
-            ?: senderE164
+        val senderName = displayNameFor(senderAci, senderE164)
 
         if (isGroup) {
             // Master key + conversation row already seeded above (before
@@ -849,15 +1104,15 @@ class SignalMessageReceiver(
             messageDb.upsertConversation(jid = conversationJid, name = senderName, isGroup = false)
         }
 
-        // Drop redeliveries: if we already stored this (author, timestamp),
-        // skip the insert and all of its side effects (unread bump, notify) so
-        // a resent message doesn't appear N times or inflate the unread count.
-        if (messageDb.findMessageByPrefix(messagePrefix) != null) {
-            Log.d(TAG, "Skipping duplicate incoming message $messagePrefix")
-            return
-        }
+        // A read sync from another device may have beaten this message here
+        // (e.g. it was resent after a decrypt failure). Then it's already
+        // read: store it without counting it unread or notifying.
+        val readElsewhere = earlyReads.consume(messagePrefix)
 
-        messageDb.insertMessage(
+        // Redeliveries are dropped inside the insert (same author+timestamp
+        // prefix), skipping every side effect below so a resent message
+        // doesn't appear N times, inflate the unread count, or re-notify.
+        val inserted = messageDb.insertIncomingMessage(
             id = messageId,
             conversationJid = conversationJid,
             senderJid = senderAci,
@@ -867,15 +1122,16 @@ class SignalMessageReceiver(
             mediaMime = attachment?.contentType,
             mediaSize = attachment?.size?.toLong(),
             replyToId = replyPrefix(data.quote),
-            isFromMe = false,
-            status = "received",
             // Serialized pointer so the blob can be fetched on demand later
             // (tap-to-view); images/videos aren't auto-downloaded.
             rawProto = attachment?.encode(),
+            dedupePrefix = messagePrefix,
+            alreadyRead = readElsewhere,
         )
-
-        messageDb.updateConversationLastMessage(conversationJid, messageId, timestamp / 1000)
-        messageDb.incrementUnread(conversationJid)
+        if (!inserted) {
+            Log.d(TAG, "Skipping duplicate incoming message $messagePrefix")
+            return
+        }
 
         // Voice notes auto-download (small, and the UI autoplays them on
         // open) — mirrors the WhatsApp bridge's auto-download policy.
@@ -883,10 +1139,15 @@ class SignalMessageReceiver(
             scope.launch { downloadAttachment(messageId) }
         }
 
+        if (readElsewhere) {
+            Log.i(TAG, "Stored message $messagePrefix as read (read sync arrived first)")
+            return
+        }
+
         // Show notification — for groups, title is the group name (with the
         // sender's name woven into the body); for DMs it's the sender.
         val notifTitle = if (isGroup) {
-            PLACEHOLDER_GROUP_NAME
+            groupTitle(conversationJid)
         } else {
             senderName ?: senderAci.take(8)
         }
@@ -899,6 +1160,243 @@ class SignalMessageReceiver(
         )
 
         Log.d(TAG, "Stored message from $senderAci: ${body?.take(30) ?: contentType}")
+    }
+
+    // ── Calls ──
+
+    /**
+     * 1:1 call signalling. Photon can't take part in the call (no RingRTC),
+     * so it only reports it: an offer rings via a notification and records
+     * an "Incoming … call" row; hangups/busy turn that into missed, answered
+     * elsewhere or declined. Answer, ICE and opaque (group ring) messages
+     * are WebRTC plumbing and are ignored.
+     */
+    private fun processCallMessage(
+        call: CallMessage,
+        metadata: EnvelopeMetadata,
+        envelopeResponse: EnvelopeResponse,
+    ) {
+        val localDeviceId = credentials.deviceId
+        val destination = call.destinationDeviceId
+        if (destination != null && destination != localDeviceId) {
+            Log.d(TAG, "Ignoring call message for device $destination")
+            return
+        }
+        // Call signalling between the user's own devices isn't a call to them.
+        if (metadata.sourceServiceId.toString() == credentials.aciString) return
+        val peerAci = normalizeServiceIdForConversation(
+            serviceId = metadata.sourceServiceId,
+            e164 = metadata.sourceE164,
+            context = "Incoming call source",
+        )
+        val envelope = envelopeResponse.envelope
+        val timestampMs = envelope.clientTimestamp ?: envelope.serverTimestamp ?: System.currentTimeMillis()
+
+        val offer = call.offer
+        val hangup = call.hangup
+        val busy = call.busy
+        when {
+            offer != null -> {
+                val callId = offer.id ?: return
+                val stale = SignalCalls.isStaleOffer(
+                    serverReceivedMs = envelope.serverTimestamp,
+                    serverDeliveredMs = envelopeResponse.serverDeliveredTimestamp,
+                    nowMs = System.currentTimeMillis(),
+                )
+                if (stale) Log.i(TAG, "Call offer $callId is stale; recording as missed without ringing")
+                applyCallSignal(
+                    peerAci, metadata.sourceE164, callId,
+                    if (stale) CallSignal.STALE_OFFER else CallSignal.OFFER,
+                    offerIsVideo = offer.type == CallMessage.Offer.Type.OFFER_VIDEO_CALL,
+                    timestampMs = timestampMs,
+                )
+            }
+            hangup != null -> {
+                val callId = hangup.id ?: return
+                val signal = SignalCalls.signalForHangup(hangup.type, hangup.deviceId, localDeviceId) ?: return
+                applyCallSignal(peerAci, metadata.sourceE164, callId, signal, null, timestampMs)
+            }
+            busy != null -> {
+                val callId = busy.id ?: return
+                applyCallSignal(peerAci, metadata.sourceE164, callId, CallSignal.ENDED_UNANSWERED, null, timestampMs)
+            }
+        }
+    }
+
+    private fun applyCallSignal(
+        peerAci: String,
+        peerE164: String?,
+        callId: Long,
+        signal: CallSignal,
+        offerIsVideo: Boolean?,
+        timestampMs: Long,
+    ) {
+        val id = SignalCalls.rowId(peerAci, callId)
+        val existing = messageDb.getMessage(id)
+        if (existing == null && signal != CallSignal.OFFER && signal != CallSignal.STALE_OFFER) {
+            Log.d(TAG, "Call $callId: $signal for a call we never saw ringing; ignoring")
+            return
+        }
+        if (existing == null) {
+            // First sight of this caller may be the call itself.
+            peerE164?.let { messageDb.updateContactPhone(peerAci, it) }
+            messageDb.upsertConversation(jid = peerAci, name = displayNameFor(peerAci, peerE164), isGroup = false)
+            maybeFetchProfile(peerAci)
+        }
+        updateCallRow(id, peerAci, existing?.textBody, signal, offerIsVideo, timestampMs / 1000)
+    }
+
+    private fun updateCallRow(
+        id: String,
+        conversationJid: String,
+        currentText: String?,
+        signal: CallSignal,
+        offerIsVideo: Boolean?,
+        timestampSeconds: Long,
+    ) {
+        val current = SignalCalls.parse(currentText)
+        val outcome = SignalCalls.next(current?.outcome, signal) ?: return
+        val state = CallState(outcome, current?.isVideo ?: offerIsVideo ?: false)
+        val change = messageDb.upsertCallRow(
+            id = id,
+            conversationJid = conversationJid,
+            senderJid = conversationJid,
+            timestamp = timestampSeconds,
+            text = SignalCalls.text(state),
+            unread = SignalCalls.isUnread(outcome),
+        )
+        Log.i(TAG, "Call ${id.takeLast(12)}: ${current?.outcome ?: "new"} -> $outcome ($signal)")
+
+        val helper = app.photon.service.NotificationHelper
+        val platform = app.photon.data.model.Platform.SIGNAL
+        when (outcome) {
+            CallOutcome.RINGING ->
+                helper.showIncomingCall(context, callerName(conversationJid), platform, conversationJid, state.isVideo)
+            CallOutcome.MISSED ->
+                helper.showMissedCall(context, callerName(conversationJid), platform, conversationJid, state.isVideo)
+            CallOutcome.ANSWERED, CallOutcome.DECLINED -> {
+                helper.cancelIncomingCall(context, conversationJid)
+                // A call shown as missed turned out to be answered elsewhere.
+                if (change.wasUnread && change.unreadCount == 0) {
+                    helper.cancelForConversation(context, conversationJid)
+                }
+            }
+        }
+    }
+
+    private fun callerName(conversationJid: String): String =
+        messageDb.getConversation(conversationJid)?.name?.takeIf { it.isNotBlank() }
+            ?: displayNameFor(conversationJid, null)
+            ?: conversationJid.take(8)
+
+    /**
+     * Another device's view of a call: answered, declined or deleted there.
+     * Group/ad-hoc call events are keyed by era, not callId, so they can't be
+     * matched to Photon's group-call rows and are skipped.
+     */
+    private fun processCallEventSync(event: SyncMessage.CallEvent) {
+        val callId = event.callId ?: return
+        if (event.type == SyncMessage.CallEvent.Type.GROUP_CALL ||
+            event.type == SyncMessage.CallEvent.Type.AD_HOC_CALL
+        ) {
+            Log.d(TAG, "Ignoring ${event.type} call event sync")
+            return
+        }
+        val conversationJid = event.conversationId?.toByteArray()?.let { SignalCalls.conversationJidFor(it) }
+        val id = conversationJid?.let { SignalCalls.rowId(it, callId) }
+            ?.takeIf { messageDb.getMessage(it) != null }
+            ?: messageDb.findCallRowId(callId)
+            ?: run {
+                Log.d(TAG, "Call event ${event.event} for unknown call $callId")
+                return
+            }
+        val row = messageDb.getMessage(id) ?: return
+        val helper = app.photon.service.NotificationHelper
+        when (event.event) {
+            SyncMessage.CallEvent.Event.DELETE -> {
+                val change = messageDb.deleteCallRow(id) ?: return
+                helper.cancelIncomingCall(context, change.conversationJid)
+                if (change.wasUnread && change.unreadCount == 0) {
+                    helper.cancelForConversation(context, change.conversationJid)
+                }
+            }
+            SyncMessage.CallEvent.Event.ACCEPTED ->
+                updateCallRow(id, row.conversationJid, row.textBody, CallSignal.ANSWERED_ELSEWHERE, null, row.timestamp)
+            SyncMessage.CallEvent.Event.NOT_ACCEPTED ->
+                updateCallRow(id, row.conversationJid, row.textBody, CallSignal.DECLINED_ELSEWHERE, null, row.timestamp)
+            else -> Log.d(TAG, "Ignoring call event ${event.event}")
+        }
+    }
+
+    /** Call log read on another device: clear the matching missed calls here. */
+    private fun processCallLogEvent(event: SyncMessage.CallLogEvent) {
+        val conversationJid = when (event.type) {
+            SyncMessage.CallLogEvent.Type.MARKED_AS_READ -> null
+            SyncMessage.CallLogEvent.Type.MARKED_AS_READ_IN_CONVERSATION ->
+                event.conversationId?.toByteArray()?.let { SignalCalls.conversationJidFor(it) } ?: return
+            else -> {
+                Log.d(TAG, "Ignoring call log event ${event.type}")
+                return
+            }
+        }
+        val upTo = (event.timestamp ?: System.currentTimeMillis()) / 1000
+        messageDb.markCallRowsRead(conversationJid, upTo).forEach { jid ->
+            app.photon.service.NotificationHelper.cancelForConversation(context, jid)
+        }
+    }
+
+    /**
+     * Someone started (or joined) a group call. One row per call era, however
+     * many members announce it; notifies like a message, never rings.
+     */
+    private fun recordGroupCall(
+        groupJid: String,
+        senderAci: String,
+        senderName: String?,
+        eraId: String?,
+        timestampMs: Long,
+    ) {
+        if (!senderName.isNullOrBlank()) {
+            messageDb.upsertParticipant(groupJid, senderAci, senderName, "member")
+        }
+        val id = SignalCalls.groupRowId(groupJid, eraId?.takeIf { it.isNotBlank() } ?: timestampMs.toString())
+        val inserted = messageDb.insertIncomingMessage(
+            id = id,
+            conversationJid = groupJid,
+            senderJid = senderAci,
+            timestamp = timestampMs / 1000,
+            contentType = SignalMessageDatabase.CONTENT_CALL,
+            textBody = SignalCalls.GROUP_CALL_TEXT,
+            dedupePrefix = null,
+        )
+        if (!inserted) return
+        val body = if (!senderName.isNullOrBlank()) "$senderName started a group call" else SignalCalls.GROUP_CALL_TEXT
+        app.photon.service.NotificationHelper.showMessageNotification(
+            context, groupTitle(groupJid), body, app.photon.data.model.Platform.SIGNAL, groupJid,
+        )
+    }
+
+    private fun groupTitle(groupJid: String): String =
+        ConversationNaming.groupTitle(messageDb.getConversation(groupJid)?.name, groupJid)
+
+    private fun applyReaction(reaction: DataMessage.Reaction, reactorAci: String, timestamp: Long) {
+        when (val update = incomingReactionFor(reaction, fallbackAuthor = reactorAci)) {
+            is IncomingReaction.Set -> messageDb.upsertReaction(update.targetPrefix, reactorAci, update.emoji, timestamp)
+            is IncomingReaction.Remove -> messageDb.removeReaction(update.targetPrefix, reactorAci)
+            null -> Log.d(TAG, "Ignoring reaction without a target or emoji")
+        }
+    }
+
+    /**
+     * Blank a message deleted for everyone. If it was still unread, the
+     * delete also takes it off the unread count; once nothing unread is
+     * left, its notification (which may show the deleted text) goes too.
+     */
+    private fun applyRemoteDelete(targetPrefix: String) {
+        val cleared = messageDb.markDeletedByPrefix(targetPrefix)
+        cleared.forEach { jid ->
+            app.photon.service.NotificationHelper.cancelForConversation(context, jid)
+        }
     }
 
     private fun processSyncMessage(sync: SyncMessage, metadata: EnvelopeMetadata) {
@@ -941,6 +1439,8 @@ class SignalMessageReceiver(
                 Log.w(TAG, "Invalid verification sync", e)
             }
         }
+        sync.callEvent?.let { processCallEventSync(it) }
+        sync.callLogEvent?.let { processCallLogEvent(it) }
         // Sent messages from our primary device
         val sent = sync.sent
         if (sent != null) {
@@ -950,6 +1450,16 @@ class SignalMessageReceiver(
             val data = sent.message!!
             val timestamp = data.timestamp ?: System.currentTimeMillis()
             val myAci = credentials.aciString ?: return
+            // Reactions and deletes-for-everyone the user made on another
+            // device carry no body; apply them to the target and stop.
+            data.reaction?.let { reaction ->
+                applyReaction(reaction, myAci, timestamp)
+                return
+            }
+            data.delete?.targetSentTimestamp?.let { targetTs ->
+                applyRemoteDelete("${myAci}_$targetTs")
+                return
+            }
             // Same (author, timestamp) dedupe as incoming data messages: a sent
             // transcript can be redelivered, and the random suffix would
             // otherwise store a duplicate of our own outgoing message.
@@ -965,7 +1475,7 @@ class SignalMessageReceiver(
             val groupV2 = data.groupV2
             val groupMasterKey = groupV2?.masterKey?.toByteArray()?.takeIf { it.size == 32 }
             if (groupMasterKey != null) {
-                val convJid = try { groupManager?.jidFromMasterKey(groupMasterKey) } catch (_: Exception) { null }
+                val convJid = try { SignalGroupV2Manager.jidFromMasterKey(groupMasterKey) } catch (_: Exception) { null }
                 if (convJid != null) {
                     seedGroupConversation(convJid, groupMasterKey, groupV2.revision ?: 0)
 
@@ -993,7 +1503,7 @@ class SignalMessageReceiver(
                     app.photon.service.NotificationHelper.cancelForConversation(context, convJid)
                     return
                 }
-                Log.w(TAG, "Sync sent has groupV2 but groupManager unavailable; falling through")
+                Log.w(TAG, "Sync sent has an invalid groupV2 master key; falling through")
             }
 
             // DM case: needs a destination on the sync transcript. Normalize
@@ -1079,12 +1589,17 @@ class SignalMessageReceiver(
         val reads = sync.read
         if (!reads.isNullOrEmpty()) {
             for (read in reads) {
-                val senderAci = read.senderAci
-                if (senderAci != null) {
-                    val conversations = messageDb.markIncomingReadByPrefix("${senderAci}_${read.timestamp}")
-                    conversations.forEach { conversationJid ->
-                        app.photon.service.NotificationHelper.cancelForConversation(context, conversationJid)
-                    }
+                val senderAci = serviceIdString(read.senderAci, read.senderAciBinary) ?: continue
+                val timestamp = read.timestamp ?: continue
+                val prefix = "${senderAci}_$timestamp"
+                val result = messageDb.markIncomingReadByPrefix(prefix)
+                // The read beat its message here; remember it so the message
+                // lands already read instead of unread with a notification.
+                if (!result.matched) earlyReads.remember(prefix)
+                // Only conversations this read actually emptied: newer unread
+                // messages keep their notification.
+                result.clearedConversations.forEach { conversationJid ->
+                    app.photon.service.NotificationHelper.cancelForConversation(context, conversationJid)
                 }
             }
         }
@@ -1194,6 +1709,18 @@ class SignalMessageReceiver(
             }
         }
         if (pruned > 0) Log.i(TAG, "Pruned $pruned downloaded Signal media files")
+    }
+
+    /**
+     * Enforce the ephemeral message window (per-chat cap and max age from
+     * Settings → Chat). Called periodically by PhotonService alongside
+     * [pruneMedia]; see SignalMessageDatabase.pruneMessages for the policy.
+     */
+    fun pruneMessages(maxPerConversation: Int, maxAgeDays: Int) {
+        val pruned = messageDb.pruneMessages(maxPerConversation, maxAgeDays)
+        if (pruned > 0) {
+            Log.i(TAG, "Pruned $pruned Signal messages (cap=$maxPerConversation/chat, maxAge=${maxAgeDays}d)")
+        }
     }
 
     /**
@@ -1378,8 +1905,8 @@ class SignalMessageReceiver(
      * hydration can find the original via findMessageByPrefix.
      */
     private fun replyPrefix(quote: DataMessage.Quote?): String? {
-        val author = quote?.authorAci ?: return null
-        val id = quote.id ?: return null
+        val author = serviceIdString(quote?.authorAci, quote?.authorAciBinary) ?: return null
+        val id = quote?.id ?: return null
         return "${author}_$id"
     }
 
@@ -1435,6 +1962,21 @@ class SignalMessageReceiver(
         }
         Log.i(TAG, "Resolved group ${conversationJid.take(12)}…: $title (${acis.size} members)")
         scheduleActiveContactPing()
+    }
+
+    /**
+     * Friendly name for a Signal contact. Order: Android local contacts (this
+     * device's address book) → Signal profile name (when it actually returns
+     * one) → bare E.164. The envelope's E.164 is usually absent under sealed
+     * sender, so fall back to the phone learned from contacts sync. Names from
+     * the primary device's address book are deliberately never used.
+     */
+    private fun displayNameFor(aci: String, e164: String?): String? {
+        val contact = messageDb.getContact(aci)
+        return ConversationNaming.resolveFromContact(
+            phone = e164 ?: contact?.phone,
+            profileName = contact?.profileName,
+        ) { contactResolver.resolve(it) }
     }
 
     private fun maybeFetchProfile(aci: String) {
