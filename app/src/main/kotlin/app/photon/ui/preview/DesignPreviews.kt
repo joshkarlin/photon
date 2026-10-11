@@ -25,7 +25,8 @@ import com.thelightphone.sdk.ui.LightThemeTokens
 
 // LP3-sized design previews (1080x1240 at 3x) with sample data covering the
 // cases the row design has to handle: bursts, a call, a failed send,
-// reactions, a reply, a deleted message, a placeholder, and long titles.
+// reactions, a reply, a deleted message, a placeholder, long titles, and a
+// muted chat with unread messages.
 
 private const val LP3_WIDTH_DP = 360
 private const val LP3_HEIGHT_DP = 413
@@ -38,6 +39,7 @@ internal object PreviewSamples {
 
     const val LONG_DM_TITLE = "Alexandra Konstantinopoulou-Whitfield"
     const val LONG_GROUP_TITLE = "Saturday climbing crew + partners & kids"
+    const val MUTED_TITLE = "Neighbours"
 
     private fun conversation(
         jid: String,
@@ -46,15 +48,17 @@ internal object PreviewSamples {
         ago: Long,
         unread: Int = 0,
         isGroup: Boolean = false,
+        muted: Boolean = false,
     ) = Conversation(
         jid = jid, name = name, isGroup = isGroup, lastMessageId = null,
-        lastTimestamp = now - ago, unreadCount = unread, isMuted = false,
+        lastTimestamp = now - ago, unreadCount = unread, isMuted = muted,
         avatarUrl = null, updatedAt = now - ago,
     ) to platform
 
     private val tagged = listOf(
         conversation("a@s.whatsapp.net", LONG_DM_TITLE, Platform.WHATSAPP, 4 * MIN, unread = 2),
         conversation("g@g.us", LONG_GROUP_TITLE, Platform.WHATSAPP, 25 * MIN, unread = 14, isGroup = true),
+        conversation("n@g.us", MUTED_TITLE, Platform.WHATSAPP, 50 * MIN, unread = 3, isGroup = true, muted = true),
         conversation("+447700900123", "Mum", Platform.SMS, 2 * HOUR),
         conversation("sig-1", "Sam Okafor", Platform.SIGNAL, 26 * HOUR),
         conversation("HSBC UK", "HSBC UK", Platform.SMS, 50 * HOUR),

@@ -14,11 +14,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import app.photon.data.model.Conversation
 import app.photon.data.model.Platform
 import app.photon.data.names.DisplayNames
 import app.photon.ui.theme.PhotonGrid
+import com.thelightphone.sdk.ui.LightIcons
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
 import com.thelightphone.sdk.ui.LightThemeTokens
@@ -36,8 +38,9 @@ private val weekdayFormat = SimpleDateFormat("EEE", Locale.getDefault())
 private val dayMonthFormat = SimpleDateFormat("dd/MM", Locale.getDefault())
 
 /**
- * One conversation in a chat list: name, last-activity time and an unread
- * count. Fixed height ([PhotonGrid.LIST_ROW_HEIGHT]) so the list can use the
+ * One conversation in a chat list: name, last-activity time, a muted mark
+ * and an unread count. A muted chat still shows its count, as in WhatsApp.
+ * Fixed height ([PhotonGrid.LIST_ROW_HEIGHT]) so the list can use the
  * SDK's uniform-row scroll bar.
  *
  * @param platform whose naming rules the title follows
@@ -75,12 +78,25 @@ fun ConversationRow(
             modifier = Modifier.weight(1f),
         )
 
-        LightText(
-            text = formatTimestamp(conv.lastTimestamp),
-            variant = LightTextVariant.Detail,
-            lighten = true,
-            maxLines = 1,
-        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(0.375f.gridUnitsAsDp()),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (conv.isMuted) {
+                Icon(
+                    painter = painterResource(LightIcons.SPEAKER_MUTED.drawableResource),
+                    contentDescription = "Muted",
+                    tint = LightThemeTokens.colors.contentSecondary,
+                    modifier = Modifier.size(1f.gridUnitsAsDp()),
+                )
+            }
+            LightText(
+                text = formatTimestamp(conv.lastTimestamp),
+                variant = LightTextVariant.Detail,
+                lighten = true,
+                maxLines = 1,
+            )
+        }
 
         if (conv.unreadCount > 0) {
             UnreadBadge(conv.unreadCount)
