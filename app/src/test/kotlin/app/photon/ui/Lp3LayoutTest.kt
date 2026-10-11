@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -18,7 +19,6 @@ import app.photon.ui.preview.ChatListSample
 import app.photon.ui.preview.DmThreadSample
 import app.photon.ui.preview.GroupThreadSample
 import app.photon.ui.preview.PreviewSamples
-import app.photon.ui.shared.GroupRowStyle
 import app.photon.ui.theme.PhotonTheme
 import org.junit.Rule
 import org.junit.Test
@@ -65,6 +65,10 @@ class Lp3LayoutTest {
 
     private fun bounds(text: String) = rule.onNodeWithText(text).getBoundsInRoot().toRect()
 
+    /** Bounds of the text itself, not the clickable message row it merges into. */
+    private fun textBounds(text: String) =
+        rule.onNodeWithText(text, useUnmergedTree = true).getBoundsInRoot().toRect()
+
     private fun boundsOf(description: String) =
         rule.onNodeWithContentDescription(description).getBoundsInRoot().toRect()
 
@@ -87,9 +91,21 @@ class Lp3LayoutTest {
 
     @Test
     fun groupThreadShowsCallsAndFailures() {
-        rule.setContent { PhotonTheme { GroupThreadSample(GroupRowStyle.COLUMN) } }
+        rule.setContent { PhotonTheme { GroupThreadSample() } }
         rule.onNodeWithText("failed · tap to retry").assertIsDisplayed()
         rule.onNodeWithText("Missed group video call", substring = true).assertIsDisplayed()
-        rule.onAllNodesWithText("You")[0].assertIsDisplayed()
+    }
+
+    @Test
+    fun groupThreadNamesIncomingBurstsOnly() {
+        rule.setContent { PhotonTheme { GroupThreadSample() } }
+        // LP2 style: "Name  12:36" above each incoming burst, nothing above
+        // your own, and no sender column.
+        rule.onAllNodesWithText("Bob")[0].assertIsDisplayed()
+        rule.onAllNodesWithText("You").assertCountEquals(0)
+        val name = textBounds("Maximilian Featherstonehaugh")
+        val body = textBounds("I can take three in the van, leaving at 9")
+        assertTrue(name.bottom <= body.top, "name $name should sit above body $body")
+        assertTrue(body.left <= name.left, "body $body should start under name $name, not beside it")
     }
 }

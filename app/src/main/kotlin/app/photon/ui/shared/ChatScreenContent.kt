@@ -26,11 +26,10 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.style.TextOverflow
 import app.photon.data.model.Message
 import app.photon.ui.shared.components.CallRow
-import app.photon.ui.shared.components.CleanMessageRow
 import app.photon.ui.shared.components.MessageActions
 import app.photon.ui.shared.components.MessageInputBar
+import app.photon.ui.shared.components.MessageRow
 import app.photon.ui.shared.components.SwipeToReply
-import app.photon.ui.shared.components.TranscriptMessageRow
 import app.photon.ui.shared.components.backButton
 import app.photon.ui.shared.components.isCall
 import app.photon.ui.shared.components.quoteLabel
@@ -51,9 +50,9 @@ import kotlinx.coroutines.launch
 
 /**
  * Shared chat screen used by WhatsApp, Signal, and SMS.
- * Handles the top bar, message list, row layout, and input bar. DMs use the
- * LP3 thread layout ([CleanMessageRow]); groups use the sender-column layout
- * ([TranscriptMessageRow]).
+ * Handles the top bar, message list and input bar. Messages are laid out as
+ * in the LP3 thread ([MessageRow]); groups add the sender above each incoming
+ * burst, as the LP2 group thread does.
  */
 @Composable
 fun ChatScreenContent(
@@ -95,15 +94,6 @@ fun ChatScreenContent(
     )
 }
 
-/** How group messages are laid out. Only [COLUMN] ships; [LP2] exists for design previews. */
-internal enum class GroupRowStyle {
-    /** Sender column beside each message ([TranscriptMessageRow]). */
-    COLUMN,
-
-    /** LP2 group thread: "Name  12:36" above each incoming burst ([CleanMessageRow]). */
-    LP2,
-}
-
 @Composable
 internal fun ChatThread(
     title: String,
@@ -122,7 +112,6 @@ internal fun ChatThread(
     onTitleClick: (() -> Unit)?,
     supportsReply: Boolean,
     headerContent: (@Composable () -> Unit)?,
-    groupRowStyle: GroupRowStyle = GroupRowStyle.COLUMN,
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
     val listState = rememberLazyListState()
@@ -184,7 +173,6 @@ internal fun ChatThread(
                             msg = msg,
                             startsBurst = burstStart,
                             isGroup = isGroup,
-                            groupRowStyle = groupRowStyle,
                             title = title,
                             participantNames = participantNames,
                             supportsReply = supportsReply,
@@ -267,7 +255,6 @@ private fun MessageItem(
     msg: Message,
     startsBurst: Boolean,
     isGroup: Boolean,
-    groupRowStyle: GroupRowStyle,
     title: String,
     participantNames: Map<String, String>,
     supportsReply: Boolean,
@@ -291,24 +278,14 @@ private fun MessageItem(
         }
     }
     SwipeToReply(enabled = supportsReply, onReply = onReply) {
-        if (isGroup && groupRowStyle == GroupRowStyle.COLUMN) {
-            TranscriptMessageRow(
-                msg = msg, startsBurst = startsBurst, senderName = senderName,
-                onMediaTap = onMediaTap, onLongPress = onLongPress,
-                quotedSenderName = quotedSenderName,
-                onReplyPreviewTap = onReplyPreviewTap,
-                onRetry = onRetry,
-            )
-        } else {
-            CleanMessageRow(
-                msg = msg, startsBurst = startsBurst,
-                onMediaTap = onMediaTap, onLongPress = onLongPress,
-                senderName = if (isGroup) senderLabel(msg, senderName) else null,
-                quotedSenderName = quotedSenderName,
-                onReplyPreviewTap = onReplyPreviewTap,
-                onRetry = onRetry,
-            )
-        }
+        MessageRow(
+            msg = msg, startsBurst = startsBurst,
+            onMediaTap = onMediaTap, onLongPress = onLongPress,
+            senderName = if (isGroup) senderLabel(msg, senderName) else null,
+            quotedSenderName = quotedSenderName,
+            onReplyPreviewTap = onReplyPreviewTap,
+            onRetry = onRetry,
+        )
     }
 }
 
