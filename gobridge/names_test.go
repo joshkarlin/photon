@@ -549,3 +549,33 @@ func TestNewMessage_carriesStoredNames(t *testing.T) {
 		}
 	}
 }
+
+// A mention by LID never leaves the LID in the stored text: it becomes the
+// person's name or, with none known, the number the LID stands for.
+func TestResolveMentions_neverStoresARawLID(t *testing.T) {
+	ctx := context.Background()
+	club := types.NewJID("120363000000000001", types.GroupServer)
+	carol := types.NewJID("447700900003", types.DefaultUserServer)
+	alice := types.NewJID("447700900001", types.DefaultUserServer)
+	aliceLID := types.NewJID("11223344", types.HiddenUserServer)
+	bob := types.NewJID("447700900002", types.DefaultUserServer)
+	bobLID := types.NewJID("55667788", types.HiddenUserServer)
+	strangerLID := types.NewJID("99990000", types.HiddenUserServer)
+
+	b := newClientBridge(t)
+	b.client.Store.LIDs.PutLIDMapping(ctx, aliceLID, alice)
+	b.client.Store.LIDs.PutLIDMapping(ctx, bobLID, bob)
+	b.client.Store.Contacts.PutPushName(ctx, bobLID, "Bobby")
+
+	b.handleMessage(messageEvent(club, carol, "m1", 100, &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+		Text: s("@11223344 @55667788 @99990000 lunch?"),
+		ContextInfo: &waE2E.ContextInfo{MentionedJID: []string{
+			aliceLID.String(), bobLID.String(), strangerLID.String(),
+		}},
+	}}))
+
+	// A LID with no number known stays: there's nothing truer to show.
+	if got, want := textBody(t, b, "m1"), "@447700900001 @Bobby @99990000 lunch?"; got != want {
+		t.Errorf("text = %q, want %q", got, want)
+	}
+}

@@ -300,11 +300,13 @@ func (b *Bridge) personForms(jids ...types.JID) []types.JID {
 	return append(lids, phones...)
 }
 
-// resolveMentions replaces "@<number>" mention tokens in WhatsApp text with the
-// mentioned contact's display name. WhatsApp stores the bare number in the body
-// and ships the mentioned JIDs in contextInfo; official clients substitute the
-// name on display. Resolution uses the contact store (address-book name, then
-// observed push name); unresolvable mentions are left as the number.
+// resolveMentions replaces "@<user>" mention tokens in WhatsApp text with the
+// mentioned person's name. WhatsApp puts the bare user part of their JID in
+// the body — the number, or in a LID-addressed group the LID — and ships the
+// mentioned JIDs in contextInfo; official clients substitute the name on
+// display. A mention with no name known reads as the number: a LID one is
+// rewritten to the number it stands for, so the text never shows a raw LID
+// whose number is known.
 func (b *Bridge) resolveMentions(msg *waE2E.Message, convJID, text string) string {
 	ctx := getContextInfo(msg)
 	if ctx == nil {
@@ -314,18 +316,25 @@ func (b *Bridge) resolveMentions(msg *waE2E.Message, convJID, text string) strin
 		resolved := b.resolveLIDJID(jid)
 		// Same precedence the sender labels use: the per-conversation participant
 		// name first (so a mention reads identically to that person's label),
-		// then the contact store (address book → observed push name).
+		// then the contact store.
 		if name := b.ParticipantName(convJID, resolved.String()); name != "" {
 			return name
 		}
-		return personName(b.lookupContact(jid), "", "").name
+		if name := personName(b.lookupContact(jid), "", "").name; name != "" {
+			return name
+		}
+		if jid.Server == types.HiddenUserServer && resolved.Server == types.DefaultUserServer {
+			return resolved.User
+		}
+		return ""
 	})
 }
 
-// applyMentions replaces each "@<user part>" token with "@<name>" using nameFor
-// to resolve each mentioned JID. Unresolvable mentions (nameFor returns "") are
-// left as the raw number. Pure, so it's unit-testable without a client.
-func applyMentions(text string, mentionedJIDs []string, nameFor func(types.JID) string) string {
+// applyMentions replaces each "@<user part>" token with "@<label>" using
+// labelFor to label each mentioned JID. Mentions it can't label (labelFor
+// returns "") are left as they are. Pure, so it's unit-testable without a
+// client.
+func applyMentions(text string, mentionedJIDs []string, labelFor func(types.JID) string) string {
 	if text == "" {
 		return text
 	}
@@ -334,11 +343,11 @@ func applyMentions(text string, mentionedJIDs []string, nameFor func(types.JID) 
 		if err != nil {
 			continue
 		}
-		name := nameFor(parsed)
-		if name == "" {
+		label := labelFor(parsed)
+		if label == "" {
 			continue
 		}
-		text = strings.ReplaceAll(text, "@"+parsed.User, "@"+name)
+		text = strings.ReplaceAll(text, "@"+parsed.User, "@"+label)
 	}
 	return text
 }
