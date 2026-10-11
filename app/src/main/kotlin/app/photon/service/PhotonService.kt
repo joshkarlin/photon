@@ -68,7 +68,8 @@ class PhotonService : Service() {
         _signalCredentials = signalCreds
         _signalManager = SignalAccountManager(signalProtocolStore, signalCreds, signalProtocolDb)
         val signalMessageDb = SignalMessageDatabase(this)
-        _signalSender = SignalMessageSender(signalCreds, signalProtocolStore, signalMessageDb)
+        val signalContacts = app.photon.signal.AndroidContactResolver(this)
+        _signalSender = SignalMessageSender(signalCreds, signalProtocolStore, signalMessageDb, signalContacts::resolve)
         _signalRepository = SignalRepository(signalMessageDb, _signalSender, scope)
         _signalReceiver = SignalMessageReceiver(this, signalCreds, signalProtocolStore, signalMessageDb)
 

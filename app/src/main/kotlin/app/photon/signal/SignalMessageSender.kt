@@ -63,6 +63,9 @@ class SignalMessageSender(
     private val credentials: SignalCredentials,
     private val protocolStore: PhotonProtocolStore,
     private val messageDb: SignalMessageDatabase,
+    // Phone → local address-book name, so member names written by the
+    // group-send bootstrap follow the same policy as the receiver's.
+    private val contactResolver: ((String) -> String?)? = null,
 ) {
     companion object {
         private const val TAG = "SignalMessageSender"
@@ -493,7 +496,7 @@ class SignalMessageSender(
             for (memberAci in groupManager.memberAcis(group)) {
                 val aciString = memberAci.toString()
                 messageDb.upsertParticipant(
-                    conversationJid, aciString, messageDb.memberDisplayName(aciString), "member",
+                    conversationJid, aciString, messageDb.memberDisplayName(aciString, contactResolver), "member",
                 )
             }
             groupManager.memberAcis(group).filter { it != myAci }

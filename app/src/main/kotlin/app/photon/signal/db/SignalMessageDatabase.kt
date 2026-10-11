@@ -584,15 +584,17 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
 
     /**
      * Display-name policy for a group member, shared by receiver and
-     * sender so the participants table stays consistent: Signal profile
-     * name → local contact (when the caller supplies a phone resolver)
-     * → bare phone → ACI prefix as last resort.
+     * sender so the participants table stays consistent. Same order as
+     * conversation titles: local contact (when the caller supplies a phone
+     * resolver) → Signal profile name → bare phone → ACI prefix.
      */
     fun memberDisplayName(aci: String, contactResolver: ((String) -> String?)? = null): String {
         val contact = getContact(aci)
-        return contact?.profileName?.takeIf { it.isNotBlank() }
-            ?: contact?.phone?.let { phone -> contactResolver?.invoke(phone) ?: phone }
-            ?: aci.take(8)
+        return ConversationNaming.resolveFromContact(
+            phone = contact?.phone,
+            profileName = contact?.profileName,
+            resolveByPhone = { phone -> contactResolver?.invoke(phone) },
+        ) ?: aci.take(8)
     }
 
     /**

@@ -300,4 +300,29 @@ class SignalMessageDatabaseTest {
 
         assertEquals(setOf(dmAci, groupMemberA, groupMemberB), targets)
     }
+
+    /**
+     * Group member names follow the documented policy: this device's local
+     * contacts win over the Signal profile name, which wins over the phone.
+     * (The old order put the profile name first, so a saved contact name was
+     * overridden by whatever the member called themselves on Signal.)
+     */
+    @Test
+    fun memberDisplayName_prefersLocalContactThenProfileThenPhone() {
+        val saved = "member-saved"
+        val profileOnly = "member-profile"
+        val phoneOnly = "member-phone"
+        db.updateContactPhone(saved, "+15550003333")
+        db.updateContactProfileName(saved, "Signal Profile Name")
+        db.updateContactPhone(profileOnly, "+15550004444")
+        db.updateContactProfileName(profileOnly, "Profile Only")
+        db.updateContactPhone(phoneOnly, "+15550005555")
+        val resolver = { phone: String -> if (phone == "+15550003333") "Saved Contact" else null }
+
+        assertEquals("Saved Contact", db.memberDisplayName(saved, resolver))
+        assertEquals("Profile Only", db.memberDisplayName(profileOnly, resolver))
+        assertEquals("+15550005555", db.memberDisplayName(phoneOnly, resolver))
+        assertEquals("Signal Profile Name", db.memberDisplayName(saved))
+        assertEquals("member-u", db.memberDisplayName("member-unknown"))
+    }
 }

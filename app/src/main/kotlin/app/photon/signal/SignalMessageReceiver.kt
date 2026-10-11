@@ -829,13 +829,7 @@ class SignalMessageReceiver(
             else -> "sticker"
         }
 
-        // Resolve a friendly name for the sender. Order: Android local
-        // contacts (this device's address book) → Signal profile name (when
-        // it actually returns one) → bare E.164. The user does not want
-        // names from the primary device's address book to leak in here.
-        val senderName = senderE164?.let { contactResolver.resolve(it) }
-            ?: messageDb.getContact(senderAci)?.profileName?.takeIf { it.isNotBlank() }
-            ?: senderE164
+        val senderName = displayNameFor(senderAci, senderE164)
 
         if (isGroup) {
             // Master key + conversation row already seeded above (before
@@ -1435,6 +1429,21 @@ class SignalMessageReceiver(
         }
         Log.i(TAG, "Resolved group ${conversationJid.take(12)}…: $title (${acis.size} members)")
         scheduleActiveContactPing()
+    }
+
+    /**
+     * Friendly name for a Signal contact. Order: Android local contacts (this
+     * device's address book) → Signal profile name (when it actually returns
+     * one) → bare E.164. The envelope's E.164 is usually absent under sealed
+     * sender, so fall back to the phone learned from contacts sync. Names from
+     * the primary device's address book are deliberately never used.
+     */
+    private fun displayNameFor(aci: String, e164: String?): String? {
+        val contact = messageDb.getContact(aci)
+        return ConversationNaming.resolveFromContact(
+            phone = e164 ?: contact?.phone,
+            profileName = contact?.profileName,
+        ) { contactResolver.resolve(it) }
     }
 
     private fun maybeFetchProfile(aci: String) {
