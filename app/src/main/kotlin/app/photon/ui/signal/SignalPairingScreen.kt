@@ -13,7 +13,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import app.photon.service.PhotonService
+import app.photon.service.Sessions
 import app.photon.ui.shared.QrPanel
 import app.photon.ui.shared.components.backButton
 import app.photon.ui.shared.generateQrBitmap
@@ -27,7 +27,8 @@ import com.thelightphone.sdk.ui.gridUnitsAsDp
 
 @Composable
 fun SignalPairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
-    val manager = PhotonService._signalManager ?: return
+    val session = Sessions.signal ?: return
+    val manager = session.accountManager
     var qrBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf("Connecting...") }
@@ -36,7 +37,7 @@ fun SignalPairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
     // Navigate on main thread when pairing completes
     LaunchedEffect(paired) {
         if (paired) {
-            PhotonService._signalReceiver?.start()
+            session.onLinked()
             onPaired()
         }
     }

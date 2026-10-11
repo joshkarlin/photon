@@ -1,6 +1,7 @@
 package app.photon.signal.db
 
 import androidx.test.core.app.ApplicationProvider
+import app.photon.data.model.MessageStatus
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -67,7 +68,7 @@ class SignalCallRowsTest {
 
         assertTrue(change.wasUnread)
         assertEquals(0, change.unreadCount)
-        assertEquals("read", db.getMessage(callId)?.status)
+        assertEquals(MessageStatus.READ, db.getMessage(callId)?.status)
     }
 
     /** A missed call the user already viewed stays read when its text changes. */
@@ -80,7 +81,7 @@ class SignalCallRowsTest {
 
         assertFalse(change.wasUnread)
         assertEquals(0, unread())
-        assertEquals("read", db.getMessage(callId)?.status)
+        assertEquals(MessageStatus.READ, db.getMessage(callId)?.status)
     }
 
     @Test
@@ -127,7 +128,7 @@ class SignalCallRowsTest {
         assertEquals(emptyList(), db.markCallRowsRead(peer, upToTimestamp = 1_700_001_000))
 
         assertEquals(1, unread())
-        assertEquals("received", db.getMessage("${peer}_1700000000000_r")?.status)
+        assertEquals(MessageStatus.UNREAD, db.getMessage("${peer}_1700000000000_r")?.status)
     }
 
     /** Group call announcements dedupe by exact id, not by the message-key prefix. */
@@ -159,7 +160,7 @@ class SignalCallRowsTest {
         db.markConversationSeen(peer)
 
         assertEquals(0, unread())
-        assertEquals("read", db.getMessage(callId)?.status)
+        assertEquals(MessageStatus.READ, db.getMessage(callId)?.status)
         assertEquals(emptyList(), db.getUnsyncedIncomingReads(peer))
     }
 }

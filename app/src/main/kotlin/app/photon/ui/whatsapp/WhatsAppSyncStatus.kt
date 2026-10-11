@@ -15,36 +15,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
-import app.photon.data.model.Platform
 import app.photon.data.model.int
-import app.photon.service.PhotonService
-import app.photon.ui.shared.ChatListContent
+import app.photon.service.Sessions
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
 import com.thelightphone.sdk.ui.gridUnitsAsDp
 
+/** The empty WhatsApp list: connecting, pairing, or history sync's progress. */
 @Composable
-fun ChatListScreen(onChat: (String) -> Unit, onSwitch: () -> Unit, onSettings: () -> Unit) {
-    val repo = PhotonService._chatRepository ?: return
-    val rawConversations by repo.conversations.collectAsState()
-    val conversations = rawConversations?.filter { conv ->
-        !conv.isPseudoChat && conv.lastTimestamp > 0
-    }
-
-    ChatListContent(
-        title = "WhatsApp",
-        onTitleClick = onSwitch,
-        onSettings = onSettings,
-        conversations = conversations,
-        platformOf = { Platform.WHATSAPP },
-        onChat = onChat,
-        emptyContent = { WhatsAppSyncStatus() },
-    )
-}
-
-@Composable
-private fun WhatsAppSyncStatus() {
-    val bridge = PhotonService._bridgeClient
+internal fun WhatsAppSyncStatus() {
+    val bridge = Sessions.whatsapp?.bridge
     val waState = bridge?.whatsappState?.collectAsState()?.value ?: "disconnected"
     var syncProgress by remember { mutableStateOf("") }
     var syncDone by remember { mutableStateOf(false) }
@@ -73,7 +53,7 @@ private fun WhatsAppSyncStatus() {
                     syncDone -> "No messages yet"
                     waState == "connected" -> "Syncing"
                     waState == "connecting" -> "Connecting"
-                    PhotonService._bridgeClient?.isConnected?.value == true -> "Pairing"
+                    Sessions.whatsapp?.bridge?.isConnected?.value == true -> "Pairing"
                     else -> "Connecting"
                 },
                 variant = LightTextVariant.Copy,

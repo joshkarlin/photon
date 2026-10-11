@@ -15,12 +15,15 @@ private const val TAG = SignalMessageReceiver.TAG
 /**
  * Session pings: silent NullMessages that make contacts' clients learn this
  * linked device, so their messages are encrypted for it too.
+ *
+ * @param sendPing sends one ping to an ACI, returning whether it went out
  */
 internal class SessionPings(
     private val context: Context,
     private val credentials: SignalCredentials,
     private val messageDb: SignalMessageDatabase,
     private val scope: CoroutineScope,
+    private val sendPing: (aci: String) -> Boolean,
 ) {
     @Volatile private var activeContactsPinged = false
     @Volatile private var activeContactsPingInFlight = false
@@ -58,10 +61,6 @@ internal class SessionPings(
      * once per refresh window (currently 7 days).
      */
     private suspend fun pingActiveContacts() {
-        val sender = app.photon.service.PhotonService._signalSender ?: run {
-            Log.d(TAG, "Skipping active-contact ping: sender not ready")
-            return
-        }
         val myAci = credentials.aciString?.lowercase()
         val prefs = context.getSharedPreferences("signal_ping_state", android.content.Context.MODE_PRIVATE)
         val refreshCutoff = System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000
@@ -84,7 +83,7 @@ internal class SessionPings(
                 "to establish deviceId=${credentials.deviceId} sessions",
         )
         for (jid in targets) {
-            val ok = sender.sendSessionPing(jid)
+            val ok = sendPing(jid)
             if (ok) {
                 prefs.edit().putLong(jid, System.currentTimeMillis()).apply()
                 Log.i(TAG, "Session ping succeeded for ${jid.take(8)}…")

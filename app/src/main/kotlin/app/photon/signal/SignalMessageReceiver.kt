@@ -44,11 +44,19 @@ import org.whispersystems.signalservice.api.push.SignalServiceAddress
 import org.whispersystems.signalservice.api.websocket.SignalWebSocket
 import org.whispersystems.signalservice.internal.push.PushServiceSocket
 
+/**
+ * Signal's receive side: one connection's read loop, and everything that
+ * handles what arrives on it.
+ *
+ * @param sender the account's sender: it shares this receiver's sockets and
+ *   sends the pings, retry receipts and contacts request the receiver needs
+ */
 class SignalMessageReceiver(
     private val context: android.content.Context,
     private val credentials: SignalCredentials,
     private val protocolStore: PhotonProtocolStore,
     private val messageDb: SignalMessageDatabase,
+    private val sender: SignalMessageSender,
 ) {
     companion object {
         // Shared by the handlers in app.photon.signal.receiver, so one logcat
@@ -72,7 +80,7 @@ class SignalMessageReceiver(
     // Envelope processing and PNI merges both rewrite conversations: one at a time.
     private val storeLock = Any()
     private val preKeyRefill = PreKeyRefill(protocolStore)
-    private val sessionPings = SessionPings(context, credentials, messageDb, scope)
+    private val sessionPings = SessionPings(context, credentials, messageDb, scope, sender::sendSessionPing)
     private val contactNames: ContactNames = ContactNames(
         messageDb, storeLock, notifier,
         profileFetcher = { profileFetcher },
@@ -110,7 +118,7 @@ class SignalMessageReceiver(
     private val envelopeProcessor = EnvelopeProcessor(
         storeLock,
         SignalGroupSessionBuilder(sessionLock, GroupSessionBuilder(protocolStore)),
-        receipts, dataMessages, syncMessages, calls,
+        receipts, dataMessages, syncMessages, calls, sender,
     )
 
     // A validated network ends a reconnect backoff early.
@@ -146,7 +154,14 @@ class SignalMessageReceiver(
     @Volatile private var sockets: SocketPair? = null
     @Volatile private var profileFetcher: SignalProfileFetcher? = null
     @Volatile private var pushSocket: PushServiceSocket? = null
-    @Volatile private var groupManager: SignalGroupV2Manager? = null
+
+    /**
+     * The GroupV2 fetcher over the current connection's sockets, or null
+     * while disconnected. The sender uses it too, so a first send into a
+     * group doesn't rebuild the credential cache.
+     */
+    @Volatile var groupManager: SignalGroupV2Manager? = null
+        private set
     @Volatile private var contactsSyncRequested = false
 
     fun start() {
@@ -207,7 +222,6 @@ class SignalMessageReceiver(
             // and this stop() then removes the new loop's.
             networkMonitor.stop()
         }
-        app.photon.service.PhotonService._signalGroupManager = null
         closeSockets(pair)
         return loop
     }
@@ -250,7 +264,7 @@ class SignalMessageReceiver(
     private fun closeSockets(pair: SocketPair?) {
         if (pair == null) return
         pair.alive.set(false)
-        app.photon.service.PhotonService._signalSender?.detachReceiverWebSockets(pair.auth, pair.unauth)
+        sender.detachReceiverWebSockets(pair.auth, pair.unauth)
         try { pair.auth.disconnect() } catch (_: Exception) {}
         try { pair.unauth.disconnect() } catch (_: Exception) {}
     }
@@ -323,7 +337,6 @@ class SignalMessageReceiver(
             _state.value = "logged_out"
             networkMonitor.stop()
         }
-        app.photon.service.PhotonService._signalGroupManager = null
         closeSockets(pair)
     }
 
@@ -371,9 +384,7 @@ class SignalMessageReceiver(
         // Used by the contacts sync to download the encrypted blob from CDN.
         val ps = PushServiceSocket(config, credentials, SignalConfig.USER_AGENT, false)
         val fetcher = SignalProfileFetcher(config, ws, unauthWs, messageDb, scope)
-        // GroupV2 fetcher — reuses the same auth WS / push socket. Shared
-        // via PhotonService so the sender can also consult it when sending
-        // into a group without rebuilding the credential cache.
+        // GroupV2 fetcher — reuses the same auth WS / push socket.
         val gm = SignalGroupV2Manager(config, credentials, ws, ps)
 
         // Publish everything under the lock together with the generation
@@ -386,12 +397,11 @@ class SignalMessageReceiver(
                 pushSocket = ps
                 profileFetcher = fetcher
                 groupManager = gm
-                app.photon.service.PhotonService._signalGroupManager = gm
                 // Sending sync messages through a second authenticated
                 // WebSocket can cause Signal to close this receiver socket.
                 // Share the receiver pair so reads and sends are multiplexed
                 // over one linked-device session.
-                app.photon.service.PhotonService._signalSender?.attachReceiverWebSockets(ws, unauthWs)
+                sender.attachReceiverWebSockets(ws, unauthWs)
             }
         }
         if (!current) {
@@ -409,7 +419,7 @@ class SignalMessageReceiver(
             scope.launch {
                 try {
                     delay(1500)   // let the WS settle first
-                    app.photon.service.PhotonService._signalSender?.requestContactsSync()
+                    sender.requestContactsSync()
                 } catch (e: Exception) {
                     Log.w(TAG, "Couldn't request contacts sync: ${e.message}")
                 }
@@ -489,12 +499,12 @@ class SignalMessageReceiver(
     /** Download an incoming attachment by message id; see [Attachments.downloadAttachment]. */
     fun downloadAttachment(messageId: String): String? = attachments.downloadAttachment(messageId)
 
-    /** Delete downloaded media past its TTL. Called periodically by PhotonService. */
+    /** Delete downloaded media past its TTL. Called periodically by the Signal session. */
     fun pruneMedia() = attachments.pruneMedia()
 
     /**
      * Enforce the ephemeral message window (per-chat cap and max age from
-     * Settings → Chat). Called periodically by PhotonService alongside
+     * Settings → Chat). Called periodically by the Signal session alongside
      * [pruneMedia]; see SignalMessageDatabase.pruneMessages for the policy.
      */
     fun pruneMessages(maxPerConversation: Int, maxAgeDays: Int) {

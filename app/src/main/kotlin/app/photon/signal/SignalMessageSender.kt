@@ -30,12 +30,17 @@ internal fun signalReactionFor(messageId: String, emoji: String): SignalServiceD
     return SignalServiceDataMessage.Reaction(emoji, false, authorAci, timestamp)
 }
 
+/**
+ * @param groupManager the receiver's GroupV2 manager while it's connected,
+ *   for a first send into a group whose members aren't stored yet
+ */
 class SignalMessageSender internal constructor(
     private val credentials: SignalCredentials,
     private val protocolStore: PhotonProtocolStore,
     private val messageDb: SignalMessageDatabase,
     // The network side of sends; replaced in tests.
     transport: SignalTransport? = null,
+    groupManager: () -> SignalGroupV2Manager? = { null },
 ) {
     companion object {
         private const val TAG = "SignalMessageSender"
@@ -49,6 +54,7 @@ class SignalMessageSender internal constructor(
         credentials, messageDb, protocolStore.identityStore,
         config = { config },
         sender = { connection.getOrCreateSender() },
+        groupManager = groupManager,
     )
 
     /**
@@ -120,7 +126,8 @@ class SignalMessageSender internal constructor(
         return messageId
     }
 
-    fun sendTextMessage(conversationJid: String, text: String, replyToId: String? = null) {
+    /** Send a text message; returns whether it went out (otherwise its row is "failed"). */
+    fun sendTextMessage(conversationJid: String, text: String, replyToId: String? = null): Boolean {
         val timestamp = System.currentTimeMillis()
         val replyPrefix = replyPrefixFor(replyToId)
         val recipient = recipientFor(conversationJid)
@@ -129,9 +136,9 @@ class SignalMessageSender internal constructor(
         )
         if (recipient == null) {
             Log.w(TAG, "Refusing send: $conversationJid is neither an ACI nor a known group")
-            return
+            return false
         }
-        deliverRow(messageId, recipient, timestamp) { OutgoingContent.Message(text, replyPrefix) }
+        return deliverRow(messageId, recipient, timestamp) { OutgoingContent.Message(text, replyPrefix) }
     }
 
     /**
@@ -139,6 +146,7 @@ class SignalMessageSender internal constructor(
      * media_url/media_mime so the bubble renders while the file is uploaded
      * to Signal's CDN; the pointer then rides a normal DataMessage. Audio
      * sends are flagged as voice notes — that's the only audio Photon records.
+     * Returns whether it went out (otherwise its row is "failed").
      */
     fun sendMediaMessage(
         conversationJid: String,
@@ -146,7 +154,7 @@ class SignalMessageSender internal constructor(
         mimeType: String,
         caption: String?,
         replyToId: String? = null,
-    ) {
+    ): Boolean {
         val timestamp = System.currentTimeMillis()
         val replyPrefix = replyPrefixFor(replyToId)
         val contentType = contentTypeForMime(mimeType)
@@ -159,9 +167,9 @@ class SignalMessageSender internal constructor(
         )
         if (recipient == null) {
             Log.w(TAG, "Refusing media send to $conversationJid (fileExists=${file.exists()})")
-            return
+            return false
         }
-        deliverRow(messageId, recipient, timestamp) {
+        return deliverRow(messageId, recipient, timestamp) {
             val pointer = transport.upload(file, mimeType, voiceNote = contentType == "audio")
             OutgoingContent.Message(caption, replyPrefix, listOf(pointer))
         }
@@ -184,7 +192,7 @@ class SignalMessageSender internal constructor(
         val myAci = credentials.aciString
         if (row == null || row.conversationJid != conversationJid ||
             row.contentType == SignalMessageDatabase.CONTENT_CALL ||
-            row.status == "failed" || row.status == "sending" || reaction == null || myAci == null
+            row.status.isUnsent || reaction == null || myAci == null
         ) return false
         val recipient = recipientFor(conversationJid) ?: return false
 

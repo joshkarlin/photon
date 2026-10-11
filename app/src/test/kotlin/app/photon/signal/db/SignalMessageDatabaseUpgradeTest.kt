@@ -3,6 +3,7 @@ package app.photon.signal.db
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
+import app.photon.data.model.MessageStatus
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -60,10 +61,10 @@ class SignalMessageDatabaseUpgradeTest {
         val db = SignalMessageDatabase(context)
         try {
             // Conversation a had 1 unread: only its newest row is still unread.
-            assertEquals("seen", db.getMessage("a_1_x")?.status)
-            assertEquals("seen", db.getMessage("a_2_x")?.status)
-            assertEquals("received", db.getMessage("a_3_x")?.status)
-            assertEquals("seen", db.getMessage("b_1_x")?.status)
+            assertEquals(MessageStatus.SEEN, db.getMessage("a_1_x")?.status)
+            assertEquals(MessageStatus.SEEN, db.getMessage("a_2_x")?.status)
+            assertEquals(MessageStatus.UNREAD, db.getMessage("a_3_x")?.status)
+            assertEquals(MessageStatus.SEEN, db.getMessage("b_1_x")?.status)
             assertEquals(listOf("a_1_x", "a_2_x"), db.getUnsyncedIncomingReads("a").sorted())
         } finally {
             db.close()

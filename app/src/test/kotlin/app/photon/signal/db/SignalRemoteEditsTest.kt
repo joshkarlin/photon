@@ -1,6 +1,7 @@
 package app.photon.signal.db
 
 import androidx.test.core.app.ApplicationProvider
+import app.photon.data.model.MessageStatus
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -46,7 +47,7 @@ class SignalRemoteEditsTest {
 
         assertEquals(listOf(SignalMessageDatabase.RemoteDeleteChange(alice, 0, newerUnread = false)), changes)
         assertEquals(0, unread())
-        assertEquals("deleted", db.getMessage("${alice}_1700000000000_r1700000000000")?.status)
+        assertEquals(MessageStatus.DELETED, db.getMessage("${alice}_1700000000000_r1700000000000")?.status)
     }
 
     /** The older of two unread messages: the newer one is what the notification shows. */

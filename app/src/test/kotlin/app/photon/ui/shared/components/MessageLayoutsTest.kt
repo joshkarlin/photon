@@ -1,6 +1,7 @@
 package app.photon.ui.shared.components
 
 import app.photon.data.model.Message
+import app.photon.data.model.MessageStatus
 import org.junit.Test
 import java.util.Calendar
 import kotlin.test.assertEquals
@@ -20,7 +21,7 @@ class MessageLayoutsTest {
         id = id, conversationJid = "chat", senderJid = sender, timestamp = timestamp,
         contentType = contentType, textBody = body, mediaUrl = null, mediaMime = null,
         mediaSize = null, thumbnailPath = null, stickerPackId = null, replyToId = null,
-        editVersion = 0, isFromMe = fromMe, status = if (fromMe) "sent" else "received",
+        editVersion = 0, isFromMe = fromMe, status = if (fromMe) MessageStatus.SENT else MessageStatus.UNREAD,
     )
 
     @Test

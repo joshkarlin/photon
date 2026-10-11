@@ -1,6 +1,7 @@
 package app.photon.signal.db
 
 import androidx.test.core.app.ApplicationProvider
+import app.photon.data.model.MessageStatus
 import app.photon.signal.planReadSync
 import org.junit.After
 import org.junit.Before
@@ -86,8 +87,8 @@ class SignalServiceIdMergeTest {
         assertEquals(3, merged.unreadCount)
         assertEquals("${aci}_${t + 3_000}_again", merged.lastMessageId)
 
-        assertEquals("seen", db.getMessage("${aci}_${t + 1_000}_r")?.status)
-        assertEquals("received", db.getMessage("${aci}_${t + 2_000}_r")?.status)
+        assertEquals(MessageStatus.SEEN, db.getMessage("${aci}_${t + 1_000}_r")?.status)
+        assertEquals(MessageStatus.UNREAD, db.getMessage("${aci}_${t + 2_000}_r")?.status)
         assertNull(db.getMessage("${pni}_${t + 3_000}_r"))
         assertNull(db.getMessage("${aci}_${t + 3_000}_r"))
         assertEquals("Missed voice call", db.getMessage("call_${aci}_9")?.textBody)

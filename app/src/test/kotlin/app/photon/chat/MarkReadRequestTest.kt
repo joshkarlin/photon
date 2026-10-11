@@ -1,6 +1,7 @@
-package app.photon.ui.whatsapp
+package app.photon.chat
 
 import app.photon.data.model.Message
+import app.photon.data.model.MessageStatus
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -10,7 +11,7 @@ class MarkReadRequestTest {
     private fun msg(id: String, fromMe: Boolean = false, type: String = "text") = Message(
         id = id, conversationJid = "c", senderJid = "s", timestamp = 0, contentType = type,
         textBody = null, mediaUrl = null, mediaMime = null, mediaSize = null, thumbnailPath = null,
-        stickerPackId = null, replyToId = null, editVersion = 0, isFromMe = fromMe, status = "sent",
+        stickerPackId = null, replyToId = null, editVersion = 0, isFromMe = fromMe, status = MessageStatus.UNREAD,
     )
 
     @Test

@@ -2,6 +2,7 @@ package app.photon.signal
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import app.photon.data.model.MessageStatus
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.db.getConversation
 import app.photon.signal.db.getMessage
@@ -111,7 +112,7 @@ class SignalMessageSenderTest {
         sender.sendTextMessage(alice, "hello")
 
         val row = onlyRow(alice)
-        assertEquals("sent", row.status)
+        assertEquals(MessageStatus.SENT, row.status)
         assertTrue(row.isFromMe)
         assertEquals("hello", row.textBody)
         val sent = transport.sent.single()
@@ -129,14 +130,14 @@ class SignalMessageSenderTest {
         val recipient = assertIs<Recipient.Group>(transport.sent.single().recipient)
         assertEquals(group, recipient.conversationJid)
         assertEquals(4, recipient.meta.revision)
-        assertEquals("sent", onlyRow(group).status)
+        assertEquals(MessageStatus.SENT, onlyRow(group).status)
     }
 
     @Test
     fun textToAnUnknownConversationIsStoredFailedWithoutSending() {
         sender.sendTextMessage("not-a-chat", "hello")
 
-        assertEquals("failed", onlyRow("not-a-chat").status)
+        assertEquals(MessageStatus.FAILED, onlyRow("not-a-chat").status)
         assertEquals(emptyList(), transport.sent)
     }
 
@@ -146,7 +147,7 @@ class SignalMessageSenderTest {
 
         sender.sendTextMessage(alice, "hello")
 
-        assertEquals("failed", onlyRow(alice).status)
+        assertEquals(MessageStatus.FAILED, onlyRow(alice).status)
     }
 
     @Test
@@ -177,7 +178,7 @@ class SignalMessageSenderTest {
         assertEquals(1, content.attachments.size)
         val row = onlyRow(alice)
         assertEquals("image", row.contentType)
-        assertEquals("sent", row.status)
+        assertEquals(MessageStatus.SENT, row.status)
         assertEquals(photo.path, row.mediaUrl)
     }
 
@@ -193,7 +194,7 @@ class SignalMessageSenderTest {
     fun aMissingFileIsStoredFailedWithoutUploading() {
         sender.sendMediaMessage(alice, File(context.filesDir, "gone.jpg").path, "image/jpeg", null)
 
-        assertEquals("failed", onlyRow(alice).status)
+        assertEquals(MessageStatus.FAILED, onlyRow(alice).status)
         assertEquals(emptyList(), transport.uploads)
         assertEquals(emptyList(), transport.sent)
     }
@@ -204,7 +205,7 @@ class SignalMessageSenderTest {
 
         sender.sendMediaMessage(alice, file("send_media_2.jpg").path, "image/jpeg", null)
 
-        assertEquals("failed", onlyRow(alice).status)
+        assertEquals(MessageStatus.FAILED, onlyRow(alice).status)
         assertEquals(emptyList(), transport.sent)
     }
 
@@ -262,7 +263,7 @@ class SignalMessageSenderTest {
         val sent = transport.sent.single()
         assertEquals(1700000000456L, sent.timestamp)
         assertEquals(OutgoingContent.Message("again", "${alice}_1700000000123"), sent.content)
-        assertEquals("sent", db.getMessage("${me}_1700000000456_f")?.status)
+        assertEquals(MessageStatus.SENT, db.getMessage("${me}_1700000000456_f")?.status)
     }
 
     @Test
@@ -289,7 +290,7 @@ class SignalMessageSenderTest {
         transport.failSends = true
 
         assertFalse(sender.retryMessage("${me}_1700000000456_f"))
-        assertEquals("failed", db.getMessage("${me}_1700000000456_f")?.status)
+        assertEquals(MessageStatus.FAILED, db.getMessage("${me}_1700000000456_f")?.status)
     }
 
     @Test
@@ -307,8 +308,8 @@ class SignalMessageSenderTest {
         assertFalse(sender.retryMessage("${alice}_1700000000123_r"))
         assertFalse(sender.retryMessage("${me}_1700000000300_m"))
         assertFalse(sender.retryMessage("${me}_1700000000400_u"))
-        assertEquals("failed", db.getMessage("${me}_1700000000300_m")?.status)
-        assertEquals("failed", db.getMessage("${me}_1700000000400_u")?.status)
+        assertEquals(MessageStatus.FAILED, db.getMessage("${me}_1700000000300_m")?.status)
+        assertEquals(MessageStatus.FAILED, db.getMessage("${me}_1700000000400_u")?.status)
         assertEquals(emptyList(), transport.sent)
     }
 

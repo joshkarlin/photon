@@ -206,7 +206,7 @@ fun SignalMessageDatabase.newestUnreadMessage(conversationJid: String): Message?
         "SELECT * FROM messages WHERE conversation_jid = ? AND is_from_me = 0 AND status = ? " +
             "AND content_type != ? ORDER BY rowid DESC LIMIT 1",
         arrayOf(conversationJid, STATUS_UNREAD, CONTENT_CALL),
-    ).use { if (it.moveToFirst()) it.toMessage() else null }
+    ).use { if (it.moveToFirst()) it.toMessage(::signalStatus) else null }
 
 /**
  * Apply a read sync from another linked device to the matching incoming

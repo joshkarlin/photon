@@ -12,7 +12,6 @@ import app.photon.signal.db.getContact
 import app.photon.signal.db.getConversationWithContact
 import app.photon.signal.db.getConversationsWithContacts
 import app.photon.signal.db.getGroupPeople
-import app.photon.signal.db.getMessage
 import app.photon.signal.db.getMessages
 import app.photon.signal.db.getReactions
 import app.photon.signal.db.getUnsyncedIncomingReads
@@ -36,7 +35,7 @@ import kotlinx.coroutines.withContext
  */
 class SignalRepository(
     private val db: SignalMessageDatabase,
-    var sender: SignalMessageSender? = null,
+    private val sender: SignalMessageSender?,
     scope: CoroutineScope,
     localContacts: LocalContacts,
     selfAci: () -> String?,
@@ -83,59 +82,53 @@ class SignalRepository(
             }
             .distinctUntilChanged()
 
-    fun getMessage(id: String): Message? = db.getMessage(id)
+    // Each send returns whether it went out. A message that didn't is left
+    // "failed" in its thread for the user to retry.
 
-    suspend fun sendMessage(jid: String, text: String, replyToId: String? = null) {
+    suspend fun sendMessage(jid: String, text: String, replyToId: String? = null): Boolean =
         withContext(Dispatchers.IO) {
-            sender?.sendTextMessage(jid, text, replyToId)
+            sender?.sendTextMessage(jid, text, replyToId) ?: false
         }
-    }
 
-    suspend fun retryMessage(messageId: String) {
+    suspend fun retryMessage(messageId: String): Boolean =
         withContext(Dispatchers.IO) {
-            sender?.retryMessage(messageId)
+            sender?.retryMessage(messageId) ?: false
         }
-    }
 
-    suspend fun deleteMessage(jid: String, messageId: String, forEveryone: Boolean) {
+    suspend fun deleteMessage(jid: String, messageId: String, forEveryone: Boolean): Boolean =
         withContext(Dispatchers.IO) {
-            sender?.deleteMessage(jid, messageId, forEveryone)
+            sender?.deleteMessage(jid, messageId, forEveryone) ?: false
         }
-    }
 
-    suspend fun sendReaction(jid: String, messageId: String, emoji: String) {
+    suspend fun sendReaction(jid: String, messageId: String, emoji: String): Boolean =
         withContext(Dispatchers.IO) {
-            sender?.sendReaction(jid, messageId, emoji)
+            sender?.sendReaction(jid, messageId, emoji) ?: false
         }
-    }
 
-    suspend fun markRead(jid: String, messageIds: List<String>) {
+    /**
+     * Clear the chat's unread count and sync the read to the user's other
+     * devices. Returns false when that sync was due but didn't go out.
+     */
+    suspend fun markRead(jid: String): Boolean =
         withContext(Dispatchers.IO) {
             db.markConversationSeen(jid)
-            val sender = sender ?: return@withContext
             // Sync read state to our other devices so the primary's unread
             // badge clears. Rows only flip from 'seen' to 'read' when they
             // were in a payload that was actually sent, so failures — and
             // rows that can't be expressed in a read sync — retry on the
-            // next chat open instead of being marked read silently.
+            // next mark-read instead of being marked read silently.
             val plan = planReadSync(db.getUnsyncedIncomingReads(jid))
             if (unsyncableReads.firstReport(jid, plan)) {
                 Log.w(TAG, "Cannot sync read state for ${plan.skippedIds.size} message(s) without an ACI key")
             }
-            if (plan.entries.isEmpty()) return@withContext
-            if (sender.sendReadSync(plan.entries)) {
-                db.markMessagesRead(plan.rowIds)
-            }
+            if (plan.entries.isEmpty()) return@withContext true
+            val synced = sender?.sendReadSync(plan.entries) == true
+            if (synced) db.markMessagesRead(plan.rowIds)
+            synced
         }
-    }
 
-    suspend fun sendMedia(jid: String, filePath: String, mimeType: String, caption: String?, replyToId: String?) {
+    suspend fun sendMedia(jid: String, filePath: String, mimeType: String, caption: String?, replyToId: String?): Boolean =
         withContext(Dispatchers.IO) {
-            sender?.sendMediaMessage(jid, filePath, mimeType, caption, replyToId)
+            sender?.sendMediaMessage(jid, filePath, mimeType, caption, replyToId) ?: false
         }
-    }
-
-    suspend fun downloadMedia(messageId: String): String? = withContext(Dispatchers.IO) {
-        app.photon.service.PhotonService._signalReceiver?.downloadAttachment(messageId)
-    }
 }

@@ -16,7 +16,9 @@ import app.photon.data.ComposeStyle
 import app.photon.data.KeyboardStyle
 import app.photon.data.PhotonPreferences
 import app.photon.data.ScrollDial
-import app.photon.service.PhotonService
+import app.photon.service.BridgeClient
+import app.photon.service.GoBridge
+import app.photon.service.Sessions
 import app.photon.ui.shared.components.MenuRow
 import app.photon.ui.shared.components.MenuScreen
 import app.photon.ui.theme.PhotonTheme
@@ -77,10 +79,10 @@ private fun SettingsHomeContent(version: String?, onBack: () -> Unit, onNav: (Pa
 
 @Composable
 private fun ConnectionsPage(onBack: () -> Unit, onNav: (Page) -> Unit) {
-    val bridge = PhotonService._bridgeClient
+    val bridge = Sessions.whatsapp?.bridge
     val waState by (bridge?.whatsappState ?: MutableStateFlow("disconnected")).collectAsState()
-    val sigState by (PhotonService._signalReceiver?.state ?: MutableStateFlow("disconnected")).collectAsState()
-    val sigRegistered = PhotonService._signalCredentials?.isRegistered() == true
+    val sigState by (Sessions.signal?.receiver?.state ?: MutableStateFlow("disconnected")).collectAsState()
+    val sigRegistered = Sessions.signal?.credentials?.isRegistered() == true
 
     BackHandler { onBack() }
     MenuScreen("Connections", onBack) {
@@ -94,8 +96,8 @@ private fun ConnectionsPage(onBack: () -> Unit, onNav: (Page) -> Unit) {
 @Composable
 private fun WhatsAppPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
-    val bridge = PhotonService._bridgeClient
+    val session = Sessions.whatsapp
+    val bridge = session?.bridge
     val waState by (bridge?.whatsappState ?: MutableStateFlow("disconnected")).collectAsState()
 
     BackHandler { onBack() }
@@ -115,7 +117,7 @@ private fun WhatsAppPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
             })
             MenuRow("RESET", onClick = {
                 scope.launch {
-                    PhotonService.resetWhatsApp(context.filesDir)
+                    session?.reset()
                     onReset()
                 }
             })
@@ -128,11 +130,11 @@ private fun WhatsAppPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
 @Composable
 private fun SignalPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
-    val sigState by (PhotonService._signalReceiver?.state ?: MutableStateFlow("disconnected")).collectAsState()
-    val sigRegistered = PhotonService._signalCredentials?.isRegistered() == true
-    val phone = PhotonService._signalCredentials?.phoneNumber
-    val deviceId = PhotonService._signalCredentials?.storedDeviceId
+    val session = Sessions.signal
+    val sigState by (session?.receiver?.state ?: MutableStateFlow("disconnected")).collectAsState()
+    val sigRegistered = session?.credentials?.isRegistered() == true
+    val phone = session?.credentials?.phoneNumber
+    val deviceId = session?.credentials?.storedDeviceId
 
     BackHandler { onBack() }
     MenuScreen("Signal", onBack) {
@@ -147,13 +149,12 @@ private fun SignalPage(onBack: () -> Unit, onReset: () -> Unit = {}) {
         if (sigRegistered) {
             MenuRow("REFRESH CONNECTION") {
                 scope.launch {
-                    PhotonService._signalReceiver?.stop()
-                    PhotonService._signalReceiver?.start()
+                    session?.refresh()
                 }
             }
             MenuRow("RESET") {
                 scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    PhotonService.resetSignal(context)
+                    session?.reset()
                     onReset()
                 }
             }
@@ -224,7 +225,7 @@ private fun StoragePage(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val prefs = remember { PhotonPreferences(context) }
-    val bridge = PhotonService._bridgeClient
+    val bridge = Sessions.whatsapp?.bridge
 
     val maxMessages by prefs.maxMessages.collectAsState(initial = 50)
     val maxDays by prefs.maxDays.collectAsState(initial = 7)
@@ -256,12 +257,12 @@ private fun formatState(state: String) = when (state) {
     else -> state.uppercase()
 }
 
-private suspend fun syncRetention(bridge: app.photon.service.BridgeClient?, maxMessages: Int, maxDays: Int) {
+private suspend fun syncRetention(bridge: BridgeClient?, maxMessages: Int, maxDays: Int) {
     try {
         bridge?.request("set_retention", buildJsonObject {
             put("max_messages", maxMessages)
             put("max_days", maxDays)
-            put("media_ttl_mins", 5)
+            put("media_ttl_mins", GoBridge.MEDIA_TTL_MINS)
         })
     } catch (_: Exception) {}
 }

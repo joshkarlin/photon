@@ -1,6 +1,7 @@
 package app.photon.signal.db
 
 import androidx.test.core.app.ApplicationProvider
+import app.photon.data.model.MessageStatus
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -53,7 +54,7 @@ class SignalUnreadStateTest {
         assertTrue(receive(1_700_000_000_000))
 
         assertEquals(1, unread())
-        assertEquals("received", db.getMessage("${alice}_1700000000000_r1700000000000")?.status)
+        assertEquals(MessageStatus.UNREAD, db.getMessage("${alice}_1700000000000_r1700000000000")?.status)
         assertEquals("${alice}_1700000000000_r1700000000000", db.getConversation(alice)?.lastMessageId)
         assertEquals(1_700_000_000L, db.getConversation(alice)?.lastTimestamp)
     }
@@ -85,7 +86,7 @@ class SignalUnreadStateTest {
         receive(1_700_000_000_000, alreadyRead = true)
 
         assertEquals(0, unread())
-        assertEquals("read", db.getMessage("${alice}_1700000000000_r1700000000000")?.status)
+        assertEquals(MessageStatus.READ, db.getMessage("${alice}_1700000000000_r1700000000000")?.status)
     }
 
     /**
@@ -106,8 +107,8 @@ class SignalUnreadStateTest {
         assertTrue(result.matched)
         assertEquals(emptyList(), result.clearedConversations)
         assertEquals(1, unread())
-        assertEquals("read", db.getMessage("${alice}_1700000000000_r1700000000000")?.status)
-        assertEquals("received", db.getMessage("${alice}_1700000100000_r1700000100000")?.status)
+        assertEquals(MessageStatus.READ, db.getMessage("${alice}_1700000000000_r1700000000000")?.status)
+        assertEquals(MessageStatus.UNREAD, db.getMessage("${alice}_1700000100000_r1700000100000")?.status)
     }
 
     @Test
@@ -160,7 +161,7 @@ class SignalUnreadStateTest {
 
         db.markMessagesRead(listOf(id))
 
-        assertEquals("deleted", db.getMessage(id)?.status)
+        assertEquals(MessageStatus.DELETED, db.getMessage(id)?.status)
     }
 
     @Test
@@ -170,6 +171,6 @@ class SignalUnreadStateTest {
         db.markConversationSeen(alice)
 
         assertEquals(0, unread())
-        assertNull(db.getMessages(alice).firstOrNull { it.status == "received" })
+        assertNull(db.getMessages(alice).firstOrNull { it.status == MessageStatus.UNREAD })
     }
 }

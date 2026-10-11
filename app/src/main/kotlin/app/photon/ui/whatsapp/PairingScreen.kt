@@ -25,7 +25,7 @@ import androidx.compose.ui.text.style.TextAlign
 import app.photon.data.model.PairingCodeResponse
 import app.photon.data.model.QrCodePayload
 import app.photon.data.model.string
-import app.photon.service.PhotonService
+import app.photon.service.Sessions
 import app.photon.ui.shared.QrPanel
 import app.photon.ui.shared.components.LightInputField
 import app.photon.ui.shared.components.backButton
@@ -50,7 +50,8 @@ private enum class PairingMode { CODE, QR }
 @Composable
 fun PairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
-    val bridge = PhotonService._bridgeClient
+    val session = Sessions.whatsapp
+    val bridge = session?.bridge
     var mode by remember { mutableStateOf(PairingMode.QR) }
     var phone by remember { mutableStateOf("") }
     var code by remember { mutableStateOf<String?>(null) }
@@ -76,7 +77,7 @@ fun PairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
 
     // Load cached QR on entry, clear cache on exit
     LaunchedEffect(Unit) {
-        val cached = PhotonService.getCachedQr()
+        val cached = session?.cachedQrCode()
         if (cached != null) qrBitmap = generateQrBitmap(cached)
     }
 
@@ -84,7 +85,7 @@ fun PairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
         bridge?.events?.collect { evt ->
             when (evt.type) {
                 "pair_success" -> {
-                    PhotonService.clearQrCache()
+                    session?.clearQrCode()
                     onPaired()
                 }
                 "qr_code" -> {
@@ -92,7 +93,7 @@ fun PairingScreen(onPaired: () -> Unit, onBack: () -> Unit) {
                         val payload = Json.decodeFromJsonElement<QrCodePayload>(evt.payload)
                         val qrText = payload.codes.firstOrNull()
                         if (qrText != null) {
-                            PhotonService.cacheQrCode(qrText)
+                            session?.cacheQrCode(qrText)
                             qrBitmap = generateQrBitmap(qrText)
                         }
                     } catch (_: Exception) {}

@@ -21,7 +21,6 @@ import androidx.compose.ui.text.style.TextAlign
 import app.photon.data.model.Conversation
 import app.photon.data.model.Platform
 import app.photon.service.NotificationHelper
-import app.photon.ui.shared.components.backButton
 import app.photon.ui.shared.components.settingsButton
 import app.photon.ui.theme.PhotonGrid
 import com.thelightphone.sdk.ui.LightLazyScrollView
@@ -33,8 +32,8 @@ import com.thelightphone.sdk.ui.LightTopBarCenter
 import com.thelightphone.sdk.ui.gridUnitsAsDp
 
 /**
- * Shared chat list screen structure used by WhatsApp, Signal, SMS, and All Chats.
- * Handles the top bar, loading state, empty state, and conversation list.
+ * The chat list's layout and behaviour, for [app.photon.ui.chat.ChatListScreen]:
+ * the top bar, loading state, empty state, and conversation list.
  *
  * @param platformOf which platform a listed conversation belongs to
  */
@@ -44,7 +43,6 @@ fun ChatListContent(
     conversations: List<Conversation>?,
     platformOf: (Conversation) -> Platform,
     onChat: (String) -> Unit,
-    onBack: (() -> Unit)? = null,
     emptyMessage: String = "No messages",
     emptyContent: @Composable (() -> Unit)? = null,
     icon: @Composable ((Conversation) -> Painter)? = null,
@@ -95,7 +93,6 @@ fun ChatListContent(
         platformOf = platformOf,
         onChat = onChat,
         listState = listState,
-        onBack = onBack,
         emptyMessage = emptyMessage,
         emptyContent = emptyContent,
         icon = icon,
@@ -112,7 +109,6 @@ internal fun ChatListLayout(
     platformOf: (Conversation) -> Platform,
     onChat: (String) -> Unit,
     listState: LazyListState = rememberLazyListState(),
-    onBack: (() -> Unit)? = null,
     emptyMessage: String = "No messages",
     emptyContent: @Composable (() -> Unit)? = null,
     icon: @Composable ((Conversation) -> Painter)? = null,
@@ -125,7 +121,6 @@ internal fun ChatListLayout(
             .background(LightThemeTokens.colors.background),
     ) {
         LightTopBar(
-            leftButton = onBack?.let(::backButton),
             // The ▾ marks the title as the platform picker.
             center = LightTopBarCenter.Text(
                 text = if (onTitleClick != null) "$title ▾" else title,

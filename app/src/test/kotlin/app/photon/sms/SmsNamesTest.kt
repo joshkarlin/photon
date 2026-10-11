@@ -1,11 +1,6 @@
 package app.photon.sms
 
-import android.content.ContentProvider
-import android.content.ContentValues
 import android.content.Context
-import android.database.Cursor
-import android.database.MatrixCursor
-import android.net.Uri
 import android.provider.Telephony
 import androidx.test.core.app.ApplicationProvider
 import app.photon.data.model.Conversation
@@ -24,7 +19,6 @@ import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import kotlin.test.assertEquals
@@ -44,7 +38,11 @@ class SmsNamesTest {
     fun setUp() {
         savedCountry = DisplayNames.defaultCountry
         DisplayNames.defaultCountry = "GB"
-        Robolectric.buildContentProvider(FakeSmsProvider::class.java).create("sms")
+        FakeSmsProvider.install().apply {
+            add("+44 7700 900123", "Dinner?", 3_000L, Telephony.Sms.MESSAGE_TYPE_INBOX, thread = 1)
+            add("+447700900999", "It's Dad", 2_000L, Telephony.Sms.MESSAGE_TYPE_INBOX, thread = 2)
+            add("HSBC UK", "Your code", 1_000L, Telephony.Sms.MESSAGE_TYPE_INBOX, thread = 3)
+        }
     }
 
     @After
@@ -73,29 +71,5 @@ class SmsNamesTest {
 
         val second = runBlocking { withTimeout(5_000) { emitted.receive() } }
         assertEquals("Dad", names(second)["+447700900999"])
-    }
-
-    /** Three senders, one message each. */
-    class FakeSmsProvider : ContentProvider() {
-        override fun onCreate() = true
-
-        override fun query(
-            uri: Uri,
-            projection: Array<out String>?,
-            selection: String?,
-            selectionArgs: Array<out String>?,
-            sortOrder: String?,
-        ): Cursor = MatrixCursor(
-            arrayOf(Telephony.Sms.ADDRESS, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.READ, Telephony.Sms.TYPE),
-        ).apply {
-            addRow(arrayOf<Any>("+44 7700 900123", "Dinner?", 3_000L, 1, Telephony.Sms.MESSAGE_TYPE_INBOX))
-            addRow(arrayOf<Any>("+447700900999", "It's Dad", 2_000L, 1, Telephony.Sms.MESSAGE_TYPE_INBOX))
-            addRow(arrayOf<Any>("HSBC UK", "Your code", 1_000L, 1, Telephony.Sms.MESSAGE_TYPE_INBOX))
-        }
-
-        override fun getType(uri: Uri): String? = null
-        override fun insert(uri: Uri, values: ContentValues?): Uri? = null
-        override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?) = 0
-        override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?) = 0
     }
 }

@@ -89,7 +89,7 @@ internal class Attachments(
     /**
      * Delete downloaded Signal media older than the TTL and clear the
      * media_url on the affected rows (the stored AttachmentPointer keeps
-     * tap-to-redownload working). Called periodically by PhotonService.
+     * tap-to-redownload working). Called periodically by the Signal session.
      */
     fun pruneMedia() {
         val mediaDir = File(context.filesDir, "signal_media")

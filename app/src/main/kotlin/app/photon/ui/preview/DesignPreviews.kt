@@ -13,6 +13,7 @@ import app.photon.data.ComposeStyle
 import app.photon.data.KeyboardStyle
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
+import app.photon.data.model.MessageStatus
 import app.photon.data.model.Platform
 import app.photon.data.model.Reaction
 import app.photon.ui.shared.ChatListLayout
@@ -73,7 +74,7 @@ internal object PreviewSamples {
         fromMe: Boolean = false,
         sender: String = "alexandra@s.whatsapp.net",
         contentType: String = "text",
-        status: String = if (fromMe) "read" else "received",
+        status: MessageStatus = if (fromMe) MessageStatus.READ else MessageStatus.UNREAD,
         reactions: List<String> = emptyList(),
         replyTo: Message? = null,
     ) = Message(
@@ -89,7 +90,7 @@ internal object PreviewSamples {
     val dmMessages: List<Message> = run {
         val plan = message("d1", 26 * HOUR, "Are we still on for tomorrow night?")
         listOf(
-            message("d10", 1 * MIN, "Want me to order for you?", fromMe = true, status = "failed"),
+            message("d10", 1 * MIN, "Want me to order for you?", fromMe = true, status = MessageStatus.FAILED),
             message("d9", 3 * MIN, "No rush, I'm at the bar already", fromMe = true),
             message("d8", 4 * MIN, "Running ten minutes late, sorry!"),
             message("d7", 20 * MIN, "Missed voice call", contentType = "call"),
@@ -116,7 +117,7 @@ internal object PreviewSamples {
     val groupMessages: List<Message> = run {
         val question = message("g2", 70 * MIN, "Who's driving on Saturday?", sender = ALICE)
         listOf(
-            message("g12", 1 * MIN, "Grabbing chalk on the way", fromMe = true, status = "failed"),
+            message("g12", 1 * MIN, "Grabbing chalk on the way", fromMe = true, status = MessageStatus.FAILED),
             message("g11", 3 * MIN, "[ unsupported message ]", sender = BOB),
             message("g10", 4 * MIN, "Perfect", sender = BOB, reactions = listOf("👍", "👍", "🙏")),
             message("g9", 12 * MIN, "Missed group video call", contentType = "call"),
