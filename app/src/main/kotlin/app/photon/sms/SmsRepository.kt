@@ -11,6 +11,8 @@ import android.telephony.SmsManager
 import android.util.Log
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
+import app.photon.data.model.Platform
+import app.photon.data.names.DisplayNames
 import app.photon.data.names.LocalContacts
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -174,12 +176,10 @@ class SmsRepository(
                 // received (not sent by us), and the user hasn't opened the chat in
                 // Photon since the message arrived.
                 val unread = isInbox && !read && date > lastRead
-                val isAlphanumeric = address.firstOrNull()?.isDigit() != true && address.firstOrNull() != '+'
-
                 if (address !in conversations) {
                     conversations[address] = Conversation(
                         jid = address,
-                        name = if (isAlphanumeric) address else localContacts.nameFor(rawAddress),
+                        name = displayName(address),
                         isGroup = false,
                         lastMessageId = null,
                         lastTimestamp = date / 1000,
@@ -272,6 +272,17 @@ class SmsRepository(
 
         return messages
     }
+
+    /**
+     * An alphanumeric sender ("HSBC UK") as sent; a number by its LP3 contact,
+     * else formatted. SMS has no other name sources.
+     */
+    private fun displayName(address: String): String =
+        if (DisplayNames.phoneOf(address, Platform.SMS) == null) {
+            address
+        } else {
+            DisplayNames.person(Platform.SMS, lp3 = localContacts.nameFor(address), phone = address)
+        }
 
     private fun normalizeAddress(address: String): String {
         // Only normalize if it looks like a phone number (starts with + or digit)
