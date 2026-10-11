@@ -8,6 +8,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
+	"os"
 	"strings"
 	"time"
 )
@@ -210,6 +211,12 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 		return
 	}
 
+	// "Delete for everyone" (by the sender, or a group admin).
+	if pm := msg.GetProtocolMessage(); pm != nil && pm.GetType() == waE2E.ProtocolMessage_REVOKE && pm.GetKey().GetID() != "" {
+		b.applyRevoke(pm.GetKey().GetID())
+		return
+	}
+
 	// Check for edit
 	if evt.IsEdit {
 		editedID := getEditTargetID(msg)
@@ -322,6 +329,32 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 		TextBody:        textBody,
 		ContentType:     contentType,
 		IsFromMe:        isFromMe,
+	})
+}
+
+// applyRevoke blanks a message deleted for everyone. If it was the last unread
+// message in its chat, Kotlin uses message_revoked's unread_count to withdraw
+// the notification that announced it.
+func (b *Bridge) applyRevoke(targetID string) {
+	res, ok := b.RevokeMessage(targetID)
+	if !ok {
+		b.log.Debugf("Revoke for unknown message %s", targetID)
+		return
+	}
+	for _, f := range res.Files {
+		if b.isBridgeMediaPath(f) {
+			os.Remove(f)
+		}
+	}
+	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
+		ConversationJID: res.ConversationJID,
+		MessageID:       targetID,
+	})
+	b.BroadcastEvent("message_revoked", MessageRevokedEvent{
+		ConversationJID: res.ConversationJID,
+		MessageID:       targetID,
+		WasUnread:       res.WasUnread,
+		UnreadCount:     res.Unread,
 	})
 }
 

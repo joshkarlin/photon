@@ -199,6 +199,63 @@ func (b *Bridge) MarkChatReadUpTo(jid string, ts int64) (remaining int) {
 	return remaining
 }
 
+// RevokeResult describes a message blanked by a "delete for everyone".
+type RevokeResult struct {
+	ConversationJID string
+	WasUnread       bool     // it was an incoming message the user hadn't read
+	Unread          int      // the conversation's unread count afterwards
+	Files           []string // downloaded media/thumbnail paths now orphaned
+}
+
+// RevokeMessage blanks a message deleted for everyone so it renders as
+// "[ deleted ]" (text type, no body, status "deleted"), drops its reactions,
+// and takes it out of the unread count if it was still unread. ok is false
+// when the target isn't stored (pruned, or outside the history window).
+func (b *Bridge) RevokeMessage(id string) (res RevokeResult, ok bool) {
+	tx, err := b.msgDB.Begin()
+	if err != nil {
+		b.log.Errorf("Revoke %s: %v", id, err)
+		return res, false
+	}
+	defer tx.Rollback()
+
+	var isFromMe int
+	var status string
+	var mediaURL, thumbPath sql.NullString
+	err = tx.QueryRow(`SELECT conversation_jid, is_from_me, status, media_url, thumbnail_path FROM messages WHERE id = ?`, id).
+		Scan(&res.ConversationJID, &isFromMe, &status, &mediaURL, &thumbPath)
+	if err != nil {
+		return res, false
+	}
+	res.WasUnread = isFromMe == 0 && status != "read" && status != "deleted"
+	// Only bridge-owned downloads are removed — an outgoing row's media_url is
+	// the user's own staged file.
+	if isFromMe == 0 {
+		for _, p := range []sql.NullString{mediaURL, thumbPath} {
+			if p.Valid && p.String != "" {
+				res.Files = append(res.Files, p.String)
+			}
+		}
+	}
+
+	if _, err := tx.Exec(`UPDATE messages SET content_type = 'text', text_body = NULL, media_url = NULL,
+		media_mime = NULL, media_size = NULL, thumbnail_path = NULL, raw_proto = NULL, status = 'deleted'
+		WHERE id = ?`, id); err != nil {
+		b.log.Errorf("Revoke %s: %v", id, err)
+		return res, false
+	}
+	tx.Exec(`DELETE FROM reactions WHERE message_id = ?`, id)
+	if res.WasUnread {
+		tx.Exec(`UPDATE conversations SET unread_count = MAX(unread_count - 1, 0) WHERE jid = ?`, res.ConversationJID)
+	}
+	tx.QueryRow(`SELECT unread_count FROM conversations WHERE jid = ?`, res.ConversationJID).Scan(&res.Unread)
+	if err := tx.Commit(); err != nil {
+		b.log.Errorf("Revoke %s: %v", id, err)
+		return res, false
+	}
+	return res, true
+}
+
 // MarkChatUnread mirrors WhatsApp's "mark as unread": the chat shows as unread
 // even though every message in it has been seen.
 func (b *Bridge) MarkChatUnread(jid string) {

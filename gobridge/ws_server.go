@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
@@ -235,7 +236,10 @@ func (b *Bridge) handleMarkRead(ctx context.Context, raw json.RawMessage) (json.
 	// Resolve LID → phone so the badge clears on the same conversation row the
 	// message/receipt handlers write (handleReceipt resolves for this reason).
 	jid := b.resolveLIDString(p.JID)
-	b.ResetUnread(jid)
+	// Every incoming row is now read, not just the IDs listed (the UI sends
+	// the newest few): a later revoke of an older message must not think it
+	// was still unread.
+	b.MarkChatReadUpTo(jid, math.MaxInt64)
 	err := b.MarkRead(ctx, jid, p.MessageIDs)
 	return mustMarshal(struct{}{}), err
 }

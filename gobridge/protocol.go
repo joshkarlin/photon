@@ -123,6 +123,16 @@ type MessageUpdatedEvent struct {
 	MessageID       string `json:"message_id"`
 }
 
+// MessageRevokedEvent: a message was deleted for everyone and now renders as
+// "[ deleted ]". When WasUnread and UnreadCount is 0, the notification that
+// announced it should go.
+type MessageRevokedEvent struct {
+	ConversationJID string `json:"conversation_jid"`
+	MessageID       string `json:"message_id"`
+	WasUnread       bool   `json:"was_unread"`
+	UnreadCount     int    `json:"unread_count"`
+}
+
 // ReceiptEvent reports a contact's delivered/read receipt for our outgoing
 // messages. It never means the user read anything — see ReadSelfEvent.
 type ReceiptEvent struct {

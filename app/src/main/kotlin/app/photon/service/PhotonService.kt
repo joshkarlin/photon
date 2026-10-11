@@ -14,6 +14,7 @@ import app.photon.R
 import app.photon.PhotonApp
 import app.photon.data.db.PhotonDatabase
 import app.photon.data.model.boolean
+import app.photon.data.model.int
 import app.photon.data.model.isPseudoWhatsAppJid
 import app.photon.data.model.string
 import app.photon.data.repository.ChatRepository
@@ -190,6 +191,14 @@ class PhotonService : Service() {
                     // other person reading OUR messages and must not cancel.
                     val convJid = evt.string("conversation_jid")
                     if (!convJid.isNullOrBlank()) {
+                        NotificationHelper.cancelForConversation(this@PhotonService, convJid)
+                    }
+                }
+                "message_revoked" -> {
+                    // A sender deleted the only unread message: withdraw the banner
+                    // that announced it.
+                    val convJid = evt.string("conversation_jid")
+                    if (!convJid.isNullOrBlank() && evt.boolean("was_unread") == true && evt.int("unread_count") == 0) {
                         NotificationHelper.cancelForConversation(this@PhotonService, convJid)
                     }
                 }
