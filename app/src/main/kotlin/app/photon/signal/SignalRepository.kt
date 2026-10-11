@@ -6,6 +6,17 @@ import app.photon.data.model.Message
 import app.photon.data.repository.conversationsFlow
 import app.photon.data.repository.messagesFlow
 import app.photon.signal.db.SignalMessageDatabase
+import app.photon.signal.db.findMessageByPrefix
+import app.photon.signal.db.getContact
+import app.photon.signal.db.getConversation
+import app.photon.signal.db.getConversations
+import app.photon.signal.db.getMessage
+import app.photon.signal.db.getMessages
+import app.photon.signal.db.getParticipants
+import app.photon.signal.db.getReactions
+import app.photon.signal.db.getUnsyncedIncomingReads
+import app.photon.signal.db.markConversationSeen
+import app.photon.signal.db.markMessagesRead
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -20,6 +31,8 @@ class SignalRepository(
     companion object {
         private const val TAG = "SignalRepository"
     }
+
+    private val unsyncableReads = UnsyncableReads()
 
     val conversations: StateFlow<List<Conversation>?> =
         conversationsFlow(scope, "SignalRepository", db.changes) { db.getConversations() }
@@ -77,7 +90,7 @@ class SignalRepository(
             // rows that can't be expressed in a read sync — retry on the
             // next chat open instead of being marked read silently.
             val plan = planReadSync(db.getUnsyncedIncomingReads(jid))
-            if (plan.skippedIds.isNotEmpty()) {
+            if (unsyncableReads.firstReport(jid, plan)) {
                 Log.w(TAG, "Cannot sync read state for ${plan.skippedIds.size} message(s) without an ACI key")
             }
             if (plan.entries.isEmpty()) return@withContext

@@ -45,26 +45,6 @@ class SignalMessageDatabaseTest {
     }
 
     /**
-     * The blank-group-name repair must target only groups that are actually
-     * blank AND have a master key to re-fetch with — never named groups, never
-     * keyless ones. (Restores titles wiped by the old reresolve bug.)
-     */
-    @Test
-    fun getGroupsWithBlankNameAndMasterKey_selectsOnlyRepairableGroups() {
-        val mk = ByteArray(32) { 1 }
-        db.upsertConversation(jid = "blankGroup", name = null, isGroup = true)
-        db.updateGroupMeta("blankGroup", mk, 5)
-        db.upsertConversation(jid = "namedGroup", name = "Frothers Utd", isGroup = true)
-        db.updateGroupMeta("namedGroup", mk, 5)
-        db.upsertConversation(jid = "keylessGroup", name = null, isGroup = true)
-
-        val repairable = db.getGroupsWithBlankNameAndMasterKey()
-
-        assertEquals(listOf("blankGroup"), repairable.map { it.first })
-        assertEquals(32, repairable.single().second.size)
-    }
-
-    /**
      * Reconnect-time GroupV2 refresh must also pick up named groups with an
      * empty participants table, because those member ACIs are the session-ping
      * targets for group-only contacts.
@@ -152,16 +132,14 @@ class SignalMessageDatabaseTest {
     fun markIncomingReadByPrefix_marksOnlyMatchingDmMessageAndDecrementsUnread() {
         val aci = "read-dm-aci"
         db.upsertConversation(jid = aci, name = "Alice", isGroup = false)
-        db.insertMessage(
+        db.insertIncomingMessage(
             id = "${aci}_1700_abc", conversationJid = aci, senderJid = aci,
             timestamp = 1700, contentType = "text", textBody = "first",
         )
-        db.insertMessage(
+        db.insertIncomingMessage(
             id = "${aci}_1800_def", conversationJid = aci, senderJid = aci,
             timestamp = 1800, contentType = "text", textBody = "second",
         )
-        db.incrementUnread(aci)
-        db.incrementUnread(aci)
 
         val result = db.markIncomingReadByPrefix("${aci}_1700")
 
@@ -178,16 +156,14 @@ class SignalMessageDatabaseTest {
         val group = "read-group"
         val author = "read-group-author"
         db.upsertConversation(jid = group, name = "Group", isGroup = true)
-        db.insertMessage(
+        db.insertIncomingMessage(
             id = "${author}_1700_abc", conversationJid = group, senderJid = author,
             timestamp = 1700, contentType = "text", textBody = "first",
         )
-        db.insertMessage(
+        db.insertIncomingMessage(
             id = "${author}_1800_def", conversationJid = group, senderJid = author,
             timestamp = 1800, contentType = "text", textBody = "second",
         )
-        db.incrementUnread(group)
-        db.incrementUnread(group)
 
         val first = db.markIncomingReadByPrefix("${author}_1700")
         val duplicate = db.markIncomingReadByPrefix("${author}_1700")
@@ -221,7 +197,7 @@ class SignalMessageDatabaseTest {
     fun markConversationRead_clearsIncomingUnreadButPreservesOutgoingStatus() {
         val aci = "transcript-read-aci"
         db.upsertConversation(jid = aci, name = "Alice", isGroup = false)
-        db.insertMessage(
+        db.insertIncomingMessage(
             id = "${aci}_1700_in", conversationJid = aci, senderJid = aci,
             timestamp = 1700, contentType = "text", textBody = "incoming",
         )
@@ -230,7 +206,6 @@ class SignalMessageDatabaseTest {
             timestamp = 1800, contentType = "text", textBody = "outgoing",
             isFromMe = true, status = "delivered",
         )
-        db.incrementUnread(aci)
 
         val changed = db.markConversationRead(aci)
         val duplicate = db.markConversationRead(aci)
@@ -243,35 +218,26 @@ class SignalMessageDatabaseTest {
     }
 
     /**
-     * A Signal message redelivered N times (sender resends after our retry
-     * receipt; server redelivers un-acked envelopes) must collapse to one row.
-     * Rows share the stable "{author}_{timestampMs}" prefix and differ only by
-     * the random suffix, so the cleanup keys on that prefix. Distinct messages
-     * (different timestamp) are preserved.
+     * A sent transcript for an older message (delivered late from the
+     * primary) must not move the chat back in the list. A startup repair used
+     * to paper over this by recomputing every conversation's timestamp.
      */
     @Test
-    fun deleteDuplicateMessages_collapsesSamePrefixKeepsDistinct() {
-        db.upsertConversation(jid = "grp", name = "Group", isGroup = true)
-        // Same (author, timestamp) delivered three times — three random suffixes.
-        listOf("abc", "def", "ghi").forEach { rand ->
-            db.insertMessage(
-                id = "aci_1700_$rand", conversationJid = "grp", senderJid = "aci",
-                timestamp = 1700, contentType = "text", textBody = "hello",
-            )
-        }
-        // A genuinely different message (different timestamp) must survive.
-        db.insertMessage(
-            id = "aci_1800_xyz", conversationJid = "grp", senderJid = "aci",
-            timestamp = 1800, contentType = "text", textBody = "world",
+    fun updateConversationLastMessage_neverMovesBackwards() {
+        val aci = "late-transcript-aci"
+        db.upsertConversation(jid = aci, name = "Alice", isGroup = false)
+        db.insertIncomingMessage(
+            id = "${aci}_1800000_new", conversationJid = aci, senderJid = aci,
+            timestamp = 1800, contentType = "text", textBody = "newer",
         )
 
-        val removed = db.deleteDuplicateMessages()
+        db.updateConversationLastMessage(aci, "me_1700000_old", 1700)
+        assertEquals("${aci}_1800000_new", db.getConversation(aci)?.lastMessageId)
+        assertEquals(1800L, db.getConversation(aci)?.lastTimestamp)
 
-        assertEquals(2, removed)
-        val msgs = db.getMessages("grp")
-        assertEquals(2, msgs.size)
-        // getMessages orders newest-first (timestamp DESC).
-        assertEquals(listOf("world", "hello"), msgs.map { it.textBody })
+        db.updateConversationLastMessage(aci, "me_1900000_next", 1900)
+        assertEquals("me_1900000_next", db.getConversation(aci)?.lastMessageId)
+        assertEquals(1900L, db.getConversation(aci)?.lastTimestamp)
     }
 
     /**

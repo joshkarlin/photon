@@ -2,55 +2,26 @@ package app.photon.signal
 
 import android.util.Log
 import app.photon.signal.db.SignalMessageDatabase
+import app.photon.signal.db.deleteMessage
+import app.photon.signal.db.getGroupMeta
+import app.photon.signal.db.getMessage
+import app.photon.signal.db.insertMessage
+import app.photon.signal.db.updateConversationLastMessage
+import app.photon.signal.db.updateMessageStatus
+import app.photon.signal.db.upsertReaction
+import app.photon.signal.receiver.contentTypeForMime
 import app.photon.signal.store.PhotonProtocolStore
-import com.fasterxml.jackson.databind.JsonNode
+import java.io.File
+import java.util.Optional
+import java.util.UUID
 import org.signal.core.models.ServiceId
 import org.signal.libsignal.protocol.message.DecryptionErrorMessage
-import org.whispersystems.signalservice.api.SignalServiceAccountDataStore
-import org.whispersystems.signalservice.api.SignalServiceDataStore
-import org.whispersystems.signalservice.api.SignalServiceMessageSender
-import org.whispersystems.signalservice.api.attachment.AttachmentApi
-import org.whispersystems.signalservice.api.crypto.AttachmentCipherStreamUtil
-import org.whispersystems.signalservice.api.crypto.ContentHint
-import org.whispersystems.signalservice.api.keys.KeysApi
-import org.whispersystems.signalservice.api.message.MessageApi
-import org.whispersystems.signalservice.api.messages.SignalServiceAttachment
-import org.whispersystems.signalservice.api.messages.SignalServiceAttachmentPointer
 import org.whispersystems.signalservice.api.messages.SignalServiceDataMessage
 import org.whispersystems.signalservice.api.messages.multidevice.ReadMessage
 import org.whispersystems.signalservice.api.messages.multidevice.RequestMessage
-import org.whispersystems.signalservice.api.messages.multidevice.SentTranscriptMessage
 import org.whispersystems.signalservice.api.messages.multidevice.SignalServiceSyncMessage
 import org.whispersystems.signalservice.api.push.SignalServiceAddress
 import org.whispersystems.signalservice.api.websocket.SignalWebSocket
-import org.whispersystems.signalservice.internal.crypto.PaddingInputStream
-import org.whispersystems.signalservice.internal.push.AttachmentUploadForm
-import org.whispersystems.signalservice.internal.push.PushServiceSocket
-import org.whispersystems.signalservice.internal.util.JsonUtil
-import java.io.File
-import java.io.FileInputStream
-import java.io.IOException
-import java.util.Optional
-import java.util.UUID
-import java.util.concurrent.Executors
-
-internal fun signalAttachmentUploadLength(fileLength: Long): Long =
-    AttachmentCipherStreamUtil.getCiphertextLength(PaddingInputStream.getPaddedSize(fileLength))
-
-internal fun parseSignalAttachmentUploadForm(response: String): AttachmentUploadForm {
-    val json = JsonUtil.fromJson(response, JsonNode::class.java)
-    val cdn = json.get("cdn")?.intValue() ?: error("Missing attachment CDN")
-    require(cdn == 2 || cdn == 3) { "Unsupported attachment CDN: $cdn" }
-    val key = json.get("key")?.textValue() ?: error("Missing attachment key")
-    val location = json.get("signedUploadLocation")?.textValue()
-        ?: error("Missing attachment upload location")
-    val headersNode = json.get("headers") ?: error("Missing attachment headers")
-    require(headersNode.isObject) { "Invalid attachment headers" }
-    val headers = headersNode.properties().associate { (name, value) ->
-        name to (value.textValue() ?: error("Invalid attachment header: $name"))
-    }
-    return AttachmentUploadForm(cdn, key, headers, location)
-}
 
 internal fun signalReactionFor(messageId: String, emoji: String): SignalServiceDataMessage.Reaction? {
     if (emoji.isBlank()) return null
@@ -59,199 +30,118 @@ internal fun signalReactionFor(messageId: String, emoji: String): SignalServiceD
     return SignalServiceDataMessage.Reaction(emoji, false, authorAci, timestamp)
 }
 
-class SignalMessageSender(
+class SignalMessageSender internal constructor(
     private val credentials: SignalCredentials,
     private val protocolStore: PhotonProtocolStore,
     private val messageDb: SignalMessageDatabase,
     // Phone → local address-book name, so member names written by the
     // group-send bootstrap follow the same policy as the receiver's.
     private val contactResolver: ((String) -> String?)? = null,
+    // The network side of sends; replaced in tests.
+    transport: SignalTransport? = null,
 ) {
     companion object {
         private const val TAG = "SignalMessageSender"
     }
 
-    private val config = SignalConfig.createConfiguration()
-    private val sessionLock = SignalConfig.newSessionLock()
+    private val config by lazy { SignalConfig.createConfiguration() }
     val identityStore get() = protocolStore.identityStore
-    private val executor = Executors.newCachedThreadPool()
+    private val connection = SenderConnection(credentials, protocolStore) { config }
 
-    // Lazily initialized, reused across sends
-    @Volatile private var sender: SignalServiceMessageSender? = null
-    // Signal permits one authenticated chat WebSocket per linked device. The
-    // receiver owns the long-lived sockets when it is running; creating a
-    // second authenticated socket here causes the receiver socket to be
-    // closed by the service, which looks like a receive failure.
-    @Volatile private var receiverAuthWs: SignalWebSocket.AuthenticatedWebSocket? = null
-    @Volatile private var receiverUnauthWs: SignalWebSocket.UnauthenticatedWebSocket? = null
-    private var ownedAuthWs: SignalWebSocket.AuthenticatedWebSocket? = null
-    private var ownedUnauthWs: SignalWebSocket.UnauthenticatedWebSocket? = null
+    private val transport: SignalTransport = transport ?: LibraryTransport(
+        credentials, messageDb, protocolStore.identityStore, contactResolver,
+        config = { config },
+        sender = { connection.getOrCreateSender() },
+    )
 
     /**
-     * Reuse the receiver's sockets for sends, sync requests, and key APIs.
-     * This keeps one authenticated connection per linked device. The receiver
-     * remains responsible for connecting and disconnecting these instances.
+     * The conversation a send goes to: a DM (ACI-shaped jid) or a GroupV2
+     * group with a stored master key. Null for anything else; a group's
+     * master key can't be synthesized, so sending waits until an incoming
+     * group message has seeded it.
      */
-    fun attachReceiverWebSockets(
-        authWs: SignalWebSocket.AuthenticatedWebSocket,
-        unauthWs: SignalWebSocket.UnauthenticatedWebSocket,
-    ) {
-        var oldOwnedAuth: SignalWebSocket.AuthenticatedWebSocket? = null
-        var oldOwnedUnauth: SignalWebSocket.UnauthenticatedWebSocket? = null
-        synchronized(this) {
-            if (receiverAuthWs === authWs && receiverUnauthWs === unauthWs) return
-            oldOwnedAuth = ownedAuthWs
-            oldOwnedUnauth = ownedUnauthWs
-            ownedAuthWs = null
-            ownedUnauthWs = null
-            sender = null
-            receiverAuthWs = authWs
-            receiverUnauthWs = unauthWs
-        }
-        // These are only sockets created by this sender. Never disconnect the
-        // receiver-owned sockets during an attachment or an invalidation.
-        try { oldOwnedAuth?.disconnect() } catch (_: Exception) {}
-        try { oldOwnedUnauth?.disconnect() } catch (_: Exception) {}
-        Log.i(TAG, "Attached sender to receiver-owned Signal WebSockets")
+    private fun recipientFor(conversationJid: String): Recipient? =
+        ServiceId.ACI.parseOrNull(conversationJid)?.let { Recipient.Dm(conversationJid, it) }
+            ?: messageDb.getGroupMeta(conversationJid)?.let { Recipient.Group(conversationJid, it) }
+
+    /**
+     * The one send path. [content] is built inside it, so an attachment
+     * upload failing counts as the send failing. Exceptions aren't rethrown,
+     * so callers' coroutines don't have to catch them to keep the UI alive;
+     * a failure drops the cached library sender so the next send rebuilds it.
+     */
+    private fun deliver(
+        recipient: Recipient,
+        timestamp: Long,
+        what: String,
+        content: () -> OutgoingContent,
+    ): Boolean = try {
+        transport.send(recipient, content(), timestamp)
+        Log.i(TAG, "Sent $what to ${recipient.conversationJid}")
+        true
+    } catch (e: Exception) {
+        Log.w(TAG, "Sending $what failed", e)
+        invalidate()
+        false
     }
 
-    /** Clear only the receiver socket pair being stopped or replaced. */
-    fun detachReceiverWebSockets(
-        authWs: SignalWebSocket.AuthenticatedWebSocket?,
-        unauthWs: SignalWebSocket.UnauthenticatedWebSocket?,
-    ) {
-        if (authWs == null && unauthWs == null) return
-        synchronized(this) {
-            if (receiverAuthWs === authWs || receiverUnauthWs === unauthWs) {
-                receiverAuthWs = null
-                receiverUnauthWs = null
-                sender = null
-            }
-        }
-    }
-
-    private fun getOrCreateSender(): SignalServiceMessageSender {
-        sender?.let { return it }
-
-        synchronized(this) {
-            sender?.let { return it }
-
-            val pushSocket = PushServiceSocket(config, credentials, SignalConfig.USER_AGENT, false)
-
-            val aws = receiverAuthWs ?: run {
-                val wsFactory = SignalConfig.webSocketFactory(config, "photon-send", credentials)
-                SignalWebSocket.AuthenticatedWebSocket(
-                    wsFactory, { true }, SignalConfig.sleepTimer, 30_000L,
-                ).also {
-                    it.connect()
-                    ownedAuthWs = it
-                }
-            }
-            val uws = receiverUnauthWs ?: run {
-                val unauthFactory = SignalConfig.webSocketFactory(config, "photon-send-unauth", null)
-                SignalWebSocket.UnauthenticatedWebSocket(
-                    unauthFactory, { true }, SignalConfig.sleepTimer, 30_000L,
-                ).also { ownedUnauthWs = it }
-            }
-
-            val dataStore = object : SignalServiceDataStore {
-                override fun get(serviceId: ServiceId): SignalServiceAccountDataStore = protocolStore
-                override fun aci(): SignalServiceAccountDataStore = protocolStore
-                override fun pni(): SignalServiceAccountDataStore = protocolStore
-                override fun isMultiDevice(): Boolean = true
-            }
-
-            val s = SignalServiceMessageSender(
-                pushSocket, dataStore, sessionLock,
-                AttachmentApi(aws, pushSocket),
-                MessageApi(aws, uws),
-                KeysApi(aws, uws),
-                Optional.empty(),
-                executor,
-                0L,    // maxEnvelopeSize (0 = unenforced)
-                0,     // maxIncrementalMacsPerEnvelope
-                { true },
-                // useBinaryId / useStringId: these gate whether destination
-                // ServiceIds are written into sync payloads AT ALL. With both
-                // false (the old values), sent transcripts carried no
-                // destinationServiceId in any form, so the primary device
-                // couldn't attribute them to a thread and silently dropped
-                // them — outgoing messages never appeared on the main device.
-                // Current clients read the binary field; the string field is
-                // included for older-client compatibility.
-                true,
-                true,
-            )
-            sender = s
-            return s
-        }
+    /** Send an outgoing row: it ends "sent", or "failed" for the user to retry. */
+    private fun deliverRow(messageId: String, recipient: Recipient, timestamp: Long, content: () -> OutgoingContent): Boolean {
+        val sent = deliver(recipient, timestamp, messageId, content)
+        messageDb.updateMessageStatus(messageId, if (sent) "sent" else "failed")
+        return sent
     }
 
     /**
-     * Send a text message. The local DB row is written BEFORE the network
-     * attempt so the UI sees the outgoing message instantly, with status
-     * transitioning from "sending" → "sent" / "failed". Failures leave the
-     * row in place with status="failed" so the user can retry from the UI;
-     * exceptions are NOT re-thrown so the calling coroutine doesn't have to
-     * catch them just to keep the UI alive.
-     *
-     * Routes to either DM (ACI-shaped jid) or GroupV2 (base64 group id with
-     * a stored master_key). Groups without a stored master_key fail loudly —
-     * we can't synthesize one, so the user has to wait for an incoming
-     * group message to seed the master key before they can send.
+     * Store an outgoing row before the network attempt, so the UI shows it
+     * at once; it starts "sending", or "failed" when it can't be sent.
      */
-    fun sendTextMessage(conversationJid: String, text: String, replyToId: String? = null) {
-        val timestamp = System.currentTimeMillis()
-        val replyPrefix = replyPrefixFor(replyToId)
+    private fun storeOutgoing(
+        conversationJid: String,
+        timestamp: Long,
+        status: String,
+        contentType: String,
+        text: String?,
+        replyPrefix: String?,
+        mediaPath: String? = null,
+        mediaMime: String? = null,
+        mediaSize: Long? = null,
+    ): String {
         // Prefix "{authorAci}_{timestampMs}" must stay stable so quote lookups
         // via findMessageByPrefix still match. The random suffix only exists
         // to avoid local PK collisions on rapid-fire sends with the same ms.
         val messageId = "${credentials.aciString}_${timestamp}_${UUID.randomUUID().toString().take(8)}"
+        messageDb.insertMessage(
+            id = messageId, conversationJid = conversationJid,
+            senderJid = credentials.aciString ?: "",
+            timestamp = timestamp / 1000, contentType = contentType,
+            textBody = text, mediaUrl = mediaPath, mediaMime = mediaMime, mediaSize = mediaSize,
+            replyToId = replyPrefix,
+            isFromMe = true, status = status,
+        )
+        messageDb.updateConversationLastMessage(conversationJid, messageId, timestamp / 1000)
+        return messageId
+    }
 
-        val aci = ServiceId.ACI.parseOrNull(conversationJid)
-        val groupMeta = if (aci == null) messageDb.getGroupMeta(conversationJid) else null
-
-        fun insertRow(status: String) {
-            messageDb.insertMessage(
-                id = messageId, conversationJid = conversationJid,
-                senderJid = credentials.aciString ?: "",
-                timestamp = timestamp / 1000, contentType = "text",
-                textBody = text, replyToId = replyPrefix,
-                isFromMe = true, status = status,
-            )
-            messageDb.updateConversationLastMessage(conversationJid, messageId, timestamp / 1000)
-        }
-
-        if (aci == null && groupMeta == null) {
+    fun sendTextMessage(conversationJid: String, text: String, replyToId: String? = null) {
+        val timestamp = System.currentTimeMillis()
+        val replyPrefix = replyPrefixFor(replyToId)
+        val recipient = recipientFor(conversationJid)
+        val messageId = storeOutgoing(
+            conversationJid, timestamp, if (recipient != null) "sending" else "failed", "text", text, replyPrefix,
+        )
+        if (recipient == null) {
             Log.w(TAG, "Refusing send: $conversationJid is neither an ACI nor a known group")
-            insertRow("failed")
             return
         }
-
-        insertRow("sending")
-
-        try {
-            if (aci != null) {
-                sendDmInternal(aci, conversationJid, text, timestamp, replyPrefix)
-            } else {
-                sendGroupInternal(conversationJid, groupMeta!!, text, timestamp, replyPrefix)
-            }
-            messageDb.updateMessageStatus(messageId, "sent")
-            Log.i(TAG, "Sent $messageId to $conversationJid")
-        } catch (e: Exception) {
-            Log.e(TAG, "Send failed for $messageId; row marked failed", e)
-            messageDb.updateMessageStatus(messageId, "failed")
-            invalidate()
-        }
+        deliverRow(messageId, recipient, timestamp) { OutgoingContent.Message(text, replyPrefix) }
     }
 
     /**
-     * Send a media message (voice note, image, etc). Same local-row-first
-     * pattern as sendTextMessage: the row is written with status="sending"
-     * (carrying media_url/media_mime so the bubble renders), the file is
-     * uploaded to Signal's CDN, and the resulting pointer rides a normal
-     * DataMessage. Audio sends are flagged as voice notes — that's the only
-     * audio Photon records.
+     * Send a media message (voice note, image, etc). The row carries
+     * media_url/media_mime so the bubble renders while the file is uploaded
+     * to Signal's CDN; the pointer then rides a normal DataMessage. Audio
+     * sends are flagged as voice notes — that's the only audio Photon records.
      */
     fun sendMediaMessage(
         conversationJid: String,
@@ -262,81 +152,22 @@ class SignalMessageSender(
     ) {
         val timestamp = System.currentTimeMillis()
         val replyPrefix = replyPrefixFor(replyToId)
-        val messageId = "${credentials.aciString}_${timestamp}_${UUID.randomUUID().toString().take(8)}"
-        val contentType = when {
-            mimeType.startsWith("image/") -> "image"
-            mimeType.startsWith("video/") -> "video"
-            mimeType.startsWith("audio/") -> "audio"
-            else -> "document"
-        }
+        val contentType = contentTypeForMime(mimeType)
         val file = File(filePath)
-
-        val aci = ServiceId.ACI.parseOrNull(conversationJid)
-        val groupMeta = if (aci == null) messageDb.getGroupMeta(conversationJid) else null
-
-        fun insertRow(status: String) {
-            messageDb.insertMessage(
-                id = messageId, conversationJid = conversationJid,
-                senderJid = credentials.aciString ?: "",
-                timestamp = timestamp / 1000, contentType = contentType,
-                textBody = caption?.takeIf { it.isNotBlank() },
-                mediaUrl = filePath, mediaMime = mimeType,
-                mediaSize = file.length().takeIf { it > 0 },
-                replyToId = replyPrefix,
-                isFromMe = true, status = status,
-            )
-            messageDb.updateConversationLastMessage(conversationJid, messageId, timestamp / 1000)
-        }
-
-        if ((aci == null && groupMeta == null) || !file.exists()) {
-            Log.w(TAG, "Refusing media send to $conversationJid " +
-                "(knownTarget=${aci != null || groupMeta != null}, fileExists=${file.exists()})")
-            insertRow("failed")
+        val recipient = recipientFor(conversationJid)?.takeIf { file.exists() }
+        val messageId = storeOutgoing(
+            conversationJid, timestamp, if (recipient != null) "sending" else "failed", contentType,
+            caption?.takeIf { it.isNotBlank() }, replyPrefix,
+            mediaPath = filePath, mediaMime = mimeType, mediaSize = file.length().takeIf { it > 0 },
+        )
+        if (recipient == null) {
+            Log.w(TAG, "Refusing media send to $conversationJid (fileExists=${file.exists()})")
             return
         }
-
-        insertRow("sending")
-
-        try {
-            val pointer = uploadAttachment(file, mimeType, voiceNote = contentType == "audio")
-            if (aci != null) {
-                sendDmInternal(aci, conversationJid, caption, timestamp, replyPrefix, listOf(pointer))
-            } else {
-                sendGroupInternal(conversationJid, groupMeta!!, caption, timestamp, replyPrefix, listOf(pointer))
-            }
-            messageDb.updateMessageStatus(messageId, "sent")
-            Log.i(TAG, "Sent media $messageId ($mimeType, ${file.length()}B) to $conversationJid")
-        } catch (e: Exception) {
-            Log.e(TAG, "Media send failed for $messageId; row marked failed", e)
-            messageDb.updateMessageStatus(messageId, "failed")
-            invalidate()
+        deliverRow(messageId, recipient, timestamp) {
+            val pointer = transport.upload(file, mimeType, voiceNote = contentType == "audio")
+            OutgoingContent.Message(caption, replyPrefix, listOf(pointer))
         }
-    }
-
-    /**
-     * Upload a local file to Signal's CDN and return the attachment pointer
-     * to embed in a DataMessage. The pointer (not the stream) is reused in
-     * the sync transcript, so linked devices download the same upload.
-     */
-    private fun uploadAttachment(file: File, mimeType: String, voiceNote: Boolean): SignalServiceAttachmentPointer {
-        val sender = getOrCreateSender()
-        val pushSocket = PushServiceSocket(config, credentials, SignalConfig.USER_AGENT, false)
-        val uploadLength = signalAttachmentUploadLength(file.length())
-        val response = pushSocket.serviceRequest(
-            "/v4/attachments/form/upload?uploadLength=$uploadLength", "GET", null,
-        ) ?: error("Empty attachment upload form")
-        val form = parseSignalAttachmentUploadForm(response)
-        val uploadSpec = pushSocket.getResumableUploadSpec(form)
-        val stream = SignalServiceAttachment.newStreamBuilder()
-            .withStream(FileInputStream(file))
-            .withContentType(mimeType)
-            .withLength(file.length())
-            .withFileName(file.name)
-            .withVoiceNote(voiceNote)
-            .withUploadTimestamp(System.currentTimeMillis())
-            .withResumableUploadSpec(uploadSpec)
-            .build()
-        return stream.use { sender.uploadAttachment(it) }
     }
 
     /**
@@ -358,259 +189,12 @@ class SignalMessageSender(
             row.contentType == SignalMessageDatabase.CONTENT_CALL ||
             row.status == "failed" || row.status == "sending" || reaction == null || myAci == null
         ) return false
-
-        val aci = ServiceId.ACI.parseOrNull(conversationJid)
-        val groupMeta = if (aci == null) messageDb.getGroupMeta(conversationJid) else null
-        if (aci == null && groupMeta == null) return false
+        val recipient = recipientFor(conversationJid) ?: return false
 
         val timestamp = System.currentTimeMillis()
-        return try {
-            if (aci != null) {
-                sendDmInternal(aci, conversationJid, null, timestamp, null, reaction = reaction)
-            } else {
-                sendGroupInternal(conversationJid, groupMeta!!, null, timestamp, null, reaction = reaction)
-            }
-            messageDb.upsertReaction(MessageKeys.prefixOf(messageId), myAci, emoji, timestamp)
-            true
-        } catch (e: Exception) {
-            Log.w(TAG, "Reaction send failed for $messageId", e)
-            invalidate()
-            false
-        }
-    }
-
-    /**
-     * One-to-one DataMessage send. Attaches the recipient's E.164 to the
-     * address when known — Desktop / older clients index by (ACI ∪ E.164)
-     * and otherwise spawn an "Unknown contact" thread. SentTranscript is
-     * sent so other linked devices show the outgoing in the right thread.
-     */
-    private fun sendDmInternal(
-        aci: ServiceId.ACI,
-        conversationJid: String,
-        text: String?,
-        timestamp: Long,
-        replyPrefix: String?,
-        attachments: List<SignalServiceAttachment> = emptyList(),
-        remoteDeleteTarget: Long? = null,
-        reaction: SignalServiceDataMessage.Reaction? = null,
-    ) {
-        val recipientPhone = messageDb.getContact(conversationJid)?.phone
-        val recipientAddress = if (recipientPhone != null) {
-            SignalServiceAddress(aci, recipientPhone)
-        } else SignalServiceAddress(aci)
-
-        val builder = SignalServiceDataMessage.newBuilder()
-            .withTimestamp(timestamp)
-        if (reaction != null) {
-            builder.withReaction(reaction)
-        } else if (remoteDeleteTarget != null) {
-            builder.withRemoteDelete(SignalServiceDataMessage.RemoteDelete(remoteDeleteTarget))
-        } else {
-            val quote = replyPrefix?.let { buildQuote(it) }
-            if (!text.isNullOrBlank()) builder.withBody(text)
-            if (attachments.isNotEmpty()) builder.withAttachments(attachments)
-            if (quote != null) builder.withQuote(quote)
-        }
-        val message = builder.build()
-
-        val sender = getOrCreateSender()
-        val result = try {
-            sender.sendDataMessage(
-                recipientAddress,
-                null,
-                ContentHint.RESENDABLE,
-                message,
-                SignalServiceMessageSender.IndividualSendEvents.EMPTY,
-                false, false,
-            )
-        } catch (e: org.whispersystems.signalservice.api.crypto.UntrustedIdentityException) {
-            identityStore.recordSendIdentityFailure(aci.toString(), e.identityKey)
-            throw e
-        }
-        result.identityFailure?.let {
-            identityStore.recordSendIdentityFailure(aci.toString(), it.identityKey)
-        }
-        if (!result.isSuccess) throw IOException("Signal send failed; check safety number if it changed")
-
-        // Sync transcript best-effort: the recipient already got the
-        // message above. If the sync fails, our linked devices won't see
-        // the outgoing in the right thread until storage-service sync
-        // next runs, but we shouldn't flip the local row to failed —
-        // that's misleading and would tempt the user into a duplicate
-        // resend.
-        try {
-            // unidentifiedStatusBySid must agree with the actual send mode
-            // (non-sealed → false); a `true` here makes Desktop create a
-            // separate "Unknown contact" thread per message.
-            // expirationStartTimestamp is an absolute time, not a duration.
-            val transcript = SentTranscriptMessage(
-                Optional.of(recipientAddress), timestamp, Optional.of(message), 0L,
-                mapOf<ServiceId, Boolean>(aci to false),
-                false, Optional.empty(), emptySet(), Optional.empty(),
-            )
-            sender.sendSyncMessage(SignalServiceSyncMessage.forSentTranscript(transcript))
-        } catch (e: Exception) {
-            Log.w(TAG, "DM sync transcript failed (recipient still got the message): ${e.message}")
-        }
-    }
-
-    /**
-     * GroupV2 send via legacy per-recipient fan-out. We don't yet do the
-     * sender-key + DistributionId path — fan-out is simpler, the server
-     * does the heavy lifting for us, and it works without endorsement
-     * tokens. The DataMessage carries `groupV2{masterKey, revision}` so
-     * recipients route into the right thread.
-     *
-     * Member list comes from a fresh server fetch — small cost, fully
-     * correct, and we re-use the credential cache across calls.
-     */
-    private fun sendGroupInternal(
-        conversationJid: String,
-        groupMeta: SignalMessageDatabase.GroupMeta,
-        text: String?,
-        timestamp: Long,
-        replyPrefix: String?,
-        attachments: List<SignalServiceAttachment> = emptyList(),
-        remoteDeleteTarget: Long? = null,
-        reaction: SignalServiceDataMessage.Reaction? = null,
-    ) {
-        val myAci = credentials.aci
-            ?: throw IllegalStateException("No local ACI available")
-
-        // Use the cached member list from the participants table. Signal
-        // bumps the group revision on every membership/title change, and
-        // the receiver refetches whenever an incoming message carries a
-        // higher revision than what we've stored — so the cache is current
-        // unless the group has changed without us seeing a message yet
-        // (rare, and self-correcting on the next inbound).
-        //
-        // First-send-to-group fallback: if the participants table is empty
-        // (e.g. this group was seeded by an outgoing-only send and no
-        // incoming message has populated members yet), do one fetch here
-        // to bootstrap and write the result back. This is the only path
-        // that hits the network — subsequent sends use the cache.
-        val cachedMembers = messageDb.getParticipants(conversationJid)
-            .mapNotNull { p ->
-                try { ServiceId.ACI.parseOrNull(p.jid) } catch (_: Exception) { null }
-            }
-        val members = if (cachedMembers.isNotEmpty()) {
-            cachedMembers.filter { it != myAci }
-        } else {
-            val groupManager = app.photon.service.PhotonService._signalGroupManager
-                ?: throw IllegalStateException("Group manager not ready — receiver not connected?")
-            val group = groupManager.fetchGroup(groupMeta.masterKey)
-                ?: throw IllegalStateException("Couldn't fetch group state for $conversationJid")
-            group.title?.takeIf { it.isNotBlank() }?.let { title ->
-                messageDb.upsertConversation(jid = conversationJid, name = title, isGroup = true)
-            }
-            messageDb.updateGroupMeta(conversationJid, groupMeta.masterKey, group.revision)
-            for (memberAci in groupManager.memberAcis(group)) {
-                val aciString = memberAci.toString()
-                messageDb.upsertParticipant(
-                    conversationJid, aciString, messageDb.memberDisplayName(aciString, contactResolver), "member",
-                )
-            }
-            groupManager.memberAcis(group).filter { it != myAci }
-        }
-        if (members.isEmpty()) {
-            throw IllegalStateException("Group has no other members to send to")
-        }
-
-        val masterKey = org.signal.libsignal.zkgroup.groups.GroupMasterKey(groupMeta.masterKey)
-        // The stored revision is either what we last saw on incoming or
-        // what we just fetched in the bootstrap branch above. Re-read from
-        // DB so both paths use the same source.
-        val currentRevision = messageDb.getGroupMeta(conversationJid)?.revision ?: groupMeta.revision
-        val groupContext = org.whispersystems.signalservice.api.messages.SignalServiceGroupV2
-            .newBuilder(masterKey)
-            .withRevision(currentRevision)
-            .build()
-
-        val builder = SignalServiceDataMessage.newBuilder()
-            .withTimestamp(timestamp)
-            .asGroupMessage(groupContext)
-        if (reaction != null) {
-            builder.withReaction(reaction)
-        } else if (remoteDeleteTarget != null) {
-            builder.withRemoteDelete(SignalServiceDataMessage.RemoteDelete(remoteDeleteTarget))
-        } else {
-            val quote = replyPrefix?.let { buildQuote(it) }
-            if (!text.isNullOrBlank()) builder.withBody(text)
-            if (attachments.isNotEmpty()) builder.withAttachments(attachments)
-            if (quote != null) builder.withQuote(quote)
-        }
-        val message = builder.build()
-
-        val recipientAddresses = members.map { SignalServiceAddress(it) }
-        // Same-size list of nulls: signals non-sealed-sender for each recipient.
-        val sealedSenderAccesses: List<org.whispersystems.signalservice.api.crypto.SealedSenderAccess?> =
-            List(recipientAddresses.size) { null }
-
-        val sender = getOrCreateSender()
-        val results = sender.sendDataMessage(
-            recipientAddresses,
-            sealedSenderAccesses,
-            false,                                              // isRecipientUpdate
-            ContentHint.RESENDABLE,
-            message,
-            SignalServiceMessageSender.LegacyGroupEvents.EMPTY,
-            null, null, false,
-        )
-
-        // Report per-recipient outcomes so partial failures don't get
-        // silently rolled into a generic "failed" status. The wire send
-        // returns a list; an entry being non-success doesn't itself throw.
-        val successes = results.count { it.isSuccess }
-        for (result in results) {
-            result.identityFailure?.let {
-                identityStore.recordSendIdentityFailure(result.address.serviceId.toString(), it.identityKey)
-            }
-        }
-        val failures = results.size - successes
-        if (failures > 0) {
-            val reasons = results.filter { !it.isSuccess }.joinToString { r ->
-                val who = r.address.serviceId.toString().take(8)
-                val why = when {
-                    r.isNetworkFailure -> "network"
-                    r.isUnregisteredFailure -> "unregistered"
-                    r.identityFailure != null -> "identity"
-                    r.proofRequiredFailure != null -> "proof-required"
-                    r.rateLimitFailure != null -> "rate-limit"
-                    r.isInvalidPreKeyFailure -> "invalid-prekey"
-                    r.isCanceledFailure -> "canceled"
-                    else -> "unknown"
-                }
-                "$who:$why"
-            }
-            Log.w(TAG, "Group send had failures ($failures/${results.size}): $reasons")
-        }
-        if (successes == 0) {
-            throw RuntimeException("Group send: all $failures recipients failed")
-        }
-
-        // Sync transcript so our other linked devices route into the same
-        // group thread. Best-effort: if it fails we still consider the send
-        // successful since the recipients got the message — the user's
-        // primary/desktop just won't see it in the right thread until
-        // storage-service sync next runs.
-        try {
-            val statusBySid: Map<ServiceId, Boolean> = members.associateWith { false }
-            val transcript = SentTranscriptMessage(
-                Optional.empty(),
-                timestamp,
-                Optional.of(message),
-                0L,
-                statusBySid,
-                false,
-                Optional.empty(),
-                emptySet(),
-                Optional.empty(),
-            )
-            sender.sendSyncMessage(SignalServiceSyncMessage.forSentTranscript(transcript))
-        } catch (e: Exception) {
-            Log.w(TAG, "Group sync transcript failed (recipients still got the message): ${e.message}")
-        }
+        if (!deliver(recipient, timestamp, "reaction to $messageId") { OutgoingContent.Reaction(reaction) }) return false
+        messageDb.upsertReaction(MessageKeys.prefixOf(messageId), myAci, emoji, timestamp)
+        return true
     }
 
     /**
@@ -637,12 +221,8 @@ class SignalMessageSender(
             Log.w(TAG, "retryMessage: media file for $messageId is gone (${row.mediaUrl})")
             return false
         }
-        val conversationJid = row.conversationJid
-        val aci = ServiceId.ACI.parseOrNull(conversationJid)
-        val groupMeta = if (aci == null) messageDb.getGroupMeta(conversationJid) else null
-
-        if (aci == null && groupMeta == null) {
-            Log.w(TAG, "Retry refused: $conversationJid is not an ACI nor a known group")
+        val recipient = recipientFor(row.conversationJid) ?: run {
+            Log.w(TAG, "Retry refused: ${row.conversationJid} is not an ACI nor a known group")
             messageDb.updateMessageStatus(messageId, "failed")
             return false
         }
@@ -653,23 +233,11 @@ class SignalMessageSender(
         // recipient-side dedupe and produce a duplicate. The exact ms value
         // lives in the id; the timestamp column only has seconds.
         val timestamp = MessageKeys.sentTimestampMs(messageId, row.timestamp)
-        return try {
+        return deliverRow(messageId, recipient, timestamp) {
             val attachments = if (isText) emptyList() else listOf(
-                uploadAttachment(mediaFile!!, row.mediaMime ?: defaultMimeFor(row.contentType), voiceNote = row.contentType == "audio"),
+                transport.upload(mediaFile!!, row.mediaMime ?: defaultMimeFor(row.contentType), voiceNote = row.contentType == "audio"),
             )
-            if (aci != null) {
-                sendDmInternal(aci, conversationJid, text, timestamp, row.replyToId, attachments)
-            } else {
-                sendGroupInternal(conversationJid, groupMeta!!, text, timestamp, row.replyToId, attachments)
-            }
-            messageDb.updateMessageStatus(messageId, "sent")
-            Log.i(TAG, "Retry succeeded for $messageId")
-            true
-        } catch (e: Exception) {
-            Log.w(TAG, "Retry failed for $messageId", e)
-            messageDb.updateMessageStatus(messageId, "failed")
-            invalidate()
-            false
+            OutgoingContent.Message(text, row.replyToId, attachments)
         }
     }
 
@@ -693,23 +261,14 @@ class SignalMessageSender(
                     Log.w(TAG, "deleteMessage: can't derive target timestamp for $messageId")
                     return false
                 }
-            val now = System.currentTimeMillis()
-            val aci = ServiceId.ACI.parseOrNull(conversationJid)
-            val groupMeta = if (aci == null) messageDb.getGroupMeta(conversationJid) else null
-            try {
-                when {
-                    aci != null -> sendDmInternal(aci, conversationJid, null, now, null, remoteDeleteTarget = targetTs)
-                    groupMeta != null -> sendGroupInternal(conversationJid, groupMeta, null, now, null, remoteDeleteTarget = targetTs)
-                    else -> {
-                        Log.w(TAG, "deleteMessage: $conversationJid is neither ACI nor known group")
-                        return false
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Remote delete failed for $messageId: ${e.message}")
-                invalidate()
+            val recipient = recipientFor(conversationJid) ?: run {
+                Log.w(TAG, "deleteMessage: $conversationJid is neither ACI nor known group")
                 return false
             }
+            val sent = deliver(recipient, System.currentTimeMillis(), "remote delete of $messageId") {
+                OutgoingContent.RemoteDelete(targetTs)
+            }
+            if (!sent) return false
         }
         messageDb.deleteMessage(messageId)
         return true
@@ -731,7 +290,7 @@ class SignalMessageSender(
             val parsedAci = ServiceId.ACI.parseOrNull(aci)
                 ?: throw IllegalArgumentException("Invalid ACI: $aci")
             val address = SignalServiceAddress(parsedAci)
-            val sender = getOrCreateSender()
+            val sender = connection.getOrCreateSender()
             val result = sender.sendNullMessage(address, null)
             result.identityFailure?.let { identityStore.recordSendIdentityFailure(aci, it.identityKey) }
             if (!result.isSuccess) return false
@@ -777,7 +336,7 @@ class SignalMessageSender(
                 originalTimestamp,
                 senderDeviceId,
             )
-            getOrCreateSender().sendRetryReceipt(
+            connection.getOrCreateSender().sendRetryReceipt(
                 SignalServiceAddress(serviceId),
                 null,
                 Optional.ofNullable(groupId),
@@ -822,7 +381,7 @@ class SignalMessageSender(
         if (reads.isEmpty()) return false
         val readMessages = reads.map { (aci, timestampMs) -> ReadMessage(aci, timestampMs) }
         return try {
-            val result = getOrCreateSender().sendSyncMessage(SignalServiceSyncMessage.forRead(readMessages))
+            val result = connection.getOrCreateSender().sendSyncMessage(SignalServiceSyncMessage.forRead(readMessages))
             if (!result.isSuccess) {
                 Log.w(TAG, "Read sync not delivered (${readMessages.size} message(s))")
                 return false
@@ -845,7 +404,7 @@ class SignalMessageSender(
      */
     fun requestContactsSync() {
         try {
-            val sender = getOrCreateSender()
+            val sender = connection.getOrCreateSender()
             val request = RequestMessage.forType(
                 org.whispersystems.signalservice.internal.push.SyncMessage.Request.Type.CONTACTS,
             )
@@ -857,66 +416,18 @@ class SignalMessageSender(
         }
     }
 
-    /**
-     * Build a Signal quote from a local message prefix ("{authorAci}_{timestampMs}").
-     * The quote transmits author + original sent timestamp; the text is a preview.
-     * For media replies, attach a content-type-only QuotedAttachment (no thumbnail)
-     * so the recipient renders it as a media quote rather than plain text.
-     */
-    private fun buildQuote(prefix: String): SignalServiceDataMessage.Quote? {
-        val quoted = messageDb.findMessageByPrefix(prefix) ?: return null
-        val lastUnderscore = prefix.lastIndexOf('_')
-        if (lastUnderscore <= 0) return null
-        val authorAciStr = prefix.substring(0, lastUnderscore)
-        val timestampMs = prefix.substring(lastUnderscore + 1).toLongOrNull() ?: return null
-        val author = ServiceId.parseOrNull(authorAciStr) ?: return null
+    fun attachReceiverWebSockets(
+        authWs: SignalWebSocket.AuthenticatedWebSocket,
+        unauthWs: SignalWebSocket.UnauthenticatedWebSocket,
+    ) = connection.attachReceiverWebSockets(authWs, unauthWs)
 
-        val attachments = when (quoted.contentType) {
-            "image", "video", "audio", "document", "sticker" -> listOf(
-                SignalServiceDataMessage.Quote.QuotedAttachment(
-                    quoted.mediaMime ?: defaultMimeFor(quoted.contentType),
-                    null,   // fileName (optional)
-                    null,   // thumbnail — we don't re-upload the original as a thumbnail
-                )
-            )
-            else -> emptyList()
-        }
+    fun detachReceiverWebSockets(
+        authWs: SignalWebSocket.AuthenticatedWebSocket?,
+        unauthWs: SignalWebSocket.UnauthenticatedWebSocket?,
+    ) = connection.detachReceiverWebSockets(authWs, unauthWs)
 
-        return SignalServiceDataMessage.Quote(
-            timestampMs,
-            author,
-            quoted.textBody ?: "",
-            attachments,
-            emptyList(),
-            SignalServiceDataMessage.Quote.Type.NORMAL,
-            emptyList(),
-        )
-    }
+    /** Drop the library sender (and any sockets of its own) so the next send rebuilds it. */
+    fun invalidate() = connection.invalidate()
 
-    private fun defaultMimeFor(contentType: String): String = when (contentType) {
-        "image" -> "image/jpeg"
-        "video" -> "video/mp4"
-        "audio" -> "audio/ogg"
-        "sticker" -> "image/webp"
-        else -> "application/octet-stream"
-    }
-
-    fun invalidate() {
-        var oldOwnedAuth: SignalWebSocket.AuthenticatedWebSocket? = null
-        var oldOwnedUnauth: SignalWebSocket.UnauthenticatedWebSocket? = null
-        synchronized(this) {
-            oldOwnedAuth = ownedAuthWs
-            oldOwnedUnauth = ownedUnauthWs
-            ownedAuthWs = null
-            ownedUnauthWs = null
-            sender = null
-        }
-        try { oldOwnedAuth?.disconnect() } catch (_: Exception) {}
-        try { oldOwnedUnauth?.disconnect() } catch (_: Exception) {}
-    }
-
-    fun shutdown() {
-        invalidate()
-        executor.shutdown()
-    }
+    fun shutdown() = connection.shutdown()
 }

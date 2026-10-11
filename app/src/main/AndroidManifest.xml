@@ -9,6 +9,8 @@
     </queries>
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- The Signal receiver reconnects as soon as a validated network appears. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

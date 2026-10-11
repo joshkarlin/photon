@@ -86,6 +86,17 @@ class SignalCallsTest {
         assertEquals(CallOutcome.MISSED, SignalCalls.next(null, CallSignal.STALE_OFFER))
     }
 
+    /** No hangup reached this device in time: a ringing call becomes missed, nothing else moves. */
+    @Test
+    fun ringTimeoutOnlyEndsARingingCall() {
+        assertEquals(CallOutcome.MISSED, SignalCalls.next(CallOutcome.RINGING, CallSignal.RING_EXPIRED))
+        assertNull(SignalCalls.next(null, CallSignal.RING_EXPIRED))
+        assertNull(SignalCalls.next(CallOutcome.MISSED, CallSignal.RING_EXPIRED))
+        assertNull(SignalCalls.next(CallOutcome.ANSWERED, CallSignal.RING_EXPIRED))
+        assertNull(SignalCalls.next(CallOutcome.DECLINED, CallSignal.RING_EXPIRED))
+        assertEquals(listOf("Incoming voice call", "Incoming video call"), SignalCalls.RINGING_TEXTS)
+    }
+
     @Test
     fun offerIsStaleOnlyWhenHeldLongerThanRingRtcExpiry() {
         val received = 1_700_000_000_000L

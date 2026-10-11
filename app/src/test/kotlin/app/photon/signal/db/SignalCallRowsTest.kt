@@ -162,13 +162,4 @@ class SignalCallRowsTest {
         assertEquals("read", db.getMessage(callId)?.status)
         assertEquals(emptyList(), db.getUnsyncedIncomingReads(peer))
     }
-
-    @Test
-    fun deleteDuplicateMessages_keepsDistinctCallsFromTheSamePeer() {
-        db.upsertCallRow("call_${peer}_1", peer, peer, 1_700_000_000, "Missed voice call", unread = true)
-        db.upsertCallRow("call_${peer}_2", peer, peer, 1_700_000_100, "Missed video call", unread = true)
-
-        assertEquals(0, db.deleteDuplicateMessages())
-        assertEquals(2, db.getMessages(peer).size)
-    }
 }

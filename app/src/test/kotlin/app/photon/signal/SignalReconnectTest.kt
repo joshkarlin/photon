@@ -1,5 +1,8 @@
 package app.photon.signal
 
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -30,5 +33,78 @@ class SignalReconnectTest {
         assertTrue(SignalReconnect.maintenanceDue(lastRunMs = 0, nowMs = t))
         assertFalse(SignalReconnect.maintenanceDue(lastRunMs = t, nowMs = t + 30_000))
         assertTrue(SignalReconnect.maintenanceDue(lastRunMs = t, nowMs = t + 10 * 60_000L))
+    }
+
+    /**
+     * After an outage the backoff can be at its 5-minute cap. A validated
+     * network must end that wait at once and start the backoff over, or
+     * messages (and calls) arriving meanwhile are only seen minutes later.
+     */
+    @Test
+    fun aValidatedNetworkEndsTheBackoffAndStartsItOver() = runBlocking {
+        val network = NetworkReturn()
+        val failures = 7
+        val epoch = network.epoch
+        launch {
+            yield()
+            network.networkValidated()
+        }
+
+        val started = System.nanoTime()
+        val returned = network.await(SignalReconnect.delayMs(failures), epoch)
+
+        assertTrue(returned)
+        assertTrue(System.nanoTime() - started < 5_000_000_000L)
+        val next = NetworkReturn.failuresAfterWait(failures, returned)
+        assertEquals(0, next)
+        // The next failure waits the base delay again.
+        assertEquals(SignalReconnect.BASE_DELAY_MS, SignalReconnect.delayMs(SignalReconnect.nextFailureCount(next, null)))
+    }
+
+    /** The network came back while the failing attempt was still running: retry without waiting. */
+    @Test
+    fun aNetworkValidatedDuringTheAttemptSkipsTheWait() = runBlocking {
+        val network = NetworkReturn()
+        val epoch = network.epoch
+        network.networkValidated()
+
+        assertTrue(network.await(SignalReconnect.MAX_DELAY_MS, epoch))
+    }
+
+    @Test
+    fun withoutANetworkChangeTheBackoffRunsItsCourse() = runBlocking {
+        val network = NetworkReturn()
+        network.networkValidated()
+
+        assertFalse(network.await(20, network.epoch))
+        assertEquals(6, NetworkReturn.failuresAfterWait(6, networkReturned = false))
+    }
+
+    /** Capabilities are re-reported for signal changes; only a newly validated default network counts. */
+    @Test
+    fun onlyANewlyValidatedDefaultNetworkCounts() {
+        val network = DefaultNetworkValidation()
+
+        assertTrue(network.onCapabilities("wifi", isValidated = true))
+        assertFalse(network.onCapabilities("wifi", isValidated = true))
+        assertFalse(network.onCapabilities("wifi", isValidated = false))
+        assertTrue(network.onCapabilities("wifi", isValidated = true))
+        network.onLost("wifi")
+        assertTrue(network.onCapabilities("wifi", isValidated = true))
+    }
+
+    /**
+     * Wi-Fi becoming the default doesn't report mobile lost; it just stops
+     * being the default. Switching back to mobile must still count.
+     */
+    @Test
+    fun switchingBackToAnEarlierDefaultNetworkCounts() {
+        val network = DefaultNetworkValidation()
+
+        assertTrue(network.onCapabilities("cell", isValidated = true))
+        assertTrue(network.onCapabilities("wifi", isValidated = true))
+        network.onLost("wifi")
+        assertTrue(network.onCapabilities("cell", isValidated = true))
+        assertFalse(network.onCapabilities("cell", isValidated = true))
     }
 }
