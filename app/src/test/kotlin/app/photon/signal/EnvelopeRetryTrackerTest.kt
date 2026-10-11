@@ -30,8 +30,10 @@ class EnvelopeRetryTrackerTest {
         tracker.recordFailure("guid", null)
 
         assertEquals("decrypted", tracker.pending("guid"))
+        assertTrue(tracker.isHeld("guid"))
         tracker.clear("guid")
         assertNull(tracker.pending("guid"))
+        assertFalse(tracker.isHeld("guid"))
     }
 
     @Test

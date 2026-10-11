@@ -3,8 +3,9 @@ package app.photon.signal
 import org.whispersystems.signalservice.internal.push.Envelope
 
 /**
- * Envelopes whose local processing failed and were left un-acked so the
- * server redelivers them. Two jobs:
+ * Envelopes whose local processing failed and were left un-acked, to be
+ * processed again by an in-process retry or the server's redelivery after a
+ * reconnect. Two jobs:
  *
  *  - Poison protection: after [maxFailures] failures for the same envelope
  *    the caller gives up and acks it, so one bad envelope can't be
@@ -48,6 +49,10 @@ internal class EnvelopeRetryTracker<T : Any>(
         }
         return false
     }
+
+    /** Whether the envelope is still waiting to be processed. */
+    @Synchronized
+    fun isHeld(key: String): Boolean = entries.containsKey(key)
 
     @Synchronized
     fun clear(key: String) {

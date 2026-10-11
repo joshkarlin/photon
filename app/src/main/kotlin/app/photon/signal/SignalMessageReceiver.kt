@@ -71,6 +71,9 @@ class SignalMessageReceiver(
         // API. Its Object.wait() releases the socket monitor, so outbound
         // MessageApi/KeysApi requests can proceed while this waits.
         private const val MESSAGE_POLL_TIMEOUT_MS = 30_000L
+        // In-process retry delay for an envelope left un-acked after a local
+        // processing failure (see scheduleHeldRetry).
+        private const val HELD_ENVELOPE_RETRY_MS = 10_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -651,8 +654,9 @@ class SignalMessageReceiver(
      * when retrying can't help (decrypt failures, duplicates). If local
      * processing throws, the envelope is left un-acked for the server to
      * redeliver, with the decrypted payload held for that redelivery (see
-     * [EnvelopeRetryTracker]); a poison envelope is acked after 3 failures.
-     * Reprocessing is safe: inserts dedupe on the (author, timestamp) key.
+     * [EnvelopeRetryTracker]) and an in-process retry scheduled; a poison
+     * envelope is acked after 3 failures. Reprocessing is safe: inserts
+     * dedupe on the (author, timestamp) key.
      */
     private fun processEnvelope(
         envelopeResponse: EnvelopeResponse,
@@ -703,11 +707,38 @@ class SignalMessageReceiver(
             if (giveUp) {
                 Log.e(TAG, "Giving up on $description — acking after repeated failures", e)
             } else {
-                Log.w(TAG, "Failed to process $description — leaving un-acked for redelivery", e)
+                Log.w(TAG, "Failed to process $description — leaving un-acked, retrying", e)
+                scheduleHeldRetry(envelopeResponse, cipher, ws, retryKey)
             }
             giveUp
         }
         if (ack) ws.sendAck(envelopeResponse)
+    }
+
+    /**
+     * The server only redelivers an un-acked envelope after a reconnect, which
+     * can be hours away on a healthy connection. Retry a held envelope
+     * in-process as well, through the same path, so it counts towards the
+     * poison limit and is acked once processed. If a redelivery got to it
+     * first, it's no longer held and this does nothing.
+     */
+    private fun scheduleHeldRetry(
+        envelopeResponse: EnvelopeResponse,
+        cipher: SignalServiceCipher,
+        ws: SignalWebSocket.AuthenticatedWebSocket,
+        retryKey: String,
+    ) {
+        scope.launch {
+            delay(HELD_ENVELOPE_RETRY_MS)
+            if (!envelopeRetries.isHeld(retryKey)) return@launch
+            try {
+                processEnvelope(envelopeResponse, cipher, ws)
+            } catch (e: Exception) {
+                // The ack fails if this connection has closed meanwhile; the
+                // redelivery on the next connection completes it instead.
+                Log.w(TAG, "Held envelope retry couldn't ack: ${e.message}")
+            }
+        }
     }
 
     /**
