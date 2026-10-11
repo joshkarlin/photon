@@ -28,7 +28,7 @@ adb install -r app-release.apk
 
 ### Upgrading to 0.4.0-rc.2
 
-After installing, re-pair WhatsApp: Settings → Connections → WhatsApp → Reset, then link again. Since June (v0.3.0), Photon dropped the first message of every new WhatsApp chat, sent or received, and a re-pair brought back no messages. rc.2 fixes this, but WhatsApp only sends history when you pair, so re-pairing is how you get those messages back. You get what WhatsApp sends at pairing, within your Storage settings (default 50 messages per chat, 7 days).
+After installing, re-pair WhatsApp: Settings → Connections → WhatsApp → Reset, confirm with RESET, then link again. Since June (v0.3.0), Photon dropped the first message of every new WhatsApp chat, sent or received, and a re-pair brought back no messages. rc.2 fixes this, but WhatsApp only sends history when you pair, so re-pairing is how you get those messages back. You get what WhatsApp sends at pairing, within your Storage settings (default 50 messages per chat, 7 days).
 
 ## Building from source
 
@@ -147,7 +147,7 @@ Organized into sub-pages:
 | Message History | 1 / 3 / 7 / 14 / 30 days | 7 |
 
 ### Connections
-Per-platform status, Refresh Connection, and Reset (clear data + re-pair). An unlinked platform offers Link Device.
+Per-platform status, Refresh Connection, and Reset (clear data + re-pair). Reset asks first, then unlinks Photon from your phone (WhatsApp logs out, Signal unlinks) before clearing its data. An unlinked platform offers Link Device.
 
 ## Current features
 
@@ -164,7 +164,7 @@ Per-platform status, Refresh Connection, and Reset (clear data + re-pair). An un
 - [x] Failed-send recovery (WhatsApp, Signal, SMS): a failed message reads "failed · tap to retry". WhatsApp and Signal retries preserve the wire id/timestamp so recipients dedupe, and WhatsApp retry re-uploads media too.
 - [x] Message actions (WhatsApp + Signal): long-press a message for a LightOS menu of Reply, React, Retry, Delete and Delete for Everyone, offering only what applies. Delete removes it from Photon. Your own sent messages offer Delete for Everyone (WhatsApp revoke / Signal remote delete) after a confirm page. Reactions go on other people's messages only.
 - [x] New message: find anyone by name or number across LP3 contacts and every platform's chats, then open their chat or start one on WhatsApp, Signal or SMS
-- [x] Attachments (WhatsApp + Signal): Camera (when a camera app is available), Photos (the system photo picker) and Files (documents such as PDFs)
+- [x] Attachments (WhatsApp + Signal): Camera (when a camera app is available), Photos (the system photo picker) and Files (documents such as PDFs, sent under their own file name)
 - [x] Voice notes: record and send on WhatsApp and Signal; incoming voice notes autoplay on open
 - [x] In-app contact editor: tap a DM's title → save/update directly via `ContactsContract` (no AOSP handoff)
 - [x] Ephemeral retention (configurable count + days) on WhatsApp and Signal, kept across bridge restarts
@@ -201,6 +201,7 @@ This section lists open bugs and by-design limitations, one line each. Fixes wai
 - **Signal group admin**: Photon sends and receives in GroupV2 groups but can't create groups, add or remove members, rename, or leave. Changes made on other devices are picked up through the revision check on the next message.
 - **Signal group sends fan out per recipient**: Photon doesn't use sender-key distribution, so sends to large groups are slower and `GroupSendEndorsements` are skipped.
 - **Signal can only start chats with people it already knows**: New message reaches a number on Signal only when Photon already has its Signal account from the primary's contact sync or an earlier chat, because Photon doesn't use Signal's contact discovery.
+- **Received Signal documents show no file name**, because Photon doesn't store an incoming attachment's name. Sent ones keep theirs.
 - **No Signal history**: only messages received after linking appear. Importing history needs backup/restore support.
 - **No Signal read receipts to senders**: Photon syncs read state to your own devices but never sends read receipts to message authors, because it can't see the account's read-receipt privacy setting.
 - **Partial Signal verification state**: Photon only learns verified status from verification syncs received after linking. Accepting a changed safety number in Photon doesn't mark it verified on your other devices.

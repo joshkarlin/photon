@@ -34,7 +34,7 @@ sqlite3 /tmp/photon/app.db
 
 **Processes.** `adb shell pidof app.photon` gives Photon's pid. The bridge runs as a separate `libgobridge.so` process: `adb shell ps -A | grep libgobridge`.
 
-**Re-pair.** Go to Settings → Connections → WhatsApp (or Signal) → Reset, then link again. WhatsApp history sync only runs at pairing, so a WhatsApp fix applied when a message is stored doesn't change rows stored before the fix until you re-pair.
+**Re-pair.** Go to Settings → Connections → WhatsApp (or Signal) → Reset, confirm with RESET, then link again. WhatsApp history sync only runs at pairing, so a WhatsApp fix applied when a message is stored doesn't change rows stored before the fix until you re-pair.
 
 "Other phone" means your primary phone or a contact's phone, whichever the step needs.
 
@@ -44,7 +44,7 @@ sqlite3 /tmp/photon/app.db
 
 #### W9. Re-pairing recovers history
 - **Was:** since June (v0.3.0), history sync at pairing stored empty chat rows and no messages, so a re-pair left chats missing or empty.
-- **Do:** after installing rc.2, go to Settings → Connections → WhatsApp → Reset, then link again. Watch `adb logcat -s GoBridge | grep -E "History sync|Failed to store history"` until the list stops showing "syncing".
+- **Do:** after installing rc.2, go to Settings → Connections → WhatsApp → Reset, confirm with RESET, then link again. Watch `adb logcat -s GoBridge | grep -E "History sync|Failed to store history"` until the list stops showing "syncing".
 - **Expect:**
   - Logcat shows `History sync complete: N conversations, M messages` with M above 0, and no `Failed to store history for …`.
   - Your chats come back with their recent messages, within Settings › Storage (default 50 per chat, 7 days). Opening one shows its messages.
@@ -176,8 +176,14 @@ Send only to yourself or a willing contact.
   3. The document picker opens, and the PDF arrives on the other phone as a document. Audio files can't be picked.
 - **Caveats:** the file name the recipient sees is AT3's check.
 
-#### AT3. Sent documents keep their file name *(placeholder)*
-- **Placeholder:** this fix is still landing on another branch. Steps to follow: a document sent from Files, and a failed one retried, arrive on WhatsApp and on Signal under their real file name.
+#### AT3. Sent documents keep their file name
+- **Was:** a picked document went out without its own name: with none on WhatsApp, and as Photon's staged copy (`send_media_<time>.pdf`) on Signal. The thread showed a bare `[ document ]`.
+- **Do:** in a WhatsApp chat with yourself or a willing contact, tap +, then Files, and send a PDF with a recognisable name. Do the same in a Signal chat. Then send another in airplane mode, let it fail, turn airplane mode off and tap `failed · tap to retry`.
+- **Expect:**
+  - Photon's thread shows `[ document: <name> ]`, with no caption.
+  - The other phone receives the document under its real file name, on WhatsApp and on Signal.
+  - The retried document keeps its name, in Photon and on the other phone.
+- **Caveats:** a received Signal document still shows no name (see README Limitations). Camera photos are sent without a name.
 
 ### Message actions
 
@@ -221,8 +227,14 @@ Send only to yourself or a willing contact.
 
 ### App
 
-#### A7. Reset asks for confirmation *(placeholder)*
-- **Placeholder:** this fix is still landing on another branch. Steps to follow: Reset under Settings → Connections → WhatsApp and → Signal opens a LightOS page that asks before anything is cleared.
+#### A7. Reset asks first, and WhatsApp Reset logs out
+- **Was:** Reset cleared a platform at once, with no confirmation. WhatsApp Reset deleted its session without telling WhatsApp, so the phone kept listing Photon under Linked devices and the slot stayed taken.
+- **Do:** go to Settings → Connections → WhatsApp → Reset, then press Back. Tap Reset again and press the system Back. Tap Reset a third time and tap RESET. Afterwards, open Linked devices in WhatsApp on your phone. Then do the same for Signal. Watch `adb logcat -s PhotonService`.
+- **Expect:**
+  1. Reset opens a page titled "Reset WhatsApp" (or "Reset Signal") that says what it deletes, with RESET in the bottom bar. Either Back returns to the platform's page with nothing cleared.
+  2. RESET opens the pairing screen.
+  3. After the WhatsApp reset, your phone's Linked devices no longer lists Photon. Logcat shows no `WhatsApp logout before reset failed`. The Signal reset unlinks Photon from the primary too, as before.
+- **Caveats:** the WhatsApp logout is best effort. If WhatsApp is offline or doesn't answer within 10s, Photon logs `WhatsApp logout before reset failed (…)` and resets anyway, and the phone may still list Photon until you remove it there. This check can be done alongside W9 and A5.
 
 ## v0.4.0-rc.1
 
@@ -285,9 +297,9 @@ These cover the riskiest changes in v0.4.0-rc.1. Run them after the rc.2 list, i
   After pairing, you land on that platform's chats.
 
 #### A5. Reset each platform
-- **Do:** Settings → Connections → WhatsApp → Reset, then link again. Then do the same for Signal. (Reset is gaining a confirmation page: see A7.)
+- **Do:** Settings → Connections → WhatsApp → Reset, confirm with RESET, then link again. Then do the same for Signal.
 - **Expect:**
-  - Each Reset opens that platform's pairing screen, and Back from it returns to the chat list.
+  - Each Reset asks first (A7). RESET then opens that platform's pairing screen, and Back from it returns to the chat list.
   - After the WhatsApp Reset, `adb shell ps -A | grep -c libgobridge` prints 1 and the UI stays responsive.
   - The Signal Reset doesn't crash. It used to crash, because it navigated to pairing from a background thread.
   - The Signal re-link is clean: messages flow both ways, and Settings shows Connected.
