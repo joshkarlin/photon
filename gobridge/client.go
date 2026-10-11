@@ -62,6 +62,12 @@ type Bridge struct {
 	// isOnWhatsApp asks WhatsApp which phone numbers it knows (see
 	// CheckOnWhatsApp). Nil uses the client; tests answer instead.
 	isOnWhatsApp func(ctx context.Context, phones []string) ([]types.IsOnWhatsAppResponse, error)
+
+	// mediaUploader and messageSender reach WhatsApp for media sends and
+	// retries (see uploadMedia and sendWithID). Nil uses the client; tests
+	// stand in for WhatsApp instead.
+	mediaUploader func(ctx context.Context, data []byte, mediaType whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
+	messageSender func(ctx context.Context, to types.JID, msg *waE2E.Message, extra ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error)
 }
 
 // NewBridge creates a new Bridge instance.
@@ -381,16 +387,16 @@ func (b *Bridge) RetryMessage(ctx context.Context, messageID string) error {
 			return fmt.Errorf("retry: source file gone (%s): %w", mediaURL, err)
 		}
 		_, mediaType := mediaKind(mediaMime)
-		resp, err := b.client.Upload(ctx, data, mediaType)
+		resp, err := b.uploadMedia(ctx, data, mediaType)
 		if err != nil {
 			b.markMessageFailed(jid, messageID)
 			return fmt.Errorf("retry: upload failed: %w", err)
 		}
-		// text_body carries the caption for media rows.
-		msg = buildMediaMessage(resp, mediaMime, text, replyToID, data)
+		// text_body holds the caption, or a document's file name.
+		msg = buildMediaMessage(resp, mediaMime, mediaTextOf(contentType, text), replyToID, data)
 	}
 
-	resp, err := b.client.SendMessage(ctx, targetJID, msg, whatsmeow.SendRequestExtra{ID: messageID})
+	resp, err := b.sendWithID(ctx, targetJID, msg, messageID)
 	if err != nil {
 		b.markMessageFailed(jid, messageID)
 		return err

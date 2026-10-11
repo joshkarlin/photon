@@ -89,7 +89,7 @@ func TestFirstMessage_mediaSentToAFreshJID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	id, _, err := b.UploadAndSend(jid, path, "image/jpeg", "", "")
+	id, _, err := b.UploadAndSend(SendMediaPayload{JID: jid, FilePath: path, MimeType: "image/jpeg"})
 	if err == nil {
 		t.Fatal("the offline client uploaded")
 	}

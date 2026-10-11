@@ -100,23 +100,25 @@ func (b *Bridge) saveThumbnail(msgID string, data []byte) string {
 // leaves a "failed" row in the chat instead of vanishing silently. The
 // row goes in with status="sending" before the upload starts so users see
 // it the instant they tap send.
-func (b *Bridge) UploadAndSend(jid, filePath, mimeType, caption, replyToID string) (string, int64, error) {
-	if err := b.sendableFile(filePath); err != nil {
+func (b *Bridge) UploadAndSend(p SendMediaPayload) (string, int64, error) {
+	if err := b.sendableFile(p.FilePath); err != nil {
 		return "", 0, err
 	}
-	targetJID, err := types.ParseJID(jid)
+	targetJID, err := types.ParseJID(p.JID)
 	if err != nil {
 		return "", 0, err
 	}
 	// Resolve @lid targets so the conversation row keys by phone JID and
 	// doesn't duplicate a row handleMessage stored under the resolved JID.
 	targetJID = b.resolveLIDJID(targetJID)
-	jid = targetJID.String()
+	jid := targetJID.String()
 
 	id := b.client.GenerateMessageID()
 	ts := time.Now().Unix()
 
-	contentType, mediaType := mediaKind(mimeType)
+	contentType, mediaType := mediaKind(p.MimeType)
+	text := mediaText{Caption: p.Caption, FileName: p.FileName}
+	body := text.textBody(contentType)
 
 	b.InsertMessage(&MessageRow{
 		ID:              id,
@@ -124,31 +126,31 @@ func (b *Bridge) UploadAndSend(jid, filePath, mimeType, caption, replyToID strin
 		SenderJID:       b.client.Store.ID.String(),
 		Timestamp:       ts,
 		ContentType:     contentType,
-		TextBody:        sql.NullString{String: caption, Valid: caption != ""},
-		MediaMime:       sql.NullString{String: mimeType, Valid: true},
-		MediaURL:        sql.NullString{String: filePath, Valid: true},
-		ReplyToID:       sql.NullString{String: replyToID, Valid: replyToID != ""},
+		TextBody:        sql.NullString{String: body, Valid: body != ""},
+		MediaMime:       sql.NullString{String: p.MimeType, Valid: true},
+		MediaURL:        sql.NullString{String: p.FilePath, Valid: true},
+		ReplyToID:       sql.NullString{String: p.ReplyToID, Valid: p.ReplyToID != ""},
 		IsFromMe:        true,
 		Status:          "sending",
 	})
 	b.UpsertConversation(jid, rankedName{}, id, ts)
-	b.BroadcastEvent("new_message", b.newMessageEvent(jid, id, b.client.Store.ID.ToNonAD().String(), caption, contentType, true))
+	b.BroadcastEvent("new_message", b.newMessageEvent(jid, id, b.client.Store.ID.ToNonAD().String(), body, contentType, true))
 
-	data, err := os.ReadFile(filePath)
+	data, err := os.ReadFile(p.FilePath)
 	if err != nil {
 		b.markMessageFailed(jid, id)
 		return id, ts, fmt.Errorf("read file failed: %w", err)
 	}
 
 	ctx := context.Background()
-	resp, err := b.client.Upload(ctx, data, mediaType)
+	resp, err := b.uploadMedia(ctx, data, mediaType)
 	if err != nil {
 		b.markMessageFailed(jid, id)
 		return id, ts, fmt.Errorf("upload failed: %w", err)
 	}
 
-	msg := buildMediaMessage(resp, mimeType, caption, replyToID, data)
-	sendResp, err := b.client.SendMessage(ctx, targetJID, msg, whatsmeow.SendRequestExtra{ID: id})
+	msg := buildMediaMessage(resp, p.MimeType, text, p.ReplyToID, data)
+	sendResp, err := b.sendWithID(ctx, targetJID, msg, id)
 	if err != nil {
 		b.markMessageFailed(jid, id)
 		return id, ts, fmt.Errorf("send failed: %w", err)
@@ -156,6 +158,49 @@ func (b *Bridge) UploadAndSend(jid, filePath, mimeType, caption, replyToID strin
 
 	b.markMessageSent(jid, id, sendResp.Timestamp.Unix())
 	return id, sendResp.Timestamp.Unix(), nil
+}
+
+// uploadMedia uploads a media file's bytes to WhatsApp's CDN.
+func (b *Bridge) uploadMedia(ctx context.Context, data []byte, mediaType whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {
+	if b.mediaUploader != nil {
+		return b.mediaUploader(ctx, data, mediaType)
+	}
+	return b.client.Upload(ctx, data, mediaType)
+}
+
+// sendWithID sends msg under the message id the row was stored with, so a
+// retry reuses the original's and recipients dedupe it.
+func (b *Bridge) sendWithID(ctx context.Context, to types.JID, msg *waE2E.Message, id string) (whatsmeow.SendResponse, error) {
+	extra := whatsmeow.SendRequestExtra{ID: id}
+	if b.messageSender != nil {
+		return b.messageSender(ctx, to, msg, extra)
+	}
+	return b.client.SendMessage(ctx, to, msg, extra)
+}
+
+// mediaText is what a media message carries besides the media: a caption,
+// or a document's file name. A document carries its name and no caption
+// (Photon writes none), so the one text_body column holds either.
+type mediaText struct {
+	Caption  string
+	FileName string
+}
+
+// textBody is the text_body a sent media row stores: a document's file
+// name, as a received document's is (directContent), else the caption.
+func (t mediaText) textBody(contentType string) string {
+	if contentType == "document" {
+		return t.FileName
+	}
+	return t.Caption
+}
+
+// mediaTextOf reads a sent media row's text_body back, for a retry.
+func mediaTextOf(contentType, textBody string) mediaText {
+	if contentType == "document" {
+		return mediaText{FileName: textBody}
+	}
+	return mediaText{Caption: textBody}
 }
 
 // mediaKind maps a mime type to both our content_type column value and
@@ -173,7 +218,7 @@ func mediaKind(mimeType string) (contentType string, mediaType whatsmeow.MediaTy
 	}
 }
 
-func buildMediaMessage(resp whatsmeow.UploadResponse, mimeType, caption, replyToID string, data []byte) *waE2E.Message {
+func buildMediaMessage(resp whatsmeow.UploadResponse, mimeType string, text mediaText, replyToID string, data []byte) *waE2E.Message {
 	var ctx *waE2E.ContextInfo
 	if replyToID != "" {
 		ctx = &waE2E.ContextInfo{StanzaID: &replyToID}
@@ -190,7 +235,7 @@ func buildMediaMessage(resp whatsmeow.UploadResponse, mimeType, caption, replyTo
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    ptrUint64(uint64(len(data))),
 				Mimetype:      &mimeType,
-				Caption:       nilIfEmpty(caption),
+				Caption:       nilIfEmpty(text.Caption),
 				ContextInfo:   ctx,
 			},
 		}
@@ -204,7 +249,7 @@ func buildMediaMessage(resp whatsmeow.UploadResponse, mimeType, caption, replyTo
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    ptrUint64(uint64(len(data))),
 				Mimetype:      &mimeType,
-				Caption:       nilIfEmpty(caption),
+				Caption:       nilIfEmpty(text.Caption),
 				ContextInfo:   ctx,
 			},
 		}
@@ -229,6 +274,8 @@ func buildMediaMessage(resp whatsmeow.UploadResponse, mimeType, caption, replyTo
 			},
 		}
 	default:
+		// Recipients save a document under FileName, and some show Title,
+		// so both are the name.
 		return &waE2E.Message{
 			DocumentMessage: &waE2E.DocumentMessage{
 				URL:           &resp.URL,
@@ -238,7 +285,8 @@ func buildMediaMessage(resp whatsmeow.UploadResponse, mimeType, caption, replyTo
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    ptrUint64(uint64(len(data))),
 				Mimetype:      &mimeType,
-				Caption:       nilIfEmpty(caption),
+				FileName:      nilIfEmpty(text.FileName),
+				Title:         nilIfEmpty(text.FileName),
 				ContextInfo:   ctx,
 			},
 		}
