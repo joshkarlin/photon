@@ -58,7 +58,7 @@ class PniMergeTest {
     fun anActualMergeAsksForRingingRowsToBeRewatched() {
         var merges = 0
         val names = ContactNames(
-            fx.db, AndroidContactResolver(fx.context), fx.notifier,
+            fx.db, Any(), AndroidContactResolver(fx.context), fx.notifier,
             profileFetcher = { null }, onMerged = { merges++ },
         )
         fx.db.updateContactPhone(aci, phone)
@@ -67,6 +67,20 @@ class PniMergeTest {
         names.mergeResolvableServiceIds()
 
         assertEquals(1, merges)
+    }
+
+    /** After a merge the PNI maps through its stored phone, even when an envelope carries none. */
+    @Test
+    fun laterEnvelopesFromTheMergedPniWithoutAPhoneStillMapToTheAci() {
+        fx.db.updateContactPhone(aci, phone)
+        fx.contactNames.mergeResolvableServiceIds()
+
+        val key = fx.contactNames.normalizeServiceIdForConversation(
+            ServiceId.PNI.parseOrNull(pniUuid)!!, null, "test",
+        )
+
+        assertEquals(aci, key)
+        assertNull(fx.db.getConversation(pni))
     }
 
     @Test

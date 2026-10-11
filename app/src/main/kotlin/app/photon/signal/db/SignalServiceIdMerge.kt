@@ -37,8 +37,10 @@ fun SignalMessageDatabase.getResolvableNonAciIds(): List<Pair<String, String>> {
  *    the [from] copy is dropped and stops counting as unread.
  *  - The two conversations become one: unread counts add up, the newer last
  *    message wins, and a blank name takes the other's.
- *  - Participant rows and the contact row (phone, profile key, profile
- *    name) move to [to] without overwriting what [to] already has.
+ *  - Participant rows move to [to]. The contact row's phone, profile key
+ *    and profile name fill gaps in [to]'s; the [from] row stays as an
+ *    alias, so a later envelope from [from] that carries no phone number
+ *    still maps to [to] through the phone stored there.
  *
  * Incoming rows keep their read state, so rows seen in Photon but never
  * read-synced (impossible without an ACI) are synced on the next chat open.
@@ -50,7 +52,7 @@ fun SignalMessageDatabase.mergeServiceId(from: String, to: String): Boolean {
     db.beginTransaction()
     try {
         if (!isReferenced(db, from)) return false
-        rekeyMessages(db, from, to)
+        val lostRows = rekeyMessages(db, from, to).map { if (it == from) to else it }
         db.execSQL("UPDATE messages SET sender_jid = ? WHERE sender_jid = ?", arrayOf(to, from))
         db.execSQL("UPDATE messages SET conversation_jid = ? WHERE conversation_jid = ?", arrayOf(to, from))
         rekeyPrefixed(db, "messages", "reply_to_id", from, to)
@@ -63,6 +65,8 @@ fun SignalMessageDatabase.mergeServiceId(from: String, to: String): Boolean {
         db.execSQL("UPDATE OR IGNORE participants SET jid = ? WHERE jid = ?", arrayOf(to, from))
         db.execSQL("DELETE FROM participants WHERE jid = ?", arrayOf(from))
         mergeConversationRows(db, from, to)
+        // A dropped duplicate may have been a conversation's last message.
+        for (jid in (lostRows + to).toSet()) repairLastMessage(db, jid)
         mergeContactRows(db, from, to)
         db.setTransactionSuccessful()
     } finally {
@@ -81,8 +85,8 @@ private fun exists(db: SQLiteDatabase, sql: String, args: Array<String>): Boolea
 private fun isReferenced(db: SQLiteDatabase, id: String): Boolean {
     val (lo, hi) = rangeOf(id)
     val (callLo, callHi) = rangeOf("call_$id")
+    // The contacts row doesn't count: it stays behind as an alias.
     return exists(db, "SELECT 1 FROM conversations WHERE jid = ?", arrayOf(id)) ||
-        exists(db, "SELECT 1 FROM contacts WHERE jid = ?", arrayOf(id)) ||
         exists(db, "SELECT 1 FROM participants WHERE jid = ?", arrayOf(id)) ||
         exists(db, "SELECT 1 FROM reactions WHERE sender_jid = ? OR (message_id >= ? AND message_id < ?)", arrayOf(id, lo, hi)) ||
         exists(
@@ -113,9 +117,10 @@ private fun rekeyPrefixed(
 /**
  * Message rows whose id carries [from]: "{from}_{ts}_{rand}" messages and
  * "call_{from}_{callId}" call rows. Oldest first, so of two copies of one
- * message the first stored is kept.
+ * message the first stored is kept. Returns the conversations that lost a
+ * dropped copy.
  */
-private fun SignalMessageDatabase.rekeyMessages(db: SQLiteDatabase, from: String, to: String) {
+private fun SignalMessageDatabase.rekeyMessages(db: SQLiteDatabase, from: String, to: String): Set<String> {
     val (lo, hi) = rangeOf(from)
     val (callLo, callHi) = rangeOf("call_$from")
     data class Row(val id: String, val conversationJid: String, val unread: Boolean)
@@ -129,12 +134,14 @@ private fun SignalMessageDatabase.rekeyMessages(db: SQLiteDatabase, from: String
         }
     }
     val droppedUnread = mutableMapOf<String, Int>()
+    val lostRows = mutableSetOf<String>()
     for (row in rows) {
         val isCallRow = row.id.startsWith("call_$from")
         val newId = if (isCallRow) "call_$to" + row.id.substring("call_$from".length) else to + row.id.substring(from.length)
         val duplicate = if (isCallRow) rowExists(db, newId) else prefixExists(db, MessageKeys.prefixOf(newId))
         if (duplicate) {
             db.execSQL("DELETE FROM messages WHERE id = ?", arrayOf(row.id))
+            lostRows += row.conversationJid
             if (row.unread) droppedUnread.merge(row.conversationJid, 1, Int::plus)
         } else {
             db.execSQL("UPDATE messages SET id = ? WHERE id = ?", arrayOf(newId, row.id))
@@ -142,6 +149,7 @@ private fun SignalMessageDatabase.rekeyMessages(db: SQLiteDatabase, from: String
         }
     }
     decrementUnread(db, droppedUnread)
+    return lostRows
 }
 
 private fun mergeConversationRows(db: SQLiteDatabase, from: String, to: String) {
@@ -167,7 +175,10 @@ private fun mergeConversationRows(db: SQLiteDatabase, from: String, to: String) 
         )
         db.execSQL("DELETE FROM conversations WHERE jid = ?", arrayOf(from))
     }
-    // A dropped duplicate may have been the last message.
+}
+
+/** Point [jid]'s last_message_id at its newest row if the one it names is gone. */
+private fun repairLastMessage(db: SQLiteDatabase, jid: String) {
     db.execSQL(
         """
         UPDATE conversations
@@ -178,7 +189,7 @@ private fun mergeConversationRows(db: SQLiteDatabase, from: String, to: String) 
          WHERE jid = ?
            AND NOT EXISTS (SELECT 1 FROM messages WHERE id = conversations.last_message_id)
         """.trimIndent(),
-        arrayOf(to, to),
+        arrayOf(jid, jid),
     )
 }
 
@@ -198,5 +209,4 @@ private fun mergeContactRows(db: SQLiteDatabase, from: String, to: String) {
         """.trimIndent(),
         arrayOf(from, from, from, to),
     )
-    db.execSQL("DELETE FROM contacts WHERE jid = ?", arrayOf(from))
 }

@@ -98,14 +98,33 @@ class SignalServiceIdMergeTest {
         assertEquals(listOf(aci), db.getReactions(listOf("${aci}_${t}_r")).values.single().map { it.senderJid })
         assertEquals(listOf(aci), db.getParticipants("group").map { it.jid })
 
-        assertNull(db.getContact(pni))
         assertEquals(phone, db.getContact(aci)?.phone)
         assertContentEquals(ByteArray(32) { 7 }, db.getContact(aci)?.profileKey)
+        // The PNI's contact row stays as an alias; nothing else is left to merge.
+        assertEquals(phone, db.getContact(pni)?.phone)
+        assertFalse(db.mergeServiceId(pni, aci))
 
         // The seen row can now go out in a read sync.
         val plan = planReadSync(db.getUnsyncedIncomingReads(aci))
         assertEquals(listOf("${aci}_${t + 1_000}_r"), plan.rowIds)
         assertEquals(emptyList(), plan.skippedIds)
+    }
+
+    /** A dropped duplicate that was a group's newest message mustn't leave the group pointing at nothing. */
+    @Test
+    fun aGroupWhoseLastMessageWasADroppedCopyPointsAtTheNewestLeft() {
+        db.upsertConversation(jid = "group", name = "Group", isGroup = true)
+        db.updateContactPhone(pni, phone)
+        db.updateContactPhone(aci, phone)
+        receive("group", aci, t + 1_000, rand = "aci")
+        receive("group", aci, t + 2_000, rand = "aci")
+        receive("group", pni, t + 2_000, rand = "pni") // the same message under the PNI, stored last
+        assertEquals("${pni}_${t + 2_000}_pni", db.getConversation("group")?.lastMessageId)
+
+        assertTrue(db.mergeServiceId(pni, aci))
+
+        assertEquals("${aci}_${t + 2_000}_aci", db.getConversation("group")?.lastMessageId)
+        assertEquals(2, db.getConversation("group")?.unreadCount)
     }
 
     @Test
@@ -139,7 +158,7 @@ class SignalServiceIdMergeTest {
         assertNull(db.getConversation(phone))
         assertEquals("${me}_${t}_o", db.getConversation(aci)?.lastMessageId)
         assertEquals(aci, db.getMessage("${me}_${t}_o")?.conversationJid)
-        assertEquals(emptyList(), db.getResolvableNonAciIds())
+        assertFalse(db.mergeServiceId(phone, aci))
     }
 
     @Test

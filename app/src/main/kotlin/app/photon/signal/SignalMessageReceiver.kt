@@ -68,10 +68,12 @@ class SignalMessageReceiver(
     private val notifier: SignalNotifier = AndroidSignalNotifier(context)
     // Read syncs that arrived before their message (see EarlyReadCache).
     private val earlyReads = EarlyReadCache()
+    // Envelope processing and PNI merges both rewrite conversations: one at a time.
+    private val storeLock = Any()
     private val preKeyRefill = PreKeyRefill(protocolStore)
     private val sessionPings = SessionPings(context, credentials, messageDb, scope)
     private val contactNames: ContactNames = ContactNames(
-        messageDb, contactResolver, notifier,
+        messageDb, storeLock, contactResolver, notifier,
         profileFetcher = { profileFetcher },
         // Runs only after construction, once calls is set.
         onMerged = { calls.expireStaleRinging() },
@@ -105,6 +107,7 @@ class SignalMessageReceiver(
     )
     private val sessionLock = SignalConfig.newSessionLock()
     private val envelopeProcessor = EnvelopeProcessor(
+        storeLock,
         SignalGroupSessionBuilder(sessionLock, GroupSessionBuilder(protocolStore)),
         receipts, dataMessages, syncMessages, calls,
     )

@@ -25,6 +25,9 @@ private const val TAG = SignalMessageReceiver.TAG
  */
 internal class ContactNames(
     private val messageDb: SignalMessageDatabase,
+    // Held while merging: the read loop holds it while processing an
+    // envelope, so a merge can't land between two of its writes.
+    private val storeLock: Any,
     private val contactResolver: AndroidContactResolver,
     private val notifier: SignalNotifier,
     private val profileFetcher: () -> SignalProfileFetcher?,
@@ -78,12 +81,12 @@ internal class ContactNames(
      * merge each into its ACI conversation. Run at start and after a
      * contacts sync.
      */
-    fun mergeResolvableServiceIds() {
+    fun mergeResolvableServiceIds() = synchronized(storeLock) {
         for ((stored, aci) in messageDb.getResolvableNonAciIds()) mergeIntoAci(stored, aci)
     }
 
     private fun mergeIntoAci(stored: String, aci: String) {
-        if (!messageDb.mergeServiceId(stored, aci)) return
+        if (!synchronized(storeLock) { messageDb.mergeServiceId(stored, aci) }) return
         Log.i(TAG, "Merged conversation ${stored.take(12)}… into ACI ${aci.take(8)}…")
         // These would open a conversation that no longer exists.
         notifier.cancelIncomingCall(stored)
@@ -94,11 +97,11 @@ internal class ContactNames(
     /**
      * Conversation rows must key Signal contacts by ACI. Some envelopes can
      * identify the sender/destination by PNI; when that happens, use the E164
-     * carried with the envelope/sync transcript to find the contact-sync ACI,
-     * and merge anything already stored under the PNI into it. If the
-     * mapping is not available yet, keep the raw id so the message is not
-     * lost, and persist the phone mapping so a later contacts sync has enough
-     * information to converge.
+     * carried with the envelope/sync transcript (or the one stored for that
+     * PNI before) to find the contact-sync ACI, and merge anything already
+     * stored under the PNI into it. If the mapping is not available yet, keep
+     * the raw id so the message is not lost, and persist the phone mapping so
+     * a later contacts sync has enough information to converge.
      */
     fun normalizeServiceIdForConversation(
         serviceId: ServiceId,
@@ -110,9 +113,10 @@ internal class ContactNames(
             return raw
         }
 
-        val aci = e164?.let { messageDb.getAciForPhone(it) }
+        val phone = e164 ?: messageDb.getContact(raw)?.phone
+        val aci = phone?.let { messageDb.getAciForPhone(it) }
         if (aci != null) {
-            Log.i(TAG, "$context: normalized non-ACI ${raw.take(8)}… to ACI ${aci.take(8)}… via $e164")
+            Log.i(TAG, "$context: normalized non-ACI ${raw.take(8)}… to ACI ${aci.take(8)}… via $phone")
             mergeIntoAci(raw, aci)
             return aci
         }

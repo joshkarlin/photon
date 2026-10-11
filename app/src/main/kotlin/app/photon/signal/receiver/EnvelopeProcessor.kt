@@ -28,6 +28,8 @@ private const val HELD_ENVELOPE_RETRY_MS = 10_000L
  * ack — or hold it for a retry, or send a retry receipt for a failed decrypt.
  */
 internal class EnvelopeProcessor(
+    // Held for each envelope; PNI merges take it too (see ContactNames).
+    private val storeLock: Any,
     private val senderKeySessionBuilder: SignalGroupSessionBuilder,
     private val receipts: Receipts,
     private val dataMessages: DataMessageHandler,
@@ -62,58 +64,60 @@ internal class EnvelopeProcessor(
         cipher: SignalServiceCipher,
         ws: SignalWebSocket.AuthenticatedWebSocket,
     ) {
-        val envelope = envelopeResponse.envelope
-        val retryKey = envelopeRetryKey(envelope)
-        var decrypted: DecryptedEnvelope? = envelopeRetries.pending(retryKey)
-        val ack = try {
-            if (decrypted == null) {
-                val result = cipher.decrypt(envelope, envelopeResponse.serverDeliveredTimestamp)
-                if (result == null) {
-                    receipts.processContentlessEnvelope(envelope)
+        synchronized(storeLock) {
+            val envelope = envelopeResponse.envelope
+            val retryKey = envelopeRetryKey(envelope)
+            var decrypted: DecryptedEnvelope? = envelopeRetries.pending(retryKey)
+            val ack = try {
+                if (decrypted == null) {
+                    val result = cipher.decrypt(envelope, envelopeResponse.serverDeliveredTimestamp)
+                    if (result == null) {
+                        receipts.processContentlessEnvelope(envelope)
+                    } else {
+                        decrypted = DecryptedEnvelope(result.content, result.metadata)
+                    }
                 } else {
-                    decrypted = DecryptedEnvelope(result.content, result.metadata)
+                    Log.i(TAG, "Reprocessing held envelope ${retryKey.take(12)}… (decrypted on an earlier delivery)")
                 }
-            } else {
-                Log.i(TAG, "Reprocessing held envelope ${retryKey.take(12)}… (decrypted on an earlier delivery)")
-            }
-            decrypted?.let { processContent(it.content, it.metadata, envelopeResponse) }
-            envelopeRetries.clear(retryKey)
-            true
-        } catch (e: org.signal.libsignal.metadata.SelfSendException) {
-            Log.d(TAG, "Self-send exception (normal for sync), acking")
-            true
-        } catch (e: ProtocolDuplicateMessageException) {
-            Log.d(TAG, "Duplicate message, acking")
-            true
-        } catch (e: ProtocolException) {
-            Log.w(
-                TAG,
-                "Protocol decrypt failed (type=${envelope.type}, sender=${e.sender}, " +
-                    "senderDevice=${e.senderDevice}, clientTs=${envelope.clientTimestamp}): " +
-                    "${e.javaClass.simpleName}: ${e.message}",
-            )
-            maybeSendRetryReceipt(e, envelopeResponse)
-            true
-        } catch (e: org.signal.libsignal.protocol.DuplicateMessageException) {
-            Log.d(TAG, "Duplicate message, acking")
-            true
-        } catch (e: Exception) {
-            val giveUp = envelopeRetries.recordFailure(retryKey, decrypted)
-            val description = "envelope (type=${envelope.type}, sourceServiceId=${envelope.sourceServiceId}, " +
-                "sourceDevice=${envelope.sourceDeviceId}, clientTs=${envelope.clientTimestamp}, " +
-                "serverTs=${envelope.serverTimestamp}, urgent=${envelope.urgent}): " +
-                "${e.javaClass.name}: ${e.message}"
-            if (giveUp) {
-                Log.e(TAG, "Giving up on $description — acking after repeated failures", e)
-            } else {
-                Log.w(TAG, "Failed to process $description — leaving un-acked, retrying", e)
-                synchronized(heldRetries) {
-                    heldRetries.add(HeldRetry(envelopeResponse, ws, System.currentTimeMillis() + HELD_ENVELOPE_RETRY_MS))
+                decrypted?.let { processContent(it.content, it.metadata, envelopeResponse) }
+                envelopeRetries.clear(retryKey)
+                true
+            } catch (e: org.signal.libsignal.metadata.SelfSendException) {
+                Log.d(TAG, "Self-send exception (normal for sync), acking")
+                true
+            } catch (e: ProtocolDuplicateMessageException) {
+                Log.d(TAG, "Duplicate message, acking")
+                true
+            } catch (e: ProtocolException) {
+                Log.w(
+                    TAG,
+                    "Protocol decrypt failed (type=${envelope.type}, sender=${e.sender}, " +
+                        "senderDevice=${e.senderDevice}, clientTs=${envelope.clientTimestamp}): " +
+                        "${e.javaClass.simpleName}: ${e.message}",
+                )
+                maybeSendRetryReceipt(e, envelopeResponse)
+                true
+            } catch (e: org.signal.libsignal.protocol.DuplicateMessageException) {
+                Log.d(TAG, "Duplicate message, acking")
+                true
+            } catch (e: Exception) {
+                val giveUp = envelopeRetries.recordFailure(retryKey, decrypted)
+                val description = "envelope (type=${envelope.type}, sourceServiceId=${envelope.sourceServiceId}, " +
+                    "sourceDevice=${envelope.sourceDeviceId}, clientTs=${envelope.clientTimestamp}, " +
+                    "serverTs=${envelope.serverTimestamp}, urgent=${envelope.urgent}): " +
+                    "${e.javaClass.name}: ${e.message}"
+                if (giveUp) {
+                    Log.e(TAG, "Giving up on $description — acking after repeated failures", e)
+                } else {
+                    Log.w(TAG, "Failed to process $description — leaving un-acked, retrying", e)
+                    synchronized(heldRetries) {
+                        heldRetries.add(HeldRetry(envelopeResponse, ws, System.currentTimeMillis() + HELD_ENVELOPE_RETRY_MS))
+                    }
                 }
+                giveUp
             }
-            giveUp
+            if (ack) ws.sendAck(envelopeResponse)
         }
-        if (ack) ws.sendAck(envelopeResponse)
     }
 
     /**
