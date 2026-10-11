@@ -41,7 +41,8 @@ func TestBestContactName(t *testing.T) {
 		{"address book wins over everything", types.ContactInfo{FullName: "Alice", PushName: "ally", BusinessName: "ACME"}, "live", "Alice", true},
 		{"event push name beats stored push name", types.ContactInfo{PushName: "stored"}, "live", "live", false},
 		{"stored push name when no event name", types.ContactInfo{PushName: "stored"}, "", "stored", false},
-		{"business name as last resort", types.ContactInfo{BusinessName: "ACME"}, "", "ACME", false},
+		{"verified business name beats push names", types.ContactInfo{BusinessName: "ACME", PushName: "acme"}, "live", "ACME", true},
+		{"business name alone", types.ContactInfo{BusinessName: "ACME"}, "", "ACME", true},
 		{"nothing known", types.ContactInfo{}, "", "", false},
 	}
 	for _, tc := range cases {

@@ -485,12 +485,16 @@ func (b *Bridge) purgeNumberPlaceholders(groupJID string) int64 {
 	return n
 }
 
-// UpdateConversationName updates a conversation's display name.
-func (b *Bridge) UpdateConversationName(jid, name string) {
-	_, err := b.msgDB.Exec(`UPDATE conversations SET name = ? WHERE jid = ?`, name, jid)
+// UpdateConversationName updates a conversation's display name. Returns
+// whether the stored name changed.
+func (b *Bridge) UpdateConversationName(jid, name string) bool {
+	res, err := b.msgDB.Exec(`UPDATE conversations SET name = ? WHERE jid = ? AND name IS NOT ?`, name, jid, name)
 	if err != nil {
 		b.log.Errorf("Failed to update name for %s: %v", jid, err)
+		return false
 	}
+	n, _ := res.RowsAffected()
+	return n > 0
 }
 
 // UpdateConversationNameIfEmpty only sets the name if it's currently empty/null.

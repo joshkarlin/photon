@@ -132,6 +132,8 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 		b.handleMute(v)
 	case *events.MarkChatAsRead:
 		b.handleMarkChatAsRead(v)
+	case *events.BusinessName:
+		b.handleBusinessName(v)
 	}
 }
 
@@ -287,13 +289,17 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 			b.UpsertParticipant(chatJID, senderJID, senderDisplayName, "member")
 		}
 	} else {
-		// Only use the event push name from the OTHER person, not ourselves.
-		eventPushName := ""
+		// Only use the event push/verified name from the OTHER person, not
+		// ourselves.
+		eventPushName, verifiedName := "", ""
 		if !isFromMe {
 			eventPushName = evt.Info.PushName
+			if evt.Info.VerifiedName != nil {
+				verifiedName = evt.Info.VerifiedName.Details.GetVerifiedName()
+			}
 		}
 		contact := b.lookupContact(resolvedChat, evt.Info.Chat)
-		name, nameIsAuthoritative = bestContactName(contact, eventPushName)
+		name, nameIsAuthoritative = dmName(contact, verifiedName, eventPushName)
 		// For LID JIDs, fall back to the resolved phone number
 		if name == "" && resolvedChat != evt.Info.Chat {
 			name = "+" + resolvedChat.User
@@ -690,37 +696,43 @@ func (b *Bridge) BackfillContactNames() {
 	}
 	b.log.Infof("Backfill: %d contacts in store", len(contacts))
 
-	rows, err := b.msgDB.Query(`SELECT jid, COALESCE(name, '') FROM conversations WHERE jid LIKE '%@s.whatsapp.net'`)
+	// @lid rows are DMs whose phone number isn't known yet; whatsmeow keys
+	// their push/business names by the LID. Read everything before writing
+	// (a cursor held open across the updates deadlocks a single connection).
+	type convName struct{ jid, name string }
+	var convs []convName
+	rows, err := b.msgDB.Query(`SELECT jid, COALESCE(name, '') FROM conversations WHERE jid LIKE '%@s.whatsapp.net' OR jid LIKE '%@lid'`)
 	if err != nil {
 		return
 	}
-	defer rows.Close()
+	for rows.Next() {
+		var c convName
+		if rows.Scan(&c.jid, &c.name) == nil {
+			convs = append(convs, c)
+		}
+	}
+	rows.Close()
 
 	updated := 0
-	for rows.Next() {
-		var jid, currentName string
-		rows.Scan(&jid, &currentName)
-
-		parsedJID, parseErr := types.ParseJID(jid)
+	for _, c := range convs {
+		parsedJID, parseErr := types.ParseJID(c.jid)
 		if parseErr != nil {
 			continue
 		}
 		contact, ok := contacts[parsedJID]
 		if !ok {
-			// Fallback: single lookup (covers stores where GetAllContacts
-			// lags behind individual sync entries).
-			if c, err := b.client.Store.Contacts.GetContact(context.Background(), parsedJID); err == nil && c.Found {
-				contact = c
-			}
+			// Fallback: single lookup under the phone and LID keys (covers
+			// stores where GetAllContacts lags behind individual sync entries).
+			contact = b.lookupContact(b.resolveLIDJID(parsedJID), parsedJID)
 		}
 
 		name, authoritative := bestContactName(contact, "")
-		if !authoritative && currentName != "" {
-			continue // already named and no address book entry — leave it
+		if !authoritative && c.name != "" {
+			continue // already named and nothing better than a push name — leave it
 		}
 
-		if name != "" && name != currentName {
-			b.UpdateConversationName(jid, name)
+		if name != "" && name != c.name {
+			b.UpdateConversationName(c.jid, name)
 			updated++
 		}
 	}
@@ -900,22 +912,50 @@ func (b *Bridge) setGroupName(jid, name string) {
 // Helper functions
 
 // bestContactName picks a DM display name. The user's address book FullName
-// (synced from the primary device) is authoritative — it may overwrite an
-// existing name. Push names (self-chosen, mutable) and business names only
+// (synced from the primary device) wins, then a business's verified name
+// (WhatsApp shows it in place of the push name); both are authoritative —
+// they may overwrite an existing name. Push names (self-chosen, mutable) only
 // fill in when there's nothing better; eventPushName is the push name carried
 // by a live message event ("" when not applicable, e.g. our own messages).
 func bestContactName(contact types.ContactInfo, eventPushName string) (name string, authoritative bool) {
 	switch {
 	case contact.FullName != "":
 		return contact.FullName, true
+	case contact.BusinessName != "":
+		return contact.BusinessName, true
 	case eventPushName != "":
 		return eventPushName, false
 	case contact.PushName != "":
 		return contact.PushName, false
-	case contact.BusinessName != "":
-		return contact.BusinessName, false
 	}
 	return "", false
+}
+
+// dmName is bestContactName for a live DM, with the verified business name
+// the message itself carries — whatsmeow stores it in the contact store
+// asynchronously, so the first message from a business can predate it there.
+func dmName(contact types.ContactInfo, verifiedName, eventPushName string) (name string, authoritative bool) {
+	if contact.FullName == "" && verifiedName != "" {
+		return verifiedName, true
+	}
+	return bestContactName(contact, eventPushName)
+}
+
+// handleBusinessName applies a business's (changed) verified name to its DM,
+// unless the user's address book names it.
+func (b *Bridge) handleBusinessName(evt *events.BusinessName) {
+	if evt.NewBusinessName == "" {
+		return
+	}
+	user := evt.JID.ToNonAD()
+	resolved := b.resolveLIDJID(user)
+	if b.lookupContact(resolved, user).FullName != "" {
+		return
+	}
+	jid := resolved.String()
+	if b.UpdateConversationName(jid, evt.NewBusinessName) {
+		b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: jid})
+	}
 }
 
 // lookupContact fetches a contact record, checking under the resolved phone
