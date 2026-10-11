@@ -150,14 +150,38 @@ func (b *Bridge) RepairConversationMetadata() {
 	`)
 }
 
+// execer is a *sql.DB or *sql.Tx.
+type execer interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+}
+
+// inTx runs fn in a transaction, committing only if it succeeds.
+func (b *Bridge) inTx(fn func(*sql.Tx) error) error {
+	tx, err := b.msgDB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // UpsertConversation creates or updates a conversation record.
 func (b *Bridge) UpsertConversation(jid, name string, isGroup bool, lastMsgID string, lastTS int64) {
+	if err := b.upsertConversation(b.msgDB, jid, name, isGroup, lastMsgID, lastTS); err != nil {
+		b.log.Errorf("Failed to upsert conversation %s: %v", jid, err)
+	}
+}
+
+func (b *Bridge) upsertConversation(ex execer, jid, name string, isGroup bool, lastMsgID string, lastTS int64) error {
 	isGroupInt := 0
 	if isGroup {
 		isGroupInt = 1
 	}
 
-	_, err := b.msgDB.Exec(`
+	_, err := ex.Exec(`
 		INSERT INTO conversations (jid, name, is_group, last_message_id, last_timestamp, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(jid) DO UPDATE SET
@@ -172,10 +196,7 @@ func (b *Bridge) UpsertConversation(jid, name string, isGroup bool, lastMsgID st
 			last_timestamp = MAX(excluded.last_timestamp, conversations.last_timestamp),
 			updated_at = excluded.updated_at
 	`, jid, name, isGroupInt, lastMsgID, lastTS, lastTS)
-
-	if err != nil {
-		b.log.Errorf("Failed to upsert conversation %s: %v", jid, err)
-	}
+	return err
 }
 
 // IncrementUnread increments the unread count for a conversation.

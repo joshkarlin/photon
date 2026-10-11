@@ -57,7 +57,8 @@ type Bridge struct {
 	groupNameMu sync.Mutex
 	groupNames  map[string]cachedGroupName
 
-	calls callTracker
+	calls      callTracker
+	reconciler coalescer
 }
 
 // NewBridge creates a new Bridge instance.

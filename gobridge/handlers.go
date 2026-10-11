@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -78,24 +79,13 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 		// session) this single delayed run still converges names.
 		go func() {
 			time.Sleep(60 * time.Second)
-			b.MergeLIDConversations()
-			b.CanonicalizeSenderJIDs()
-			b.RepairConversationMetadata()
-			b.BackfillContactNames()
-			b.BackfillParticipantNames()
+			b.reconcile()
 		}()
 	case *events.AppStateSyncComplete:
 		// Contact names and LID mappings arrive via app state sync — run the
 		// reconcile as soon as a patch lands instead of polling on a timer.
-		// Both operations are idempotent, so running per-patch is safe.
 		b.log.Infof("App state sync complete: %s", v.Name)
-		go func() {
-			b.MergeLIDConversations()
-			b.CanonicalizeSenderJIDs()
-			b.RepairConversationMetadata()
-			b.BackfillContactNames()
-			b.BackfillParticipantNames()
-		}()
+		go b.reconcile()
 	case *events.Disconnected:
 		b.log.Infof("Disconnected from WhatsApp")
 		state, _ := b.currentConnectionState()
@@ -852,6 +842,50 @@ func (b *Bridge) BackfillContactNames() {
 	}
 }
 
+// reconcile runs the LID merge and name repair passes. A sync burst fires
+// one request per app-state patch; the coalescer keeps runs from overlapping
+// (two concurrent merges of one row used to add its unread count twice) and
+// folds requests that arrive mid-run into a single follow-up run.
+func (b *Bridge) reconcile() {
+	b.reconciler.run(func() {
+		b.MergeLIDConversations()
+		b.CanonicalizeSenderJIDs()
+		b.RepairConversationMetadata()
+		b.BackfillContactNames()
+		b.BackfillParticipantNames()
+	})
+}
+
+// coalescer runs a function without overlap: calls made while it runs
+// return at once and collapse into one more run afterwards.
+type coalescer struct {
+	mu      sync.Mutex
+	running bool
+	again   bool
+}
+
+func (c *coalescer) run(fn func()) {
+	c.mu.Lock()
+	if c.running {
+		c.again = true
+		c.mu.Unlock()
+		return
+	}
+	c.running = true
+	c.mu.Unlock()
+	for {
+		fn()
+		c.mu.Lock()
+		if !c.again {
+			c.running = false
+			c.mu.Unlock()
+			return
+		}
+		c.again = false
+		c.mu.Unlock()
+	}
+}
+
 // MergeLIDConversations folds conversation rows keyed by @lid JIDs into
 // their phone-based rows. Duplicates appeared when an event path stored a
 // LID key (history sync, the old push-name handler) while live messages
@@ -859,52 +893,91 @@ func (b *Bridge) BackfillContactNames() {
 // (plus a post-connect fallback); unresolvable LIDs are left untouched and
 // retried on the next run.
 func (b *Bridge) MergeLIDConversations() {
-	rows, err := b.msgDB.Query(`SELECT jid, COALESCE(name, ''), is_group, COALESCE(last_message_id, ''), last_timestamp, unread_count FROM conversations WHERE jid LIKE '%@lid'`)
+	rows, err := b.msgDB.Query(`SELECT jid FROM conversations WHERE jid LIKE '%@lid'`)
 	if err != nil {
 		return
 	}
-	type lidRow struct {
-		jid, name, lastMsgID string
-		isGroup              bool
-		lastTS               int64
-		unread               int
-	}
-	var lids []lidRow
+	var lids []string
 	for rows.Next() {
-		var r lidRow
-		var isGroupInt int
-		if err := rows.Scan(&r.jid, &r.name, &isGroupInt, &r.lastMsgID, &r.lastTS, &r.unread); err != nil {
-			continue
+		var jid string
+		if rows.Scan(&jid) == nil {
+			lids = append(lids, jid)
 		}
-		r.isGroup = isGroupInt == 1
-		lids = append(lids, r)
 	}
 	rows.Close()
 
 	merged := 0
-	for _, r := range lids {
-		pn := b.resolveLIDString(r.jid)
-		if pn == r.jid {
+	for _, lid := range lids {
+		pn := b.resolveLIDString(lid)
+		if pn == lid {
 			continue // mapping not known yet
 		}
-		// Re-key messages and participants, then merge the conversation row.
-		// UpsertConversation fills the target's name/last-message only where
-		// they're missing or older, which is exactly the merge we want.
-		b.msgDB.Exec(`UPDATE messages SET conversation_jid = ? WHERE conversation_jid = ?`, pn, r.jid)
-		b.msgDB.Exec(`UPDATE OR IGNORE participants SET conversation_jid = ? WHERE conversation_jid = ?`, pn, r.jid)
-		b.msgDB.Exec(`DELETE FROM participants WHERE conversation_jid = ?`, r.jid)
-		b.UpsertConversation(pn, r.name, r.isGroup, r.lastMsgID, r.lastTS)
-		if r.unread > 0 {
-			b.msgDB.Exec(`UPDATE conversations SET unread_count = unread_count + ? WHERE jid = ?`, r.unread, pn)
+		ok, err := b.mergeConversation(lid, pn)
+		if err != nil {
+			b.log.Errorf("Failed to merge LID conversation %s into %s: %v", lid, pn, err)
+			continue
 		}
-		b.msgDB.Exec(`DELETE FROM conversations WHERE jid = ?`, r.jid)
-		b.log.Infof("Merged LID conversation %s into %s", r.jid, pn)
-		merged++
+		if ok {
+			b.log.Infof("Merged LID conversation %s into %s", lid, pn)
+			merged++
+		}
 	}
 	if merged > 0 {
 		b.log.Infof("Merged %d LID conversations into phone-based rows", merged)
 		b.BroadcastEvent("conversation_updated", struct{}{})
 	}
+}
+
+// mergeConversation moves one conversation's messages, participants, unread
+// count and mute onto another, atomically. The source row is re-read inside
+// the transaction, so a merge that already happened is a no-op (false)
+// rather than adding the unread count again.
+func (b *Bridge) mergeConversation(from, to string) (bool, error) {
+	tx, err := b.msgDB.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var name, lastMsgID string
+	var isGroup, unread int
+	var lastTS, mutedUntil int64
+	err = tx.QueryRow(`SELECT COALESCE(name, ''), is_group, COALESCE(last_message_id, ''), last_timestamp, unread_count, muted_until
+		FROM conversations WHERE jid = ?`, from).Scan(&name, &isGroup, &lastMsgID, &lastTS, &unread, &mutedUntil)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	// Re-key messages and participants, then merge the conversation row.
+	// upsertConversation fills the target's name/last-message only where
+	// they're missing or older, which is exactly the merge we want.
+	for _, q := range []string{
+		`UPDATE messages SET conversation_jid = ? WHERE conversation_jid = ?`,
+		`UPDATE OR IGNORE participants SET conversation_jid = ? WHERE conversation_jid = ?`,
+	} {
+		if _, err := tx.Exec(q, to, from); err != nil {
+			return false, err
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM participants WHERE conversation_jid = ?`, from); err != nil {
+		return false, err
+	}
+	if err := b.upsertConversation(tx, to, name, isGroup == 1, lastMsgID, lastTS); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(`UPDATE conversations SET unread_count = unread_count + ?,
+		muted_until = CASE WHEN ? = -1 OR muted_until = -1 THEN -1 ELSE MAX(muted_until, ?) END,
+		is_muted = CASE WHEN ? <> 0 OR muted_until <> 0 THEN 1 ELSE 0 END
+		WHERE jid = ?`, unread, mutedUntil, mutedUntil, mutedUntil, to); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(`DELETE FROM conversations WHERE jid = ?`, from); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 // CanonicalizeSenderJIDs re-keys message, reaction, and participant sender JIDs
@@ -935,11 +1008,29 @@ func (b *Bridge) CanonicalizeSenderJIDs() {
 		}
 		// messages.sender_jid isn't unique, so a plain update is safe; the
 		// PK-bearing tables use UPDATE OR IGNORE + delete to fold duplicates.
-		b.msgDB.Exec(`UPDATE messages SET sender_jid = ? WHERE sender_jid = ?`, pn, lid)
-		b.msgDB.Exec(`UPDATE OR IGNORE reactions SET sender_jid = ? WHERE sender_jid = ?`, pn, lid)
-		b.msgDB.Exec(`DELETE FROM reactions WHERE sender_jid = ?`, lid)
-		b.msgDB.Exec(`UPDATE OR IGNORE participants SET jid = ? WHERE jid = ?`, pn, lid)
-		b.msgDB.Exec(`DELETE FROM participants WHERE jid = ?`, lid)
+		if err := b.inTx(func(tx *sql.Tx) error {
+			for _, q := range []string{
+				`UPDATE messages SET sender_jid = ? WHERE sender_jid = ?`,
+				`UPDATE OR IGNORE reactions SET sender_jid = ? WHERE sender_jid = ?`,
+				`UPDATE OR IGNORE participants SET jid = ? WHERE jid = ?`,
+			} {
+				if _, err := tx.Exec(q, pn, lid); err != nil {
+					return err
+				}
+			}
+			for _, q := range []string{
+				`DELETE FROM reactions WHERE sender_jid = ?`,
+				`DELETE FROM participants WHERE jid = ?`,
+			} {
+				if _, err := tx.Exec(q, lid); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			b.log.Errorf("Failed to canonicalize sender %s: %v", lid, err)
+			continue
+		}
 		changed++
 	}
 	if changed > 0 {
