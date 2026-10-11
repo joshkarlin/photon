@@ -243,10 +243,10 @@ private fun ConfirmResetPage(platform: String, text: String, onReset: () -> Unit
     )
 }
 
-// The WhatsApp reset deletes Photon's session without logging out, so the
-// phone may list Photon under Linked devices until it's removed there.
+// Both resets log out first (WhatsAppSession.reset, SignalSession.reset), so
+// the phone drops Photon from its linked devices.
 internal const val RESET_WHATSAPP_WARNING =
-    "Deletes Photon's link to WhatsApp and its WhatsApp messages. WhatsApp on your phone keeps everything."
+    "Unlinks Photon from WhatsApp and deletes its WhatsApp messages. WhatsApp on your phone keeps everything."
 
 internal const val RESET_SIGNAL_WARNING =
     "Unlinks Photon from Signal and deletes its Signal messages. Signal on your phone keeps everything."
