@@ -15,7 +15,7 @@ private const val TAG = SignalMessageReceiver.TAG
 /** Reactions and deletes-for-everyone, from other people or from the user's other devices. */
 internal class RemoteEdits(
     private val messageDb: SignalMessageDatabase,
-    private val notifier: SignalNotifier,
+    private val messageNotifications: MessageNotifications,
 ) {
     fun applyReaction(reaction: DataMessage.Reaction, reactorAci: String, timestamp: Long) {
         when (val update = incomingReactionFor(reaction, fallbackAuthor = reactorAci)) {
@@ -27,13 +27,10 @@ internal class RemoteEdits(
 
     /**
      * Blank a message deleted for everyone. If it was still unread, the
-     * delete also takes it off the unread count; once nothing unread is
-     * left, its notification (which may show the deleted text) goes too.
+     * delete also takes it off the unread count, and the notification,
+     * which may show the deleted text, goes or moves to what is still unread.
      */
     fun applyRemoteDelete(targetPrefix: String) {
-        val cleared = messageDb.markDeletedByPrefix(targetPrefix)
-        cleared.forEach { jid ->
-            notifier.cancelConversation(jid)
-        }
+        messageDb.markDeletedByPrefix(targetPrefix).forEach { messageNotifications.afterRemoteDelete(it) }
     }
 }

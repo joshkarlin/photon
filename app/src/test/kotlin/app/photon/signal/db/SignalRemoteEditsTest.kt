@@ -42,22 +42,46 @@ class SignalRemoteEditsTest {
     fun remoteDeleteOfUnreadMessageDecrementsAndReportsCleared() {
         receive(1_700_000_000_000)
 
-        val cleared = db.markDeletedByPrefix("${alice}_1700000000000")
+        val changes = db.markDeletedByPrefix("${alice}_1700000000000")
 
-        assertEquals(listOf(alice), cleared)
+        assertEquals(listOf(SignalMessageDatabase.RemoteDeleteChange(alice, 0, newerUnread = false)), changes)
         assertEquals(0, unread())
         assertEquals("deleted", db.getMessage("${alice}_1700000000000_r1700000000000")?.status)
     }
 
+    /** The older of two unread messages: the newer one is what the notification shows. */
     @Test
     fun remoteDeleteKeepsCountOfOtherUnreadMessages() {
         receive(1_700_000_000_000)
         receive(1_700_000_100_000)
 
-        val cleared = db.markDeletedByPrefix("${alice}_1700000000000")
+        val changes = db.markDeletedByPrefix("${alice}_1700000000000")
 
-        assertEquals(emptyList(), cleared)
+        assertEquals(listOf(SignalMessageDatabase.RemoteDeleteChange(alice, 1, newerUnread = true)), changes)
         assertEquals(1, unread())
+    }
+
+    /** The newest unread message: what is left unread is older, so the notification is stale. */
+    @Test
+    fun remoteDeleteOfNewestUnreadReportsTheOlderMessageStillUnread() {
+        receive(1_700_000_000_000)
+        receive(1_700_000_100_000)
+
+        val changes = db.markDeletedByPrefix("${alice}_1700000100000")
+
+        assertEquals(listOf(SignalMessageDatabase.RemoteDeleteChange(alice, 1, newerUnread = false)), changes)
+        assertEquals("msg 1700000000000", db.newestUnreadMessage(alice)?.textBody)
+    }
+
+    /** A missed call isn't a message: it has its own notification. */
+    @Test
+    fun newestUnreadMessageSkipsCallRows() {
+        receive(1_700_000_000_000)
+        db.upsertCallRow("call_${alice}_1", alice, alice, 1_700_000_200, "Missed voice call", unread = true)
+
+        assertEquals("msg 1700000000000", db.newestUnreadMessage(alice)?.textBody)
+        db.markDeletedByPrefix("${alice}_1700000000000")
+        assertEquals(null, db.newestUnreadMessage(alice))
     }
 
     /** Already-seen message deleted: nothing to subtract, and a later read sync can't subtract either. */

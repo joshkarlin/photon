@@ -30,7 +30,7 @@ internal class DataMessageHandler(
     private val attachments: Attachments,
     // Read syncs that arrived before their message (see EarlyReadCache).
     private val earlyReads: EarlyReadCache,
-    private val notifier: SignalNotifier,
+    private val messageNotifications: MessageNotifications,
     private val scope: CoroutineScope,
 ) {
     fun processDataMessage(data: DataMessage, metadata: EnvelopeMetadata) {
@@ -197,17 +197,6 @@ internal class DataMessageHandler(
             return
         }
 
-        // Show notification — for groups, title is the group name (with the
-        // sender's name woven into the body); for DMs it's the sender.
-        val notifTitle = if (isGroup) {
-            groupMetadata.groupTitle(conversationJid)
-        } else {
-            senderName ?: senderAci.take(8)
-        }
-        val preview = body ?: "[$contentType]"
-        val notifBody = if (isGroup && !senderName.isNullOrBlank()) {
-            "$senderName: $preview"
-        } else preview
-        notifier.showMessage(notifTitle, notifBody, conversationJid)
+        messageNotifications.showMessage(conversationJid, isGroup, senderAci, senderName, body, contentType)
     }
 }

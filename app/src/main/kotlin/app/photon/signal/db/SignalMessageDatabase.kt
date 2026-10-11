@@ -221,6 +221,14 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
      */
     data class ReadSyncResult(val matched: Boolean, val clearedConversations: List<String>)
 
+    /**
+     * A delete-for-everyone took an unread message out of [conversationJid].
+     * [unreadCount] is what is still unread there; [newerUnread] says whether
+     * an unread message arrived after the deleted one, so that a notification
+     * showing the newest message doesn't show the deleted text.
+     */
+    data class RemoteDeleteChange(val conversationJid: String, val unreadCount: Int, val newerUnread: Boolean)
+
     /** Read state of a call row around an update; see [upsertCallRow]. */
     data class CallRowChange(
         val conversationJid: String,

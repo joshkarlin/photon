@@ -12,6 +12,7 @@ import app.photon.signal.receiver.ContactsSync
 import app.photon.signal.receiver.DataMessageHandler
 import app.photon.signal.receiver.EnvelopeProcessor
 import app.photon.signal.receiver.GroupMetadata
+import app.photon.signal.receiver.MessageNotifications
 import app.photon.signal.receiver.NetworkMonitor
 import app.photon.signal.receiver.PreKeyRefill
 import app.photon.signal.receiver.Receipts
@@ -80,9 +81,11 @@ class SignalMessageReceiver(
         }
     })
     private val receipts = Receipts(credentials, messageDb)
-    private val remoteEdits = RemoteEdits(messageDb, notifier)
+    private val messageNotifications = MessageNotifications(messageDb, contactNames, groupMetadata, notifier)
+    private val remoteEdits = RemoteEdits(messageDb, messageNotifications)
     private val dataMessages = DataMessageHandler(
-        messageDb, contactNames, groupMetadata, calls, remoteEdits, attachments, earlyReads, notifier, scope,
+        messageDb, contactNames, groupMetadata, calls, remoteEdits, attachments, earlyReads,
+        messageNotifications, scope,
     )
     private val syncMessages = SyncMessageHandler(
         credentials, protocolStore.identityStore, messageDb, contactResolver, contactNames, groupMetadata,

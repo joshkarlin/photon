@@ -1,12 +1,15 @@
 package app.photon.signal.db
 
 import android.content.ContentValues
+import app.photon.data.db.toMessage
+import app.photon.data.model.Message
 import app.photon.signal.db.SignalMessageDatabase.Companion.CONTENT_CALL
 import app.photon.signal.db.SignalMessageDatabase.Companion.STATUS_DELETED
 import app.photon.signal.db.SignalMessageDatabase.Companion.STATUS_READ
 import app.photon.signal.db.SignalMessageDatabase.Companion.STATUS_SEEN
 import app.photon.signal.db.SignalMessageDatabase.Companion.STATUS_UNREAD
 import app.photon.signal.db.SignalMessageDatabase.ReadSyncResult
+import app.photon.signal.db.SignalMessageDatabase.RemoteDeleteChange
 
 // Read state of incoming rows (received → seen → read, or deleted) and the unread counts it drives.
 
@@ -146,37 +149,64 @@ fun SignalMessageDatabase.markMessagesRead(ids: List<String>) {
  * prefix. Incoming remote-deletes only know author + timestamp, not the
  * "_{rand}" suffix on the stored id, so an exact-id match never hit. Blanks
  * the body/media so the shared UI renders it as "[ deleted ]", matching the
- * WhatsApp revoke behaviour.
+ * WhatsApp revoke behaviour. Returns a change for each conversation that
+ * lost an unread message.
  */
-fun SignalMessageDatabase.markDeletedByPrefix(prefix: String): List<String> {
+fun SignalMessageDatabase.markDeletedByPrefix(prefix: String): List<RemoteDeleteChange> {
     val lowerBound = "${prefix}_"
     val upperBound = "${prefix}_\uFFFF"
     val unreadRemoved = linkedMapOf<String, Int>()
+    val newestRemoved = mutableMapOf<String, Long>()
     val db = writableDatabase
-    val cleared: List<String>
+    val changes: List<RemoteDeleteChange>
     db.beginTransaction()
     try {
         // A deleted message that was still unread must stop counting,
         // or the badge (and its notification) outlive the message.
         db.rawQuery(
-            "SELECT conversation_jid, COUNT(*) FROM messages " +
+            "SELECT conversation_jid, COUNT(*), MAX(rowid) FROM messages " +
                 "WHERE id >= ? AND id < ? AND is_from_me = 0 AND status = ? GROUP BY conversation_jid",
             arrayOf(lowerBound, upperBound, STATUS_UNREAD),
-        ).use { c -> while (c.moveToNext()) unreadRemoved[c.getString(0)] = c.getInt(1) }
+        ).use { c ->
+            while (c.moveToNext()) {
+                unreadRemoved[c.getString(0)] = c.getInt(1)
+                newestRemoved[c.getString(0)] = c.getLong(2)
+            }
+        }
         db.execSQL(
             "UPDATE messages SET text_body = '', content_type = 'text', media_url = NULL, status = ? " +
                 "WHERE id >= ? AND id < ?",
             arrayOf(STATUS_DELETED, lowerBound, upperBound),
         )
         db.execSQL("DELETE FROM reactions WHERE message_id = ?", arrayOf(prefix))
-        cleared = decrementUnread(db, unreadRemoved)
+        decrementUnread(db, unreadRemoved)
+        changes = unreadRemoved.keys.map { jid ->
+            val newer = db.rawQuery(
+                "SELECT 1 FROM messages WHERE conversation_jid = ? AND is_from_me = 0 AND status = ? " +
+                    "AND content_type != ? AND rowid > ? LIMIT 1",
+                arrayOf(jid, STATUS_UNREAD, CONTENT_CALL, newestRemoved.getValue(jid).toString()),
+            ).use { it.moveToFirst() }
+            RemoteDeleteChange(jid, unreadCountOf(db, jid), newer)
+        }
         db.setTransactionSuccessful()
     } finally {
         db.endTransaction()
     }
     notifyChanged()
-    return cleared
+    return changes
 }
+
+/**
+ * The newest unread incoming message in a conversation, the one its message
+ * notification shows. Call rows are left out: missed calls have their own
+ * notification.
+ */
+fun SignalMessageDatabase.newestUnreadMessage(conversationJid: String): Message? =
+    readableDatabase.rawQuery(
+        "SELECT * FROM messages WHERE conversation_jid = ? AND is_from_me = 0 AND status = ? " +
+            "AND content_type != ? ORDER BY rowid DESC LIMIT 1",
+        arrayOf(conversationJid, STATUS_UNREAD, CONTENT_CALL),
+    ).use { if (it.moveToFirst()) it.toMessage() else null }
 
 /**
  * Apply a read sync from another linked device to the matching incoming
