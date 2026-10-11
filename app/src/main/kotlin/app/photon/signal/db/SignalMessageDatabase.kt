@@ -547,14 +547,34 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
      * the body/media so the shared UI renders it as "[ deleted ]", matching the
      * WhatsApp revoke behaviour.
      */
-    fun markDeletedByPrefix(prefix: String) {
-        writableDatabase.execSQL(
-            "UPDATE messages SET text_body = '', content_type = 'text', media_url = NULL, status = 'deleted' " +
-                "WHERE id >= ? AND id < ?",
-            arrayOf("${prefix}_", "${prefix}_￿"),
-        )
-        writableDatabase.execSQL("DELETE FROM reactions WHERE message_id = ?", arrayOf(prefix))
+    fun markDeletedByPrefix(prefix: String): List<String> {
+        val lowerBound = "${prefix}_"
+        val upperBound = "${prefix}_\uFFFF"
+        val unreadRemoved = linkedMapOf<String, Int>()
+        val db = writableDatabase
+        val cleared: List<String>
+        db.beginTransaction()
+        try {
+            // A deleted message that was still unread must stop counting,
+            // or the badge (and its notification) outlive the message.
+            db.rawQuery(
+                "SELECT conversation_jid, COUNT(*) FROM messages " +
+                    "WHERE id >= ? AND id < ? AND is_from_me = 0 AND status = ? GROUP BY conversation_jid",
+                arrayOf(lowerBound, upperBound, STATUS_UNREAD),
+            ).use { c -> while (c.moveToNext()) unreadRemoved[c.getString(0)] = c.getInt(1) }
+            db.execSQL(
+                "UPDATE messages SET text_body = '', content_type = 'text', media_url = NULL, status = ? " +
+                    "WHERE id >= ? AND id < ?",
+                arrayOf(STATUS_DELETED, lowerBound, upperBound),
+            )
+            db.execSQL("DELETE FROM reactions WHERE message_id = ?", arrayOf(prefix))
+            cleared = decrementUnread(db, unreadRemoved)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
         notifyChanged()
+        return cleared
     }
 
     /**
@@ -649,6 +669,15 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                 put("timestamp", timestamp)
             },
             SQLiteDatabase.CONFLICT_REPLACE,
+        )
+        notifyChanged()
+    }
+
+    /** A sender withdrew their reaction (Signal's `remove` flag). */
+    fun removeReaction(messageId: String, senderJid: String) {
+        writableDatabase.execSQL(
+            "DELETE FROM reactions WHERE message_id = ? AND sender_jid = ?",
+            arrayOf(messageId, senderJid),
         )
         notifyChanged()
     }

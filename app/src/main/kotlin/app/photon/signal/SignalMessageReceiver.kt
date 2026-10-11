@@ -796,14 +796,9 @@ class SignalMessageReceiver(
             seedGroupConversation(conversationJid, groupMasterKey, groupRevision)
         }
 
-        // Handle reactions
-        if (data.reaction != null) {
-            val reaction = data.reaction!!
-            val emoji = reaction.emoji ?: return
-            val targetTs = reaction.targetSentTimestamp ?: return
-            val targetAuthor = reaction.targetAuthorAci ?: senderAci
-            // Best-effort match — look for messages with matching sender+timestamp prefix
-            messageDb.upsertReaction("${targetAuthor}_$targetTs", senderAci, emoji, timestamp)
+        // Handle reactions (and reaction removals)
+        data.reaction?.let { reaction ->
+            applyReaction(reaction, senderAci, timestamp)
             return
         }
 
@@ -812,7 +807,7 @@ class SignalMessageReceiver(
         // the delete proto doesn't carry, so an exact-id match never matched.
         if (data.delete != null) {
             val targetTs = data.delete!!.targetSentTimestamp ?: return
-            messageDb.markDeletedByPrefix("${senderAci}_$targetTs")
+            applyRemoteDelete("${senderAci}_$targetTs")
             return
         }
 
@@ -904,6 +899,26 @@ class SignalMessageReceiver(
         Log.d(TAG, "Stored message from $senderAci: ${body?.take(30) ?: contentType}")
     }
 
+    private fun applyReaction(reaction: DataMessage.Reaction, reactorAci: String, timestamp: Long) {
+        when (val update = incomingReactionFor(reaction, fallbackAuthor = reactorAci)) {
+            is IncomingReaction.Set -> messageDb.upsertReaction(update.targetPrefix, reactorAci, update.emoji, timestamp)
+            is IncomingReaction.Remove -> messageDb.removeReaction(update.targetPrefix, reactorAci)
+            null -> Log.d(TAG, "Ignoring reaction without a target or emoji")
+        }
+    }
+
+    /**
+     * Blank a message deleted for everyone. If it was still unread, the
+     * delete also takes it off the unread count; once nothing unread is
+     * left, its notification (which may show the deleted text) goes too.
+     */
+    private fun applyRemoteDelete(targetPrefix: String) {
+        val cleared = messageDb.markDeletedByPrefix(targetPrefix)
+        cleared.forEach { jid ->
+            app.photon.service.NotificationHelper.cancelForConversation(context, jid)
+        }
+    }
+
     private fun processSyncMessage(sync: SyncMessage, metadata: EnvelopeMetadata) {
         // Enumerate every non-null sub-field so we know which kind of sync this is.
         val kinds = buildList {
@@ -953,6 +968,16 @@ class SignalMessageReceiver(
             val data = sent.message!!
             val timestamp = data.timestamp ?: System.currentTimeMillis()
             val myAci = credentials.aciString ?: return
+            // Reactions and deletes-for-everyone the user made on another
+            // device carry no body; apply them to the target and stop.
+            data.reaction?.let { reaction ->
+                applyReaction(reaction, myAci, timestamp)
+                return
+            }
+            data.delete?.targetSentTimestamp?.let { targetTs ->
+                applyRemoteDelete("${myAci}_$targetTs")
+                return
+            }
             // Same (author, timestamp) dedupe as incoming data messages: a sent
             // transcript can be redelivered, and the random suffix would
             // otherwise store a duplicate of our own outgoing message.
@@ -1386,8 +1411,8 @@ class SignalMessageReceiver(
      * hydration can find the original via findMessageByPrefix.
      */
     private fun replyPrefix(quote: DataMessage.Quote?): String? {
-        val author = quote?.authorAci ?: return null
-        val id = quote.id ?: return null
+        val author = serviceIdString(quote?.authorAci, quote?.authorAciBinary) ?: return null
+        val id = quote?.id ?: return null
         return "${author}_$id"
     }
 
