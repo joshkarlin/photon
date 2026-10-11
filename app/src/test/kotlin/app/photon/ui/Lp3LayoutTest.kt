@@ -1,11 +1,7 @@
 package app.photon.ui
 
-import android.content.ComponentName
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import androidx.activity.ComponentActivity
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -13,20 +9,16 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.unit.DpRect
-import androidx.test.core.app.ApplicationProvider
 import app.photon.ui.preview.ChatListSample
 import app.photon.ui.preview.DmThreadSample
 import app.photon.ui.preview.GroupThreadSample
 import app.photon.ui.preview.PreviewSamples
-import app.photon.ui.shared.GroupRowStyle
 import app.photon.ui.theme.PhotonTheme
 import org.junit.Rule
 import org.junit.Test
-import org.junit.rules.ExternalResource
 import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
-import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import kotlin.test.assertTrue
@@ -42,28 +34,15 @@ import kotlin.test.assertTrue
 class Lp3LayoutTest {
     private val rule = createComposeRule()
 
-    // The compose rule hosts content in a bare ComponentActivity. Register it
-    // with Robolectric rather than shipping ui-test-manifest's activity in an
-    // APK, so the test runs against both debug and release variants.
-    private val registerHostActivity = object : ExternalResource() {
-        override fun before() {
-            val app = ApplicationProvider.getApplicationContext<Context>()
-            val host = ComponentName(app, ComponentActivity::class.java)
-            shadowOf(app.packageManager).apply {
-                addActivityIfNotPresent(host)
-                addIntentFilterForActivity(
-                    host,
-                    IntentFilter(Intent.ACTION_MAIN).apply { addCategory(Intent.CATEGORY_LAUNCHER) },
-                )
-            }
-        }
-    }
-
-    @get:Rule val rules: RuleChain = RuleChain.outerRule(registerHostActivity).around(rule)
+    @get:Rule val rules: RuleChain = RuleChain.outerRule(RegisterComposeHostActivity()).around(rule)
 
     private fun DpRect.toRect() = Rect(left.value, top.value, right.value, bottom.value)
 
     private fun bounds(text: String) = rule.onNodeWithText(text).getBoundsInRoot().toRect()
+
+    /** Bounds of the text itself, not the clickable message row it merges into. */
+    private fun textBounds(text: String) =
+        rule.onNodeWithText(text, useUnmergedTree = true).getBoundsInRoot().toRect()
 
     private fun boundsOf(description: String) =
         rule.onNodeWithContentDescription(description).getBoundsInRoot().toRect()
@@ -87,9 +66,21 @@ class Lp3LayoutTest {
 
     @Test
     fun groupThreadShowsCallsAndFailures() {
-        rule.setContent { PhotonTheme { GroupThreadSample(GroupRowStyle.COLUMN) } }
+        rule.setContent { PhotonTheme { GroupThreadSample() } }
         rule.onNodeWithText("failed · tap to retry").assertIsDisplayed()
         rule.onNodeWithText("Missed group video call", substring = true).assertIsDisplayed()
-        rule.onAllNodesWithText("You")[0].assertIsDisplayed()
+    }
+
+    @Test
+    fun groupThreadNamesIncomingBurstsOnly() {
+        rule.setContent { PhotonTheme { GroupThreadSample() } }
+        // LP2 style: "Name  12:36" above each incoming burst, nothing above
+        // your own, and no sender column.
+        rule.onAllNodesWithText("Bob")[0].assertIsDisplayed()
+        rule.onAllNodesWithText("You").assertCountEquals(0)
+        val name = textBounds("Maximilian Featherstonehaugh")
+        val body = textBounds("I can take three in the van, leaving at 9")
+        assertTrue(name.bottom <= body.top, "name $name should sit above body $body")
+        assertTrue(body.left <= name.left, "body $body should start under name $name, not beside it")
     }
 }

@@ -59,9 +59,6 @@ object PhotonGrid {
 
     /** Space between messages within a burst. */
     const val IN_BURST_GAP = 0.25f
-
-    /** Width of the sender column in group chats. */
-    const val NAME_COLUMN = 5f
 }
 
 /**

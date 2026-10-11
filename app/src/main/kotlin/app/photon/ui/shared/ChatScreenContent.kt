@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.clearText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -19,21 +21,28 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.style.TextOverflow
+import app.photon.data.ComposeStyle
+import app.photon.data.PhotonPreferences
 import app.photon.data.model.Message
 import app.photon.ui.shared.components.CallRow
-import app.photon.ui.shared.components.CleanMessageRow
+import app.photon.ui.shared.components.ComposeEditor
 import app.photon.ui.shared.components.MessageActions
 import app.photon.ui.shared.components.MessageInputBar
+import app.photon.ui.shared.components.MessageRow
 import app.photon.ui.shared.components.SwipeToReply
-import app.photon.ui.shared.components.TranscriptMessageRow
+import app.photon.ui.shared.components.ThreadBottomBar
 import app.photon.ui.shared.components.backButton
 import app.photon.ui.shared.components.isCall
 import app.photon.ui.shared.components.quoteLabel
+import app.photon.ui.shared.components.rememberMediaInput
 import app.photon.ui.shared.components.senderLabel
 import app.photon.ui.shared.components.startsBurst
 import app.photon.ui.theme.PhotonGrid
@@ -51,9 +60,17 @@ import kotlinx.coroutines.launch
 
 /**
  * Shared chat screen used by WhatsApp, Signal, and SMS.
- * Handles the top bar, message list, row layout, and input bar. DMs use the
- * LP3 thread layout ([CleanMessageRow]); groups use the sender-column layout
- * ([TranscriptMessageRow]).
+ * Handles the top bar, message list and input. Messages are laid out as in
+ * the LP3 thread ([MessageRow]); groups add the sender above each incoming
+ * burst, as the LP2 group thread does.
+ *
+ * The input follows Settings › Chat › Compose: an inline bar under the
+ * thread, or (FULL SCREEN) a LightOS bottom bar whose compose action opens a
+ * full-screen editor with the LP3 keyboard.
+ *
+ * @param conversationKey identifies the chat (its JID or address), so
+ *   per-chat state such as the compose draft can't carry over to another
+ *   chat shown in the same place
  */
 @Composable
 fun ChatScreenContent(
@@ -73,8 +90,13 @@ fun ChatScreenContent(
     onTitleClick: (() -> Unit)? = null,
     supportsReply: Boolean = true,
     headerContent: (@Composable () -> Unit)? = null,
+    conversationKey: String? = null,
 ) {
     val messages by messagesFlow.collectAsState(initial = emptyList())
+    val context = LocalContext.current
+    // Null until the setting loads, so neither input style flashes first.
+    val composeStyle by remember(context) { PhotonPreferences(context).composeStyle }
+        .collectAsState(initial = null)
     ChatThread(
         title = title,
         messages = messages,
@@ -92,16 +114,9 @@ fun ChatScreenContent(
         onTitleClick = onTitleClick,
         supportsReply = supportsReply,
         headerContent = headerContent,
+        composeStyle = composeStyle,
+        conversationKey = conversationKey,
     )
-}
-
-/** How group messages are laid out. Only [COLUMN] ships; [LP2] exists for design previews. */
-internal enum class GroupRowStyle {
-    /** Sender column beside each message ([TranscriptMessageRow]). */
-    COLUMN,
-
-    /** LP2 group thread: "Name  12:36" above each incoming burst ([CleanMessageRow]). */
-    LP2,
 }
 
 @Composable
@@ -122,13 +137,62 @@ internal fun ChatThread(
     onTitleClick: (() -> Unit)?,
     supportsReply: Boolean,
     headerContent: (@Composable () -> Unit)?,
-    groupRowStyle: GroupRowStyle = GroupRowStyle.COLUMN,
+    composeStyle: ComposeStyle? = ComposeStyle.INLINE,
+    conversationKey: String? = null,
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    // LightOS has no navigation bar to put the keyboard away, so tapping the
+    // thread or turning the dial does it.
+    val dismissKeyboard = remember(focusManager, keyboardController) {
+        {
+            focusManager.clearFocus()
+            keyboardController?.hide()
+            Unit
+        }
+    }
     val listState = rememberLazyListState()
     val scrollScope = rememberCoroutineScope()
     var actionsFor by remember { mutableStateOf<Message?>(null) }
     var replyingTo by remember { mutableStateOf<Message?>(null) }
+
+    // FULL SCREEN: compose is an overlay over the thread. The draft lives
+    // here, per conversation, so Back from the editor keeps it.
+    val fullScreen = composeStyle == ComposeStyle.FULL_SCREEN
+    val draft = rememberSaveable(conversationKey, saver = TextFieldState.Saver) { TextFieldState() }
+    var composing by rememberSaveable(conversationKey) { mutableStateOf(false) }
+    val editorOpen = fullScreen && composing
+    val openCompose = {
+        dismissKeyboard()
+        composing = true
+    }
+
+    // Every send path consumes and clears the active reply target.
+    val media = rememberMediaInput(
+        onSendAudio = onSendAudio?.let { handler ->
+            { path ->
+                handler(path, replyingTo?.id)
+                replyingTo = null
+            }
+        },
+        onSendMedia = onSendMedia?.let { handler ->
+            { path, mime ->
+                handler(path, mime, replyingTo?.id)
+                replyingTo = null
+            }
+        },
+    )
+    val sendText = { text: String ->
+        onSendText(text, replyingTo?.id)
+        replyingTo = null
+    }
+    // In a DM the title already names the other party.
+    fun replyLabel(target: Message) = quoteLabel(
+        quoted = target,
+        quotedSenderName = participantNames[target.senderJid],
+        jidFallbackChars = 10,
+        nameOtherSender = isGroup,
+    )
 
     // Notify caller when messages load (e.g., for mark-as-read)
     LaunchedEffect(messages) {
@@ -146,7 +210,7 @@ internal fun ChatThread(
         }
     }
 
-    ChatScrollDialEffect(listState)
+    ChatScrollDialEffect(listState, enabled = !editorOpen, onTurn = dismissKeyboard)
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -167,7 +231,8 @@ internal fun ChatThread(
             LazyColumn(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth(),
+                    .fillMaxWidth()
+                    .observeTaps(dismissKeyboard),
                 state = listState,
                 reverseLayout = true,
                 contentPadding = PaddingValues(
@@ -184,15 +249,14 @@ internal fun ChatThread(
                             msg = msg,
                             startsBurst = burstStart,
                             isGroup = isGroup,
-                            groupRowStyle = groupRowStyle,
                             title = title,
                             participantNames = participantNames,
                             supportsReply = supportsReply,
-                            onReply = { replyingTo = msg },
-                            onMediaTap = {
-                                keyboardController?.hide()
-                                onMediaTap?.invoke(msg)
+                            onReply = {
+                                replyingTo = msg
+                                if (fullScreen) openCompose()
                             },
+                            onMediaTap = { onMediaTap?.invoke(msg) },
                             onLongPress = { actionsFor = msg },
                             onReplyPreviewTap = msg.replyToPreview?.let { quoted ->
                                 {
@@ -210,35 +274,14 @@ internal fun ChatThread(
 
             // Reply chip (above input) — shown when the user has picked a message to reply to.
             replyingTo?.let { target ->
-                ReplyChip(
-                    label = quoteLabel(
-                        quoted = target,
-                        quotedSenderName = participantNames[target.senderJid],
-                        jidFallbackChars = 10,
-                    ),
-                    onCancel = { replyingTo = null },
-                )
+                ReplyChip(label = replyLabel(target), onCancel = { replyingTo = null })
             }
 
-            // Input bar. All three send paths consume and clear the active reply target.
-            MessageInputBar(
-                onSendText = { text ->
-                    onSendText(text, replyingTo?.id)
-                    replyingTo = null
-                },
-                onSendAudio = onSendAudio?.let { handler ->
-                    { path ->
-                        handler(path, replyingTo?.id)
-                        replyingTo = null
-                    }
-                },
-                onSendMedia = onSendMedia?.let { handler ->
-                    { path, mime ->
-                        handler(path, mime, replyingTo?.id)
-                        replyingTo = null
-                    }
-                },
-            )
+            when (composeStyle) {
+                ComposeStyle.INLINE -> MessageInputBar(onSendText = sendText, media = media)
+                ComposeStyle.FULL_SCREEN -> ThreadBottomBar(media = media, onCompose = openCompose)
+                null -> Unit
+            }
         }
 
         // Message actions (react + delete), shown on long-press.
@@ -259,6 +302,20 @@ internal fun ChatThread(
                 onDismiss = { actionsFor = null },
             )
         }
+
+        if (editorOpen) {
+            ComposeEditor(
+                title = title,
+                draft = draft,
+                replyLabel = replyingTo?.let(::replyLabel),
+                onSend = { text ->
+                    sendText(text)
+                    draft.clearText()
+                    composing = false
+                },
+                onBack = { composing = false },
+            )
+        }
     }
 }
 
@@ -267,7 +324,6 @@ private fun MessageItem(
     msg: Message,
     startsBurst: Boolean,
     isGroup: Boolean,
-    groupRowStyle: GroupRowStyle,
     title: String,
     participantNames: Map<String, String>,
     supportsReply: Boolean,
@@ -291,24 +347,14 @@ private fun MessageItem(
         }
     }
     SwipeToReply(enabled = supportsReply, onReply = onReply) {
-        if (isGroup && groupRowStyle == GroupRowStyle.COLUMN) {
-            TranscriptMessageRow(
-                msg = msg, startsBurst = startsBurst, senderName = senderName,
-                onMediaTap = onMediaTap, onLongPress = onLongPress,
-                quotedSenderName = quotedSenderName,
-                onReplyPreviewTap = onReplyPreviewTap,
-                onRetry = onRetry,
-            )
-        } else {
-            CleanMessageRow(
-                msg = msg, startsBurst = startsBurst,
-                onMediaTap = onMediaTap, onLongPress = onLongPress,
-                senderName = if (isGroup) senderLabel(msg, senderName) else null,
-                quotedSenderName = quotedSenderName,
-                onReplyPreviewTap = onReplyPreviewTap,
-                onRetry = onRetry,
-            )
-        }
+        MessageRow(
+            msg = msg, startsBurst = startsBurst,
+            onMediaTap = onMediaTap, onLongPress = onLongPress,
+            senderName = if (isGroup) senderLabel(msg, senderName) else null,
+            quotedSenderName = quotedSenderName,
+            onReplyPreviewTap = onReplyPreviewTap,
+            onRetry = onRetry,
+        )
     }
 }
 

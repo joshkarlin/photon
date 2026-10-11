@@ -106,7 +106,21 @@ kotlin {
 dependencies {
     // Light SDK UI (LightTheme, LightText, LightTopBar, ...), substituted with
     // the third_party/light-sdk submodule's :sdk:ui project in settings.gradle.kts.
-    implementation("com.thelightphone:sdk-ui:0.2.0")
+    // sdk-ui pulls in CameraX and ML Kit barcode scanning for its
+    // LightQrCodeScanner. Photon never scans (it only draws QR codes, with
+    // zxing in QrUtils), so drop them along with the Play services, Firebase
+    // and Google data-transport (usage reporting) libraries that only ML Kit
+    // brings in: that removes MlKitInitProvider, the transport services and
+    // ~4.7 MB of libbarhopper_v3.so. Never call LightQrCodeScanner. The
+    // excludes apply through the composite-build substitution.
+    implementation("com.thelightphone:sdk-ui:0.2.0") {
+        exclude(group = "com.google.mlkit")
+        exclude(group = "androidx.camera")
+        exclude(group = "com.google.android.gms")
+        exclude(group = "com.google.android.datatransport")
+        exclude(group = "com.google.firebase")
+        exclude(group = "com.google.android.odml")
+    }
 
     // Versions track the Light SDK's catalog where both use a library.
     val composeBom = platform("androidx.compose:compose-bom:2026.03.01")

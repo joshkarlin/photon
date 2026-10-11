@@ -5,8 +5,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -118,20 +116,25 @@ private fun formatReactions(msg: Message): String =
 
 /**
  * One-line "↳ who: preview" label for a quoted/replied-to message. Shared by
- * the per-message reply quote lines and the reply chip above the input bar.
+ * the per-message reply quote lines, the reply chip above the input and the
+ * full-screen editor.
  *
  * @param quotedSenderName human-readable name for the quoted sender (ignored
  *   for self-messages, which always show "You")
  * @param jidFallbackChars how many leading JID characters to show when no
  *   name is known
+ * @param nameOtherSender false leaves out who sent a message that isn't
+ *   yours ("↳ preview"), for a DM where the title already says it
  */
 fun quoteLabel(
     quoted: Message,
     quotedSenderName: String?,
     jidFallbackChars: Int = 8,
+    nameOtherSender: Boolean = true,
 ): String {
     val who = when {
         quoted.isFromMe -> "You"
+        !nameOtherSender -> null
         !quotedSenderName.isNullOrBlank() -> quotedSenderName
         else -> quoted.senderJid.substringBefore("@").take(jidFallbackChars)
     }
@@ -139,7 +142,7 @@ fun quoteLabel(
         !quoted.textBody.isNullOrBlank() -> quoted.textBody.replace('\n', ' ')
         else -> "[ ${quoted.contentType} ]"
     }.take(60)
-    return "↳ $who: $preview"
+    return if (who == null) "↳ $preview" else "↳ $who: $preview"
 }
 
 /**
@@ -283,16 +286,16 @@ fun CallRow(msg: Message, onLongPress: () -> Unit = {}) {
 }
 
 /**
- * DM layout (the LP3 thread): no bubbles; received messages on the left, sent
- * on the right. The first message of a burst carries its timestamp above it;
- * tapping any other message reveals its timestamp in the same place (and
- * delivery status below).
+ * One message in the thread, laid out like the LP3 thread: no bubbles;
+ * received messages on the left, sent on the right. The first message of a
+ * burst carries its timestamp above it; tapping any other message reveals its
+ * timestamp in the same place (and delivery status below).
  *
- * Passing [senderName] puts it before the timestamp on incoming messages —
- * the LP2 group-thread style ("Name  12:36" above each burst).
+ * Groups pass [senderName], which puts the sender before the timestamp on
+ * incoming bursts, as the LP2 group thread does ("Name  12:36"). DMs pass null.
  */
 @Composable
-fun CleanMessageRow(
+fun MessageRow(
     msg: Message,
     startsBurst: Boolean,
     onMediaTap: () -> Unit,
@@ -335,49 +338,5 @@ fun CleanMessageRow(
             modifier = Modifier.widthIn(max = PhotonGrid.MESSAGE_MAX_WIDTH.gridUnitsAsDp()),
         )
         MessageMeta(msg, revealed = revealed, onRetry = onRetry)
-    }
-}
-
-/**
- * Group layout: a narrow sender column (name and time, shown when the sender
- * changes; "You" for sent messages) beside the message. Tapping a message
- * reveals its time in the column.
- */
-@Composable
-fun TranscriptMessageRow(
-    msg: Message,
-    startsBurst: Boolean,
-    senderName: String?,
-    onMediaTap: () -> Unit,
-    onLongPress: () -> Unit = {},
-    quotedSenderName: String? = null,
-    onReplyPreviewTap: (() -> Unit)? = null,
-    onRetry: (() -> Unit)? = null,
-) {
-    var revealed by remember { mutableStateOf(false) }
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .lightCombinedClickable(
-                onClick = { if (isMedia(msg)) onMediaTap() else revealed = !revealed },
-                onLongClick = onLongPress,
-            ),
-    ) {
-        Column(
-            modifier = Modifier
-                .width(PhotonGrid.NAME_COLUMN.gridUnitsAsDp())
-                .padding(end = 0.5f.gridUnitsAsDp()),
-        ) {
-            if (startsBurst) SenderLabel(senderLabel(msg, senderName))
-            if (startsBurst || revealed) MessageTimestamp(msg, lighten = true)
-        }
-        Column(modifier = Modifier.weight(1f)) {
-            msg.replyToPreview?.let { quoted ->
-                ReplyQuoteLine(quoted = quoted, quotedSenderName = quotedSenderName, onClick = onReplyPreviewTap)
-            }
-            MessageBody(msg)
-            MessageMeta(msg, revealed = revealed, onRetry = onRetry)
-        }
     }
 }

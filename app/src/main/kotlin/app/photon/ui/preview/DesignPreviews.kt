@@ -1,28 +1,23 @@
 package app.photon.ui.preview
 
-import android.content.res.Configuration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.dp
 import app.photon.R
+import app.photon.data.ComposeStyle
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
 import app.photon.data.model.Platform
 import app.photon.data.model.Reaction
 import app.photon.ui.shared.ChatListLayout
 import app.photon.ui.shared.ChatThread
-import app.photon.ui.shared.GroupRowStyle
+import app.photon.ui.shared.components.ComposeEditor
+import app.photon.ui.shared.components.quoteLabel
 import app.photon.ui.theme.PhotonTheme
 import com.thelightphone.sdk.ui.LightThemeTokens
 
@@ -143,21 +138,6 @@ private fun PhotonPreview(content: @Composable () -> Unit) {
     }
 }
 
-/**
- * Pins the LP3 screen size for one pane of a multi-pane preview, since the
- * SDK's grid and type scale derive from the configuration's screen size.
- */
-@Composable
-private fun Lp3Frame(content: @Composable () -> Unit) {
-    val configuration = Configuration(LocalConfiguration.current).apply {
-        screenWidthDp = LP3_WIDTH_DP
-        screenHeightDp = LP3_HEIGHT_DP
-    }
-    CompositionLocalProvider(LocalConfiguration provides configuration) {
-        Box(Modifier.size(LP3_WIDTH_DP.dp, LP3_HEIGHT_DP.dp)) { content() }
-    }
-}
-
 @Composable
 internal fun ChatListSample() {
     ChatListLayout(
@@ -184,7 +164,7 @@ internal fun ChatThreadSample(
     messages: List<Message>,
     isGroup: Boolean,
     participantNames: Map<String, String> = emptyMap(),
-    groupRowStyle: GroupRowStyle = GroupRowStyle.COLUMN,
+    composeStyle: ComposeStyle = ComposeStyle.INLINE,
 ) {
     ChatThread(
         title = title,
@@ -203,23 +183,35 @@ internal fun ChatThreadSample(
         onTitleClick = {},
         supportsReply = true,
         headerContent = null,
-        groupRowStyle = groupRowStyle,
+        composeStyle = composeStyle,
     )
 }
 
 @Composable
-internal fun DmThreadSample() {
-    ChatThreadSample(PreviewSamples.LONG_DM_TITLE, PreviewSamples.dmMessages, isGroup = false)
+internal fun DmThreadSample(composeStyle: ComposeStyle = ComposeStyle.INLINE) {
+    ChatThreadSample(PreviewSamples.LONG_DM_TITLE, PreviewSamples.dmMessages, isGroup = false, composeStyle = composeStyle)
+}
+
+/** FULL SCREEN compose, replying to a message, with a draft under way. */
+@Composable
+internal fun ComposeEditorSample() {
+    val quoted = PreviewSamples.dmMessages.first { it.id == "d8" }
+    ComposeEditor(
+        title = PreviewSamples.LONG_DM_TITLE,
+        draft = rememberTextFieldState("No problem, see you soon"),
+        replyLabel = quoteLabel(quoted, quotedSenderName = null, nameOtherSender = false),
+        onSend = {},
+        onBack = {},
+    )
 }
 
 @Composable
-internal fun GroupThreadSample(style: GroupRowStyle = GroupRowStyle.COLUMN) {
+internal fun GroupThreadSample() {
     ChatThreadSample(
         title = PreviewSamples.LONG_GROUP_TITLE,
         messages = PreviewSamples.groupMessages,
         isGroup = true,
         participantNames = PreviewSamples.groupNames,
-        groupRowStyle = style,
     )
 }
 
@@ -237,20 +229,14 @@ private fun EmptyChatListPreview() = PhotonPreview {
 @Composable
 private fun DmChatPreview() = PhotonPreview { DmThreadSample() }
 
-@Preview(name = "Group – sender column (shipped)", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
+@Preview(name = "DM – full-screen compose", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
 @Composable
-private fun GroupChatPreview() = PhotonPreview { GroupThreadSample(GroupRowStyle.COLUMN) }
+private fun DmFullScreenPreview() = PhotonPreview { DmThreadSample(ComposeStyle.FULL_SCREEN) }
 
-@Preview(name = "Group – LP2 style (alternative)", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
+@Preview(name = "Compose (full screen)", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
 @Composable
-private fun GroupChatLp2Preview() = PhotonPreview { GroupThreadSample(GroupRowStyle.LP2) }
+private fun ComposeEditorPreview() = PhotonPreview { ComposeEditorSample() }
 
-@Preview(name = "Group – column vs LP2", widthDp = 2 * LP3_WIDTH_DP + 8, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF333333)
+@Preview(name = "Group", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
 @Composable
-private fun GroupStylesSideBySidePreview() = PhotonTheme {
-    Row {
-        Lp3Frame { PhotonPreview { GroupThreadSample(GroupRowStyle.COLUMN) } }
-        Spacer(Modifier.width(8.dp))
-        Lp3Frame { PhotonPreview { GroupThreadSample(GroupRowStyle.LP2) } }
-    }
-}
+private fun GroupChatPreview() = PhotonPreview { GroupThreadSample() }
