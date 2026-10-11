@@ -14,6 +14,7 @@ import app.photon.signal.db.findCallRowId
 import app.photon.signal.db.getCallRowsWithText
 import app.photon.signal.db.getMessage
 import app.photon.signal.db.insertIncomingMessage
+import app.photon.signal.db.isConversationMuted
 import app.photon.signal.db.markCallRowsRead
 import app.photon.signal.db.updateContactPhone
 import app.photon.signal.db.upsertCallRow
@@ -52,7 +53,8 @@ internal class CallHandler(
      * 1:1 call signalling. Photon can't take part in the call (no RingRTC),
      * so it only reports it: an offer rings via a notification and records
      * an "Incoming … call" row; hangups/busy turn that into missed, answered
-     * elsewhere or declined. Answer, ICE and opaque (group ring) messages
+     * elsewhere or declined. A muted chat still rings and shows missed
+     * calls, as on WhatsApp. Answer, ICE and opaque (group ring) messages
      * are WebRTC plumbing and are ignored.
      */
     fun processCallMessage(
@@ -279,7 +281,8 @@ internal class CallHandler(
 
     /**
      * Someone started (or joined) a group call. One row per call era, however
-     * many members announce it; notifies like a message, never rings.
+     * many members announce it; notifies like a message (so not in a muted
+     * group), never rings.
      */
     fun recordGroupCall(
         groupJid: String,
@@ -299,6 +302,7 @@ internal class CallHandler(
             dedupePrefix = null,
         )
         if (!inserted) return
+        if (messageDb.isConversationMuted(groupJid, clock() / 1000)) return
         notifier.showMessage(
             names.title(groupJid, isGroup = true),
             "${names.person(senderAci)} started a group call",
