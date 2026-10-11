@@ -217,18 +217,11 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 		return
 	}
 
-	// Check for edit
-	if evt.IsEdit {
-		editedID := getEditTargetID(msg)
-		if editedID != "" {
-			_, newText := classifyMessage(msg)
-			b.UpdateMessageEdit(editedID, newText, 1) // simplified: just set version to 1
-			b.BroadcastEvent("message_updated", MessageUpdatedEvent{
-				ConversationJID: chatJID,
-				MessageID:       editedID,
-			})
-			return
-		}
+	// Edits arrive as a MESSAGE_EDIT protocol message (UnwrapRaw strips the
+	// EditedMessage wrapper when there is one, leaving this underneath).
+	if targetID, edited := editTarget(msg); targetID != "" {
+		b.applyEdit(chatJID, targetID, edited)
+		return
 	}
 
 	// Skip empty messages (e.g., sender key distribution in groups)
@@ -1093,13 +1086,35 @@ func getInlineThumbnail(msg *waE2E.Message) []byte {
 	return nil
 }
 
-func getEditTargetID(msg *waE2E.Message) string {
-	if edit := msg.GetProtocolMessage(); edit != nil {
-		if edit.GetKey() != nil {
-			return edit.GetKey().GetID()
-		}
+// editTarget returns the ID of the message an edit replaces and the new
+// content, or "" when msg isn't an edit. The new content is the protocol
+// message's EditedMessage — classifying the wrapper itself yields nothing,
+// which used to blank every edited message.
+func editTarget(msg *waE2E.Message) (targetID string, edited *waE2E.Message) {
+	pm := msg.GetProtocolMessage()
+	if pm == nil || pm.GetType() != waE2E.ProtocolMessage_MESSAGE_EDIT {
+		return "", nil
 	}
-	return ""
+	return pm.GetKey().GetID(), pm.GetEditedMessage()
+}
+
+// applyEdit replaces a stored message's text with its edited version. An edit
+// whose new text can't be extracted is ignored rather than blanking the row.
+func (b *Bridge) applyEdit(chatJID, targetID string, edited *waE2E.Message) {
+	_, newText := classifyMessage(edited)
+	if newText == "" {
+		b.log.Warnf("Ignoring edit of %s in %s: no text in edited content", targetID, chatJID)
+		return
+	}
+	newText = b.resolveMentions(edited, chatJID, newText)
+	if err := b.UpdateMessageEdit(targetID, newText); err != nil {
+		b.log.Errorf("Failed to apply edit of %s: %v", targetID, err)
+		return
+	}
+	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
+		ConversationJID: chatJID,
+		MessageID:       targetID,
+	})
 }
 
 func (b *Bridge) buildTextMessage(text string, replyToID string) *waE2E.Message {

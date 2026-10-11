@@ -112,3 +112,70 @@ func TestHandleMessage_revokeRemovesDownloadedMedia(t *testing.T) {
 		t.Errorf("content_type = %q, want text so it renders as [ deleted ]", ct)
 	}
 }
+
+func editProtocol(targetID string, edited *waE2E.Message) *waE2E.Message {
+	return &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{
+		Type:          waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(),
+		Key:           &waCommon.MessageKey{ID: proto.String(targetID)},
+		EditedMessage: edited,
+	}}
+}
+
+func TestHandleMessage_editReplacesText(t *testing.T) {
+	alice := types.NewJID("447700900001", types.DefaultUserServer)
+	cases := []struct {
+		name string
+		evt  *events.Message
+	}{
+		{
+			// What UnwrapRaw leaves after stripping an EditedMessage wrapper.
+			"unwrapped EditedMessage",
+			func() *events.Message {
+				e := messageEvent(alice, alice, "e1", 101, editProtocol("m1", &waE2E.Message{Conversation: proto.String("fixed typo")}))
+				e.IsEdit = true
+				return e
+			}(),
+		},
+		{
+			"bare MESSAGE_EDIT protocol message",
+			messageEvent(alice, alice, "e1", 101, editProtocol("m1", &waE2E.Message{
+				ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String("fixed typo")},
+			})),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newClientBridge(t)
+			events := captureEvents(b)
+			b.handleMessage(textEvent(alice, alice, "m1", "fixed tpyo", 100))
+			b.handleMessage(tc.evt)
+
+			if got := textBody(t, b, "m1"); got != "fixed typo" {
+				t.Errorf("text = %q, want the edited text", got)
+			}
+			if v := rowCount(t, b, `SELECT edit_version FROM messages WHERE id = 'm1'`); v != 1 {
+				t.Errorf("edit_version = %d, want 1", v)
+			}
+			if n := rowCount(t, b, `SELECT COUNT(*) FROM messages`); n != 1 {
+				t.Errorf("messages = %d, want 1 (the edit is not a new message)", n)
+			}
+			if got := unreadCount(t, b, alice.String()); got != 1 {
+				t.Errorf("unread = %d, want 1 (an edit is not a new unread message)", got)
+			}
+			if len(events.ofType("message_updated")) != 1 {
+				t.Errorf("edit did not broadcast message_updated")
+			}
+		})
+	}
+}
+
+func TestHandleMessage_unreadableEditKeepsText(t *testing.T) {
+	b := newClientBridge(t)
+	alice := types.NewJID("447700900001", types.DefaultUserServer)
+	b.handleMessage(textEvent(alice, alice, "m1", "original", 100))
+	b.handleMessage(messageEvent(alice, alice, "e1", 101, editProtocol("m1", nil)))
+
+	if got := textBody(t, b, "m1"); got != "original" {
+		t.Errorf("text = %q, an edit with no content must not blank the message", got)
+	}
+}

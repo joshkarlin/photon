@@ -406,9 +406,10 @@ func (b *Bridge) UpdateMessageStatusAndTimestamp(id, status string, ts int64) er
 	return err
 }
 
-// UpdateMessageEdit updates a message's text after an edit.
-func (b *Bridge) UpdateMessageEdit(id, newText string, editVersion int) error {
-	_, err := b.msgDB.Exec(`UPDATE messages SET text_body = ?, edit_version = ? WHERE id = ?`, newText, editVersion, id)
+// UpdateMessageEdit replaces a message's text (the caption, for media) after
+// an edit and bumps its edit version. Deleted messages stay deleted.
+func (b *Bridge) UpdateMessageEdit(id, newText string) error {
+	_, err := b.msgDB.Exec(`UPDATE messages SET text_body = ?, edit_version = edit_version + 1 WHERE id = ? AND status <> 'deleted'`, newText, id)
 	return err
 }
 
