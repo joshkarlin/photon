@@ -55,7 +55,7 @@ internal class StorageMuteSync(
     private val keysRequestDelayMs: Long = KEYS_REQUEST_DELAY_MS,
 ) {
     /** What one read did, for logs and tests. */
-    enum class Outcome { NO_KEY, DISCONNECTED, UP_TO_DATE, NO_MANIFEST, BAD_KEY, FAILED, UPDATED }
+    enum class Outcome { NO_KEY, DISCONNECTED, UP_TO_DATE, NO_MANIFEST, BAD_KEY, FAILED, KEY_CHANGED, UPDATED }
 
     private val running = AtomicBoolean(false)
     private val pending = AtomicBoolean(false)
@@ -163,16 +163,16 @@ internal class StorageMuteSync(
             }
         }
 
-        val mutes = records.map { record ->
-            storageMuteOf(record, ::contactJid, groupJid).also { mute ->
-                record.proto.contact?.let { rememberPhoneOfUnresolved(mute, it) }
-            }
-        }
-        messageDb.applyStorageManifest(manifest.version, removed, mutes)
+        val mutes = records.map { record -> record to storageMuteOf(record, ::contactJid, groupJid) }
+        // The account was reset (or re-keyed) while this read was on the
+        // network: what it read belongs to the old key.
+        if (!keyBytes.contentEquals(credentials.storageKey)) return Outcome.KEY_CHANGED
+        for ((record, mute) in mutes) record.proto.contact?.let { rememberPhoneOfUnresolved(mute, it) }
+        messageDb.applyStorageManifest(manifest.version, removed, mutes.map { it.second })
         Log.i(
             TAG,
             "Storage manifest v${manifest.version}: read ${records.size} chat records, " +
-                "${removed.size} gone, ${mutes.count { it.mutedUntil != 0L }} of the new ones muted",
+                "${removed.size} gone, ${mutes.count { it.second.mutedUntil != 0L }} of the new ones muted",
         )
         return Outcome.UPDATED
     }

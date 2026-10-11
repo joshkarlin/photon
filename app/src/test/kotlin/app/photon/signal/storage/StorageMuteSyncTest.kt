@@ -315,6 +315,20 @@ class StorageMuteSyncTest {
         assertEquals(1, keyRequests)
     }
 
+    /** A Signal reset while a read is on the network: it mustn't write the old account's mutes. */
+    @Test
+    fun aReadOverlappingAResetStoresNothing() {
+        giveKey()
+        storage.publish(1, contact(ContactRecord(aci = alice, mutedUntilTimestamp = forever)))
+        storage.onManifest = { fx.protocolDb.deleteAll() }
+
+        assertEquals(StorageMuteSync.Outcome.KEY_CHANGED, sync.read())
+
+        assertNull(fx.db.storageManifestVersion())
+        assertEquals(emptySet(), fx.db.storageRecordIds())
+        assertEquals(false, muted(alice))
+    }
+
     @Test
     fun disconnectedReadsNothing() {
         giveKey()
