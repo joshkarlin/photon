@@ -194,15 +194,13 @@ func (b *Bridge) historyChatName(conv *waHistorySync.Conversation, jid, rawJID s
 		return name
 	}
 	name.rank = rankPush
-	var contact types.ContactInfo
-	if parsed, err := types.ParseJID(jid); err == nil {
-		raw, err := types.ParseJID(rawJID)
-		if err != nil {
-			raw = parsed
+	var forms []types.JID
+	for _, j := range []string{jid, rawJID} {
+		if parsed, err := types.ParseJID(j); err == nil {
+			forms = append(forms, parsed)
 		}
-		contact = b.lookupContact(parsed, raw)
 	}
-	if best := personName(contact, "", ""); best.rank > rankPush {
+	if best := personName(b.lookupContact(forms...), "", ""); best.rank > rankPush {
 		name = best
 	} else if name.name == "" {
 		name = best

@@ -288,3 +288,54 @@ func TestHistorySync_namesNewChats(t *testing.T) {
 		}
 	}
 }
+
+// whatsmeow keys an address-book entry by its app-state index, which may be
+// the LID: a chat keyed by the number still finds it, and the other way
+// round, even when the other form holds an entry of its own.
+func TestLookupContact_readsPhoneAndLIDForms(t *testing.T) {
+	ctx := context.Background()
+	pn := types.NewJID("447700900001", types.DefaultUserServer)
+	lid := types.NewJID("11223344", types.HiddenUserServer)
+
+	t.Run("address book under the LID, push name under the number", func(t *testing.T) {
+		b := newClientBridge(t)
+		b.client.Store.LIDs.PutLIDMapping(ctx, lid, pn)
+		b.client.Store.Contacts.PutPushName(ctx, pn, "ally")
+		b.client.Store.Contacts.PutContactName(ctx, lid, "Alice", "Alice Smith")
+
+		for _, form := range []types.JID{pn, lid} {
+			if got := personName(b.lookupContact(form), "", ""); got != (rankedName{name: "Alice Smith", rank: rankContact}) {
+				t.Errorf("from %s: %+v, want the address-book name", form, got)
+			}
+		}
+
+		live := textEvent(pn, pn, "m1", "hi", 100)
+		live.Info.PushName = "ally"
+		b.handleMessage(live)
+		if got := conversationRank(t, b, pn.String()); got != (rankedName{name: "Alice Smith", rank: rankContact}) {
+			t.Errorf("chat = %+v, want the address-book name", got)
+		}
+	})
+
+	t.Run("address book under the number for a LID-keyed lookup", func(t *testing.T) {
+		b := newClientBridge(t)
+		b.client.Store.LIDs.PutLIDMapping(ctx, lid, pn)
+		b.client.Store.Contacts.PutContactName(ctx, pn, "Alice", "Alice Smith")
+		if got := personName(b.lookupContact(lid), "", ""); got.name != "Alice Smith" {
+			t.Errorf("from the LID: %+v", got)
+		}
+	})
+
+	t.Run("the reconcile upgrades a chat named before the entry was found", func(t *testing.T) {
+		b := newClientBridge(t)
+		b.client.Store.LIDs.PutLIDMapping(ctx, lid, pn)
+		b.UpsertConversation(pn.String(), named("ally"), "m1", 100)
+		b.client.Store.Contacts.PutContactName(ctx, lid, "Alice", "Alice Smith")
+
+		b.BackfillContactNames()
+
+		if got := conversationRank(t, b, pn.String()); got != (rankedName{name: "Alice Smith", rank: rankContact}) {
+			t.Errorf("chat = %+v, want the address-book name", got)
+		}
+	})
+}

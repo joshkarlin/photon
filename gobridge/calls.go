@@ -186,7 +186,7 @@ func (b *Bridge) callChatName(chat, caller types.JID) rankedName {
 		}
 		return rankedName{name: cleanName(b.groupName(chat)), rank: rankSubject}
 	}
-	return better(stored, personName(b.lookupContact(caller, caller), "", ""))
+	return better(stored, personName(b.lookupContact(caller), "", ""))
 }
 
 // sameUser compares two JIDs as people: device suffix ignored, LIDs resolved.

@@ -105,7 +105,7 @@ func better(a, b rankedName) rankedName {
 func (b *Bridge) handlePushName(evt *events.PushName) {
 	user := evt.JID.ToNonAD()
 	resolved := b.resolveLIDJID(user)
-	b.SetConversationName(resolved.String(), personName(b.lookupContact(resolved, user), "", evt.NewPushName))
+	b.SetConversationName(resolved.String(), personName(b.lookupContact(user), "", evt.NewPushName))
 }
 
 // BackfillContactNames re-applies every DM's name from whatsmeow's contact
@@ -136,7 +136,7 @@ func (b *Bridge) BackfillContactNames() {
 		if err != nil {
 			continue
 		}
-		if b.SetConversationName(jid, personName(b.lookupContact(b.resolveLIDJID(parsed), parsed), "", "")) {
+		if b.SetConversationName(jid, personName(b.lookupContact(parsed), "", "")) {
 			updated++
 		}
 	}
@@ -152,24 +152,60 @@ func (b *Bridge) handleBusinessName(evt *events.BusinessName) {
 	user := evt.JID.ToNonAD()
 	resolved := b.resolveLIDJID(user)
 	jid := resolved.String()
-	if b.SetConversationName(jid, personName(b.lookupContact(resolved, user), evt.NewBusinessName, "")) {
+	if b.SetConversationName(jid, personName(b.lookupContact(user), evt.NewBusinessName, "")) {
 		b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: jid})
 	}
 }
 
-// lookupContact fetches a contact record, checking under the resolved phone
-// JID first and falling back to the original LID — whatsmeow's contact store
-// may be keyed by either. Returns a zero ContactInfo when neither is found.
-func (b *Bridge) lookupContact(resolved, original types.JID) types.ContactInfo {
-	if c, err := b.client.Store.Contacts.GetContact(context.Background(), resolved); err == nil && c.Found {
-		return c
+// lookupContact merges what whatsmeow's contact store holds for a person
+// under each of their JID forms. The store keys an entry by the exact JID it
+// came with — an address-book entry by its app-state mutation's index, which
+// may be the LID or the number — so a phone-keyed chat must look under the
+// LID too, and the other way round. Phone forms are read first.
+func (b *Bridge) lookupContact(forms ...types.JID) types.ContactInfo {
+	var out types.ContactInfo
+	for _, jid := range b.personForms(forms...) {
+		c, err := b.client.Store.Contacts.GetContact(context.Background(), jid)
+		if err != nil || !c.Found {
+			continue
+		}
+		out.Found = true
+		out.FirstName = firstNonEmpty(out.FirstName, c.FirstName)
+		out.FullName = firstNonEmpty(out.FullName, c.FullName)
+		out.PushName = firstNonEmpty(out.PushName, c.PushName)
+		out.BusinessName = firstNonEmpty(out.BusinessName, c.BusinessName)
 	}
-	if original != resolved {
-		if c, err := b.client.Store.Contacts.GetContact(context.Background(), original); err == nil && c.Found {
-			return c
+	return out
+}
+
+// personForms is every JID form of the people given: each without its device
+// suffix, plus its phone or LID counterpart where whatsmeow knows the
+// mapping. Phone forms come first.
+func (b *Bridge) personForms(jids ...types.JID) []types.JID {
+	seen := map[types.JID]bool{}
+	var phones, lids []types.JID
+	add := func(j types.JID) {
+		if j.IsEmpty() || seen[j] {
+			return
+		}
+		seen[j] = true
+		if j.Server == types.HiddenUserServer {
+			lids = append(lids, j)
+		} else {
+			phones = append(phones, j)
 		}
 	}
-	return types.ContactInfo{}
+	for _, j := range jids {
+		if j.IsEmpty() {
+			continue
+		}
+		j = j.ToNonAD()
+		add(j)
+		if alt, err := b.client.Store.GetAltJID(context.Background(), j); err == nil {
+			add(alt.ToNonAD())
+		}
+	}
+	return append(phones, lids...)
 }
 
 // resolveMentions replaces "@<number>" mention tokens in WhatsApp text with the
@@ -190,7 +226,7 @@ func (b *Bridge) resolveMentions(msg *waE2E.Message, convJID, text string) strin
 		if name := b.ParticipantName(convJID, resolved.String()); name != "" {
 			return name
 		}
-		return personName(b.lookupContact(resolved, jid), "", "").name
+		return personName(b.lookupContact(jid), "", "").name
 	})
 }
 

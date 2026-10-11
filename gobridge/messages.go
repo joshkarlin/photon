@@ -121,7 +121,7 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 			b.UpsertParticipant(chatJID, senderJID, b.memberName(evt.Info.Sender, verifiedName, pushName))
 		}
 	} else {
-		name = personName(b.lookupContact(resolvedChat, evt.Info.Chat), verifiedName, pushName)
+		name = personName(b.lookupContact(evt.Info.Chat), verifiedName, pushName)
 	}
 	b.UpsertConversation(chatJID, name, msgID, ts)
 

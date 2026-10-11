@@ -132,7 +132,7 @@ func (b *Bridge) forgetGroupAdmins(jid string) {
 // Live messages, history sync and ResolveGroupParticipants all name members
 // with it, and a DM is named the same way.
 func (b *Bridge) memberName(sender types.JID, verifiedName, pushName string) rankedName {
-	return personName(b.lookupContact(b.resolveLIDJID(sender), sender), verifiedName, pushName)
+	return personName(b.lookupContact(sender), verifiedName, pushName)
 }
 
 // ResolveGroupParticipants names every distinct sender in a group's stored
