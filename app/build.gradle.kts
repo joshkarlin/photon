@@ -78,6 +78,20 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            // libsignal's Native loader tries signal_jni_testing before
+            // signal_jni, so shipping the test build means it's the one that
+            // runs. Nothing in Turasa or Photon uses its testing-only entry
+            // points.
+            excludes += "**/libsignal_jni_testing.so"
+        }
+        resources {
+            // libsignal-client (pulled in for libsignal's Java API) bundles
+            // macOS, Windows and Linux natives that Android never loads.
+            excludes += listOf(
+                "*.dylib", "**/*.dylib",
+                "*.dll", "**/*.dll",
+                "libsignal_jni*.so",
+            )
         }
     }
 
