@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -60,14 +59,46 @@ func registerFKDriver() {
 	sql.Register("sqlite_fk", &fkDriver{inner: &sqliteDriver.Driver{}})
 }
 
-func main() {
-	dataDir := flag.String("data-dir", ".", "Path to data directory")
-	wsPort := flag.Int("ws-port", 8765, "WebSocket server port")
-	logLevel := flag.String("log-level", "DEBUG", "Log level (DEBUG, INFO, WARN, ERROR)")
-	flag.Parse()
+// bridgeConfig is the bridge's command line.
+type bridgeConfig struct {
+	dataDir   string
+	logLevel  string
+	retention RetentionConfig
+}
 
-	logger := waLog.Stdout("Bridge", *logLevel, true)
-	logger.Infof("Starting Photon bridge, data-dir=%s, ws-port=%d", *dataDir, *wsPort)
+// parseConfig reads the command line. Retention flags carry the user's
+// settings across bridge restarts; zero or absent keeps the defaults (50
+// messages per chat, 7 days, 5-minute media), and Kotlin still sends
+// set_retention for live changes.
+func parseConfig(args []string) (bridgeConfig, error) {
+	var cfg bridgeConfig
+	fs := flag.NewFlagSet("gobridge", flag.ContinueOnError)
+	fs.StringVar(&cfg.dataDir, "data-dir", ".", "Path to data directory")
+	fs.StringVar(&cfg.logLevel, "log-level", "DEBUG", "Log level (DEBUG, INFO, WARN, ERROR)")
+	fs.IntVar(&cfg.retention.MaxMessages, "max-messages", 0, "Messages kept per chat (0 = default)")
+	fs.IntVar(&cfg.retention.MaxDays, "max-days", 0, "Days of history kept (0 = default)")
+	fs.IntVar(&cfg.retention.MediaTTLMins, "media-ttl-mins", 0, "Minutes downloaded media is kept (0 = default)")
+	err := fs.Parse(args)
+	return cfg, err
+}
+
+func main() {
+	cfg, err := parseConfig(os.Args[1:])
+	if err != nil {
+		os.Exit(2)
+	}
+	if abs, err := filepath.Abs(cfg.dataDir); err == nil {
+		cfg.dataDir = abs
+	}
+
+	// stdout is the line protocol to Kotlin (transport.go). whatsmeow's
+	// loggers print to os.Stdout, so point that — and any stray print — at
+	// stderr, which Kotlin forwards to logcat.
+	protocolOut := os.Stdout
+	os.Stdout = os.Stderr
+
+	logger := waLog.Stdout("Bridge", cfg.logLevel, false)
+	logger.Infof("Starting Photon bridge, data-dir=%s", cfg.dataDir)
 
 	// Android doesn't have /etc/resolv.conf, so Go's pure-Go DNS resolver
 	// can't find DNS servers. Override the default resolver to use Google DNS.
@@ -80,8 +111,8 @@ func main() {
 	}
 
 	// Ensure directories exist
-	os.MkdirAll(filepath.Join(*dataDir, "media"), 0755)
-	os.MkdirAll(filepath.Join(*dataDir, "thumbs"), 0755)
+	os.MkdirAll(filepath.Join(cfg.dataDir, "media"), 0755)
+	os.MkdirAll(filepath.Join(cfg.dataDir, "thumbs"), 0755)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -89,9 +120,9 @@ func main() {
 	// Initialize whatsmeow session store (pure Go SQLite)
 	// whatsmeow requires foreign keys enabled. Register a custom driver
 	// that runs PRAGMA foreign_keys=ON on each connection.
-	sessionPath := filepath.Join(*dataDir, "whatsmeow.db")
+	sessionPath := filepath.Join(cfg.dataDir, "whatsmeow.db")
 	registerFKDriver()
-	container, err := sqlstore.New(ctx, "sqlite_fk", sessionPath, waLog.Stdout("Session", *logLevel, true))
+	container, err := sqlstore.New(ctx, "sqlite_fk", sessionPath, waLog.Stdout("Session", cfg.logLevel, false))
 	if err != nil {
 		logger.Errorf("Failed to init session store: %v", err)
 		os.Exit(1)
@@ -99,7 +130,7 @@ func main() {
 
 	// Initialize message database (use plain path, not file: URI). The
 	// sqlite_fk driver applies the WAL/foreign keys/busy timeout pragmas.
-	msgDSN := filepath.Join(*dataDir, "messages.db")
+	msgDSN := filepath.Join(cfg.dataDir, "messages.db")
 	msgDB, err := sql.Open("sqlite_fk", msgDSN)
 	if err != nil {
 		logger.Errorf("Failed to open message DB: %v", err)
@@ -119,19 +150,25 @@ func main() {
 	store.DeviceProps.Os = &photonName
 
 	// Create whatsmeow client
-	client := whatsmeow.NewClient(device, waLog.Stdout("Client", *logLevel, true))
+	client := whatsmeow.NewClient(device, waLog.Stdout("Client", cfg.logLevel, false))
 	// A stored session can need a few attempts after a long offline period or
 	// a transient primary-device/network outage. Let whatsmeow retry an initial
 	// connection in the background instead of returning a terminal failure.
 	client.InitialAutoReconnect = true
 
 	// Create bridge
-	bridge := NewBridge(client, msgDB, *dataDir, logger)
+	bridge := NewBridge(client, msgDB, cfg.dataDir, logger)
+	bridge.out = &lineWriter{w: protocolOut}
+	bridge.SetRetention(cfg.retention.MaxMessages, cfg.retention.MaxDays, cfg.retention.MediaTTLMins)
+	logger.Infof("Retention: %+v", bridge.retention)
 
 	// Initialize message DB schema
 	if err := bridge.InitMessageDB(ctx); err != nil {
 		logger.Errorf("Failed to init message DB: %v", err)
 		os.Exit(1)
+	}
+	if client.Store.ID != nil {
+		bridge.BackfillMutedUntil(ctx)
 	}
 
 	// Register event handler
@@ -141,19 +178,9 @@ func main() {
 	bridge.StartPruning(ctx)
 	bridge.StartConnectionWatchdog(ctx)
 
-	// Start WebSocket server
-	mux := http.NewServeMux()
-	bridge.RegisterWSHandler(mux)
-
-	addr := fmt.Sprintf("127.0.0.1:%d", *wsPort)
-	server := &http.Server{Addr: addr, Handler: mux}
-
-	go func() {
-		logger.Infof("WebSocket server listening on %s", addr)
-		if err := server.ListenAndServe(); err != http.ErrServerClosed {
-			logger.Errorf("WS server error: %v", err)
-		}
-	}()
+	// Answer Kotlin's requests until it closes our stdin.
+	served := make(chan error, 1)
+	go func() { served <- bridge.Serve(ctx, os.Stdin) }()
 
 	// Connect to WhatsApp if already paired
 	if client.Store.ID != nil {
@@ -168,12 +195,16 @@ func main() {
 		bridge.setConnectionState("logged_out", "no paired WhatsApp session")
 	}
 
-	// Wait for shutdown signal
+	// Run until the app closes our stdin (it exited, or is restarting us) or
+	// we're signalled.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-
-	logger.Infof("Shutting down...")
+	select {
+	case err := <-served:
+		logger.Infof("Request stream closed (%v), shutting down", err)
+	case sig := <-sigCh:
+		logger.Infof("Received %s, shutting down", sig)
+	}
+	cancel()
 	client.Disconnect()
-	server.Shutdown(ctx)
 }

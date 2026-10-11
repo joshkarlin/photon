@@ -5,10 +5,15 @@ import (
 	"database/sql"
 	"fmt"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waSyncAction"
+	"go.mau.fi/whatsmeow/proto/waWeb"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
+	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -74,24 +79,13 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 		// session) this single delayed run still converges names.
 		go func() {
 			time.Sleep(60 * time.Second)
-			b.MergeLIDConversations()
-			b.CanonicalizeSenderJIDs()
-			b.RepairConversationMetadata()
-			b.BackfillContactNames()
-			b.BackfillParticipantNames()
+			b.reconcile()
 		}()
 	case *events.AppStateSyncComplete:
 		// Contact names and LID mappings arrive via app state sync — run the
 		// reconcile as soon as a patch lands instead of polling on a timer.
-		// Both operations are idempotent, so running per-patch is safe.
 		b.log.Infof("App state sync complete: %s", v.Name)
-		go func() {
-			b.MergeLIDConversations()
-			b.CanonicalizeSenderJIDs()
-			b.RepairConversationMetadata()
-			b.BackfillContactNames()
-			b.BackfillParticipantNames()
-		}()
+		go b.reconcile()
 	case *events.Disconnected:
 		b.log.Infof("Disconnected from WhatsApp")
 		state, _ := b.currentConnectionState()
@@ -122,32 +116,152 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 		})
 	case *events.PushName:
 		b.handlePushName(v)
-	case *events.CallOffer:
-		b.handleCallOffer(v)
+	case *events.CallOffer, *events.CallOfferNotice, *events.CallPreAccept, *events.CallAccept,
+		*events.CallTerminate, *events.CallReject, *events.UnknownCallEvent:
+		b.handleCallEvent(v)
 	case *events.GroupInfo:
 		b.handleGroupInfo(v)
 	case *events.Mute:
 		b.handleMute(v)
+	case *events.MarkChatAsRead:
+		b.handleMarkChatAsRead(v)
+	case *events.BusinessName:
+		b.handleBusinessName(v)
 	}
 }
 
-// handleMute syncs WhatsApp mute state from the primary device.
-// MuteEndTimestamp==0 means "mute until unmuted"; a future value means
-// "mute until that time"; a past value means the mute has expired.
+// handleMarkChatAsRead applies "mark as read/unread" done on another device.
+// The action carries the newest message the user had seen, so messages that
+// arrived after it stay unread.
+func (b *Bridge) handleMarkChatAsRead(evt *events.MarkChatAsRead) {
+	jid := b.resolveLIDJID(evt.JID).String()
+	readUpTo := evt.Action.GetMessageRange().GetLastMessageTimestamp()
+	if readUpTo == 0 && !evt.Timestamp.IsZero() {
+		readUpTo = evt.Timestamp.Unix()
+	}
+	if readUpTo == 0 {
+		readUpTo = time.Now().Unix()
+	}
+	b.applyChatReadState(jid, evt.Action.GetRead(), readUpTo)
+}
+
+func (b *Bridge) applyChatReadState(jid string, read bool, readUpTo int64) {
+	if !read {
+		b.MarkChatUnread(jid)
+		b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: jid})
+		return
+	}
+	if b.MarkChatReadUpTo(jid, readUpTo) == 0 {
+		b.BroadcastEvent("read_self", ReadSelfEvent{ConversationJID: jid})
+	} else {
+		b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: jid})
+	}
+}
+
+// handleMute syncs WhatsApp mute state from the primary device. The end time
+// is stored rather than a flag, so a timed mute lapses on its own.
 func (b *Bridge) handleMute(evt *events.Mute) {
 	// Resolve LID to phone JID so keys match our conversations table.
 	jid := b.resolveLIDJID(evt.JID).String()
+	until := mutedUntil(evt.Action)
+	b.UpdateMute(jid, until)
+	b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: jid})
+	b.log.Infof("Mute update: %s muted_until=%d", jid, until)
+}
 
-	muted := false
-	if evt.Action != nil && evt.Action.GetMuted() {
-		endTs := evt.Action.GetMuteEndTimestamp()
-		if endTs == 0 || time.Now().Unix() < endTs {
-			muted = true
+// mutedUntil converts a mute action to muted_until (0 = not muted, -1 =
+// forever, else the unix second it ends). The action's end time is in
+// milliseconds, and WhatsApp marks "always" with -1 (see appstate.BuildMute);
+// a mute with no end at all is treated as "always" too.
+func mutedUntil(act *waSyncAction.MuteAction) int64 {
+	if !act.GetMuted() {
+		return 0
+	}
+	endMs := act.GetMuteEndTimestamp()
+	if endMs <= 0 {
+		return -1
+	}
+	return (endMs + 999) / 1000
+}
+
+// BackfillMutedUntil copies each chat's mute end time from whatsmeow's chat
+// settings, which recorded it all along. Repairs rows from builds that kept
+// only a flag (timed mutes never lapsed, "always" mutes read as unmuted)
+// without waiting for the next mute change. Runs at startup; idempotent.
+func (b *Bridge) BackfillMutedUntil(ctx context.Context) {
+	rows, err := b.msgDB.QueryContext(ctx, `SELECT jid, muted_until FROM conversations`)
+	if err != nil {
+		return
+	}
+	stored := map[string]int64{}
+	for rows.Next() {
+		var jid string
+		var until int64
+		if rows.Scan(&jid, &until) == nil {
+			stored[jid] = until
 		}
 	}
-	b.UpdateMute(jid, muted)
-	b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: jid})
-	b.log.Infof("Mute update: %s muted=%v", jid, muted)
+	rows.Close()
+
+	fixed := 0
+	for jid, until := range stored {
+		parsed, err := types.ParseJID(jid)
+		if err != nil {
+			continue
+		}
+		want, ok := b.storedMutedUntil(ctx, parsed)
+		if ok && want != until {
+			b.UpdateMute(jid, want)
+			fixed++
+		}
+	}
+	if fixed > 0 {
+		b.log.Infof("Backfilled mute end time for %d chats", fixed)
+		b.BroadcastEvent("conversation_updated", struct{}{})
+	}
+}
+
+// storedMutedUntil reads whatsmeow's mute for a chat. A DM's settings may sit
+// under its phone JID, its LID, or both (say a pin under one and the mute
+// under the other), so the longer mute of the two wins.
+func (b *Bridge) storedMutedUntil(ctx context.Context, jid types.JID) (until int64, found bool) {
+	keys := []types.JID{jid}
+	if jid.Server == types.DefaultUserServer {
+		if lid, err := b.client.Store.LIDs.GetLIDForPN(ctx, jid); err == nil && !lid.IsEmpty() {
+			keys = append(keys, lid)
+		}
+	}
+	for _, key := range keys {
+		s, err := b.client.Store.ChatSettings.GetChatSettings(ctx, key)
+		if err != nil || !s.Found {
+			continue
+		}
+		found = true
+		until = longerMute(until, mutedUntilFromSettings(s.MutedUntil))
+	}
+	return until, found
+}
+
+// longerMute picks the mute that lasts longer (-1 = forever, 0 = none).
+func longerMute(x, y int64) int64 {
+	if x == -1 || y == -1 {
+		return -1
+	}
+	if y > x {
+		return y
+	}
+	return x
+}
+
+// mutedUntilFromSettings converts whatsmeow's stored mute end to muted_until.
+func mutedUntilFromSettings(t time.Time) int64 {
+	switch {
+	case t.IsZero():
+		return 0
+	case !t.Before(store.MutedForever):
+		return -1
+	}
+	return t.Unix()
 }
 
 func (b *Bridge) handleMessage(evt *events.Message) {
@@ -168,61 +282,68 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 	msgID := evt.Info.ID
 	ts := evt.Info.Timestamp.Unix()
 
-	// Check for reaction
-	if reaction := msg.GetReactionMessage(); reaction != nil {
-		targetID := reaction.GetKey().GetID()
-		emoji := reaction.GetText()
-		b.UpsertReaction(targetID, senderJID, emoji, ts)
+	kind, targetID := classifyMessageEvent(msg)
+	switch kind {
+	case kindReaction:
+		b.UpsertReaction(targetID, senderJID, msg.GetReactionMessage().GetText(), ts)
 		b.BroadcastEvent("message_updated", MessageUpdatedEvent{
 			ConversationJID: chatJID,
 			MessageID:       targetID,
 		})
 		return
-	}
-
-	// Check for edit
-	if evt.IsEdit {
-		editedID := getEditTargetID(msg)
-		if editedID != "" {
-			_, newText := classifyMessage(msg)
-			b.UpdateMessageEdit(editedID, newText, 1) // simplified: just set version to 1
-			b.BroadcastEvent("message_updated", MessageUpdatedEvent{
-				ConversationJID: chatJID,
-				MessageID:       editedID,
-			})
-			return
-		}
-	}
-
-	// Skip empty messages (e.g., sender key distribution in groups)
-	if msg.GetConversation() == "" &&
-		msg.GetExtendedTextMessage() == nil &&
-		msg.GetImageMessage() == nil &&
-		msg.GetVideoMessage() == nil &&
-		msg.GetAudioMessage() == nil &&
-		msg.GetDocumentMessage() == nil &&
-		msg.GetStickerMessage() == nil &&
-		msg.GetLocationMessage() == nil &&
-		msg.GetContactMessage() == nil {
-		b.log.Debugf("Skipping empty message %s in %s (sender key distribution or protocol)", msgID, chatJID)
+	case kindRevoke:
+		b.applyRevoke(chatJID, evt.Info, targetID)
+		return
+	case kindEdit:
+		b.applyEdit(chatJID, targetID, msg.GetProtocolMessage().GetEditedMessage(), b.authorOf(evt.Info))
+		return
+	case kindDrop:
+		b.log.Debugf("Skipping content-free message %s in %s", msgID, chatJID)
 		return
 	}
 
-	row := b.buildMessageRow(msg, msgID, chatJID, senderJID, ts, isFromMe, "sent")
-	b.InsertMessage(row)
+	content := contentMessage(msg)
+	row := b.buildMessageRow(content, msgID, chatJID, senderJID, ts, isFromMe, "sent")
+
+	// The phone's copy of a message it had masked from linked devices:
+	// upgrade the placeholder row in place (it was already counted).
+	if evt.UnavailableRequestID != "" && b.ReplaceMessageContent(row) {
+		b.saveInlineThumbnail(msgID, content)
+		b.BroadcastEvent("message_updated", MessageUpdatedEvent{ConversationJID: chatJID, MessageID: msgID})
+		return
+	}
+
+	inserted, err := b.InsertMessage(row)
+	if err != nil {
+		b.log.Errorf("Failed to store message %s in %s: %v", msgID, chatJID, err)
+		return
+	}
+	if !inserted {
+		// A redelivery (offline queue replay, retry after a decrypt failure)
+		// of a message already stored. Counting or announcing it again would
+		// double the unread badge and re-notify.
+		b.log.Debugf("Ignoring redelivered message %s in %s", msgID, chatJID)
+		return
+	}
 	contentType, textBody := row.ContentType, row.TextBody.String
 
-	// Extract and save inline thumbnail for media messages
-	if thumb := getInlineThumbnail(msg); thumb != nil && len(thumb) > 0 {
-		thumbPath := b.saveThumbnail(msgID, thumb)
-		if thumbPath != "" {
-			b.UpdateThumbnailPath(msgID, thumbPath)
-		}
-	}
+	b.saveInlineThumbnail(msgID, content)
 
 	// Auto-download small media (stickers, audio)
 	if contentType == "sticker" || contentType == "audio" {
-		go b.autoDownloadMedia(msgID, msg)
+		go b.autoDownloadMedia(msgID, content)
+	}
+
+	if content.GetPlaceholderMessage() != nil && !isFromMe {
+		go b.requestFromPhone(evt.Info)
+	}
+
+	// A call-log entry in the chat. Live calls are tracked from call events,
+	// which own the unread count and notification, so this only shows the
+	// entry.
+	isCallLog := contentType == "call"
+	if isCallLog {
+		b.log.Infof("Call log message %s in %s: %s", msgID, chatJID, textBody)
 	}
 
 	// Update conversation
@@ -248,13 +369,17 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 			b.UpsertParticipant(chatJID, senderJID, senderDisplayName, "member")
 		}
 	} else {
-		// Only use the event push name from the OTHER person, not ourselves.
-		eventPushName := ""
+		// Only use the event push/verified name from the OTHER person, not
+		// ourselves.
+		eventPushName, verifiedName := "", ""
 		if !isFromMe {
 			eventPushName = evt.Info.PushName
+			if evt.Info.VerifiedName != nil {
+				verifiedName = evt.Info.VerifiedName.Details.GetVerifiedName()
+			}
 		}
 		contact := b.lookupContact(resolvedChat, evt.Info.Chat)
-		name, nameIsAuthoritative = bestContactName(contact, eventPushName)
+		name, nameIsAuthoritative = dmName(contact, verifiedName, eventPushName)
 		// For LID JIDs, fall back to the resolved phone number
 		if name == "" && resolvedChat != evt.Info.Chat {
 			name = "+" + resolvedChat.User
@@ -266,6 +391,11 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 	// else only fills empty names (handled by UpsertConversation's COALESCE).
 	if nameIsAuthoritative {
 		b.UpdateConversationName(chatJID, name)
+	}
+
+	if isCallLog {
+		b.BroadcastEvent("message_updated", MessageUpdatedEvent{ConversationJID: chatJID, MessageID: msgID})
+		return
 	}
 
 	// Increment unread if not from me
@@ -284,42 +414,137 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 	})
 }
 
+// applyRevoke blanks a message deleted for everyone. If it was the last unread
+// message in its chat, Kotlin uses message_revoked's unread_count to withdraw
+// the notification that announced it.
+func (b *Bridge) applyRevoke(chatJID string, info types.MessageInfo, targetID string) {
+	res, ok := b.revoke(chatJID, info, targetID)
+	if !ok {
+		b.log.Debugf("Ignoring revoke of %s in %s by %s: no such message of theirs", targetID, chatJID, info.Sender)
+		return
+	}
+	for _, f := range res.Files {
+		if b.isBridgeMediaPath(f) {
+			os.Remove(f)
+		}
+	}
+	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
+		ConversationJID: res.ConversationJID,
+		MessageID:       targetID,
+	})
+	b.BroadcastEvent("message_revoked", MessageRevokedEvent{
+		ConversationJID: res.ConversationJID,
+		MessageID:       targetID,
+		WasUnread:       res.WasUnread,
+		UnreadCount:     res.Unread,
+	})
+}
+
+// revoke applies a "delete for everyone" only from someone entitled to it:
+// the message's sender, or — in a group — an admin (or the user's own
+// devices). The server can't check, as the revoke is end-to-end encrypted,
+// and message IDs are visible to every member of a group.
+func (b *Bridge) revoke(chatJID string, info types.MessageInfo, targetID string) (RevokeResult, bool) {
+	by := b.authorOf(info)
+	if res, ok := b.RevokeMessage(targetID, chatJID, &by); ok {
+		return res, true
+	}
+	if info.Chat.Server == types.GroupServer && (info.IsFromMe || b.isGroupAdmin(info.Chat, info.Sender, info.SenderAlt)) {
+		return b.RevokeMessage(targetID, chatJID, nil)
+	}
+	return RevokeResult{}, false
+}
+
+// author identifies who sent an edit or revoke, to match it against the
+// stored message it targets.
+type author struct {
+	isMe bool     // one of the user's own devices
+	keys []string // sender_jid forms the person's stored messages may carry
+}
+
+func (b *Bridge) authorOf(info types.MessageInfo) author {
+	if info.IsFromMe {
+		return author{isMe: true}
+	}
+	keys := []string{b.canonicalSenderJID(info.Sender), info.Sender.ToNonAD().String()}
+	if !info.SenderAlt.IsEmpty() {
+		keys = append(keys, b.canonicalSenderJID(info.SenderAlt), info.SenderAlt.ToNonAD().String())
+	}
+	return author{keys: keys}
+}
+
+// sqlClause restricts a messages query to rows this author sent.
+func (a author) sqlClause() (string, []interface{}) {
+	if a.isMe {
+		return "is_from_me = 1", nil
+	}
+	args := make([]interface{}, len(a.keys))
+	for i, k := range a.keys {
+		args[i] = k
+	}
+	return "is_from_me = 0 AND sender_jid IN (" + sqlInList(len(a.keys)) + ")", args
+}
+
 func (b *Bridge) handleReceipt(evt *events.Receipt) {
 	// Resolve LID → PN so the JID matches the conversation row written by
 	// handleMessage (which stores conversations under the phone-based JID).
 	// Without this, ReadSelf receipts for LID chats fail to clear unread.
 	chatJID := b.resolveLIDJID(evt.Chat).String()
 
-	status := ""
-	switch evt.Type {
-	case types.ReceiptTypeRead, types.ReceiptTypeReadSelf:
-		status = "read"
-		// Reset unread count when messages are read (including on other devices).
-		b.ResetUnread(chatJID)
-	case types.ReceiptTypeDelivered:
-		status = "delivered"
-	default:
-		return
-	}
-
 	ids := make([]string, len(evt.MessageIDs))
 	for i, id := range evt.MessageIDs {
 		ids[i] = string(id)
 	}
-	b.UpdateMessageStatusBatch(ids, status)
+	b.applyReceipt(chatJID, ids, evt.Type, evt.IsFromMe)
+}
 
-	b.BroadcastEvent("receipt", ReceiptEvent{
-		ConversationJID: chatJID,
-		MessageIDs:      ids,
-		Type:            status,
-	})
+// receiptEffect classifies a receipt. ownRead means the user read incoming
+// messages on another of their devices: "read-self" when read receipts are
+// off, or a plain "read" sent from our own JID when they're on. Every other
+// read/delivered receipt is a contact acknowledging one of OUR messages, so it
+// only advances the outgoing status — it must never clear our unread count
+// (that once made a chat look read the moment the other person read our
+// reply). Anything else (played, sender, retry, …) has no effect.
+func receiptEffect(t types.ReceiptType, isFromMe bool) (ownRead bool, outgoingStatus string) {
+	switch {
+	case t == types.ReceiptTypeReadSelf, t == types.ReceiptTypeRead && isFromMe:
+		return true, ""
+	case isFromMe:
+		return false, ""
+	case t == types.ReceiptTypeRead:
+		return false, "read"
+	case t == types.ReceiptTypeDelivered:
+		return false, "delivered"
+	}
+	return false, ""
+}
+
+func (b *Bridge) applyReceipt(chatJID string, ids []string, t types.ReceiptType, isFromMe bool) {
+	ownRead, status := receiptEffect(t, isFromMe)
+	switch {
+	case ownRead:
+		b.MarkIncomingRead(chatJID, ids)
+		b.BroadcastEvent("read_self", ReadSelfEvent{
+			ConversationJID: chatJID,
+			MessageIDs:      ids,
+		})
+	case status != "":
+		b.AdvanceOutgoingStatus(ids, status)
+		b.BroadcastEvent("receipt", ReceiptEvent{
+			ConversationJID: chatJID,
+			MessageIDs:      ids,
+			Type:            status,
+		})
+	}
 }
 
 func (b *Bridge) handleChatPresence(evt *events.ChatPresence) {
 	composing := evt.State == types.ChatPresenceComposing
+	// Keyed like messages, so the indicator matches the open conversation
+	// (and the sender's participant name) in @lid chats too.
 	b.BroadcastEvent("typing", TypingEvent{
-		JID:       evt.Chat.String(),
-		SenderJID: evt.Sender.String(),
+		JID:       b.resolveLIDJID(evt.Chat).String(),
+		SenderJID: b.canonicalSenderJID(evt.Sender),
 		Composing: composing,
 	})
 }
@@ -363,10 +588,16 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 
 		msgs := conv.GetMessages()
 		b.log.Debugf("  Conv %s: %d messages in history", jid, len(msgs))
+		chat, _ := types.ParseJID(rawJID)
 		convMsgCount := 0
 		skippedNil := 0
 		skippedOld := 0
+		skippedEmpty := 0
 		var pending []*MessageRow
+		// Edits and revokes in the payload apply to rows in this batch, so
+		// they run after the insert.
+		var edits []historyEdit
+		var revokes []historyRevoke
 		// Collect each distinct group sender's best name from history push
 		// names so historical messages render the contact/profile name instead
 		// of a bare number. Upserted once per sender after the loop.
@@ -378,18 +609,7 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 			}
 
 			wm := histMsg.GetMessage()
-			if wm == nil {
-				skippedNil++
-				continue
-			}
-			if wm.GetMessage() == nil {
-				skippedNil++
-				continue
-			}
-
-			msg := wm.GetMessage()
-			info := wm.GetKey()
-			if info == nil {
+			if wm == nil || wm.GetKey() == nil {
 				skippedNil++
 				continue
 			}
@@ -401,22 +621,44 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 				continue
 			}
 
-			msgID := info.GetID()
-			isFromMe := info.GetFromMe()
-			// ts already declared above for cutoff check
-			// In history sync the group sender lives on WebMessageInfo.Participant,
-			// NOT on the message key — reading only the key left it empty, so
-			// senderJID fell back to the group JID and every historical group
-			// message rendered as the group's number. Prefer the WebMessageInfo
-			// participant, fall back to the key, and canonicalize like live.
-			participant := wm.GetParticipant()
-			if participant == "" {
-				participant = info.GetParticipant()
+			if wm.GetMessage() == nil {
+				// Missed calls are content-less stubs; other stubs (group
+				// changes, security notices) aren't shown.
+				sender := jid
+				if p := firstNonEmpty(wm.GetParticipant(), wm.GetKey().GetParticipant()); isGroup && p != "" {
+					sender = b.canonicalSenderString(p)
+				}
+				if row, ok := historyCallRow(wm, jid, sender); ok {
+					pending = append(pending, row)
+					totalMsgs++
+					convMsgCount++
+				} else {
+					skippedNil++
+				}
+				continue
 			}
-			senderJID := jid
-			if !isFromMe && participant != "" {
-				senderJID = b.canonicalSenderString(participant)
+
+			// Parse exactly like a live message: unwrap ephemeral/view-once/
+			// edited wrappers and work out the sender. History stores the
+			// group sender on WebMessageInfo.Participant (not the key), which
+			// ParseWebMessage reads.
+			evt := b.historyEvent(chat, wm)
+			if targetID, edited := historyEditTarget(evt, wm); targetID != "" {
+				edits = append(edits, historyEdit{targetID, edited, b.authorOf(evt.Info)})
+				continue
 			}
+			kind, targetID := classifyMessageEvent(evt.Message)
+			switch kind {
+			case kindRevoke:
+				revokes = append(revokes, historyRevoke{targetID, evt.Info})
+				continue
+			case kindReaction, kindDrop:
+				skippedEmpty++
+				continue
+			}
+
+			isFromMe := evt.Info.IsFromMe
+			senderJID := b.canonicalSenderJID(evt.Info.Sender)
 
 			// Remember the sender's push name for participant backfill.
 			if isGroup && !isFromMe {
@@ -427,13 +669,21 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 				}
 			}
 
-			pending = append(pending, b.buildMessageRow(msg, msgID, jid, senderJID, ts, isFromMe, "read"))
+			pending = append(pending, b.buildMessageRow(contentMessage(evt.Message), evt.Info.ID, jid, senderJID, ts, isFromMe, "read"))
 			totalMsgs++
 			convMsgCount++
 		}
 		// One transaction per conversation — per-row implicit transactions
 		// mean thousands of WAL commits during initial pairing.
 		b.InsertMessages(pending)
+		for _, e := range edits {
+			if _, text, _ := extractContent(e.edited); text != "" {
+				b.UpdateMessageEdit(e.targetID, jid, b.resolveMentions(e.edited, jid, text), &e.by)
+			}
+		}
+		for _, r := range revokes {
+			b.revoke(jid, r.info, r.targetID)
+		}
 
 		// Backfill group participant names: prefer the address-book contact
 		// name, fall back to the history push name. Done once per distinct
@@ -451,8 +701,8 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 			}
 		}
 
-		if skippedNil > 0 || skippedOld > 0 {
-			b.log.Debugf("  Conv %s: inserted %d, skipped %d nil, %d old", jid, convMsgCount, skippedNil, skippedOld)
+		if skippedNil > 0 || skippedOld > 0 || skippedEmpty > 0 {
+			b.log.Debugf("  Conv %s: inserted %d, skipped %d nil, %d old, %d content-free", jid, convMsgCount, skippedNil, skippedOld, skippedEmpty)
 		}
 
 		// For DMs, resolve contact name from whatsmeow's contact store.
@@ -513,6 +763,59 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 	b.log.Infof("History sync complete: %d conversations, %d messages", totalConvs, totalMsgs)
 }
 
+// historyEdit and historyRevoke are edits and revokes found in a history
+// payload, applied after its messages are stored.
+type historyEdit struct {
+	targetID string
+	edited   *waE2E.Message
+	by       author
+}
+
+type historyRevoke struct {
+	targetID string
+	info     types.MessageInfo
+}
+
+// historyEvent parses a history-sync message into the same event a live one
+// would be. If no sender can be worked out (rare, for groups) the message is
+// kept and attributed to the chat, as before ParseWebMessage was used.
+func (b *Bridge) historyEvent(chat types.JID, wm *waWeb.WebMessageInfo) *events.Message {
+	evt, err := b.client.ParseWebMessage(chat, wm)
+	if err == nil {
+		return evt
+	}
+	b.log.Debugf("History message %s: %v", wm.GetKey().GetID(), err)
+	evt = &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     chat,
+				Sender:   chat,
+				IsFromMe: wm.GetKey().GetFromMe(),
+				IsGroup:  chat.Server == types.GroupServer,
+			},
+			ID:        wm.GetKey().GetID(),
+			PushName:  wm.GetPushName(),
+			Timestamp: time.Unix(int64(wm.GetMessageTimestamp()), 0),
+		},
+		RawMessage:   wm.GetMessage(),
+		SourceWebMsg: wm,
+	}
+	return evt.UnwrapRaw()
+}
+
+// historyEditTarget reports an edit in a history payload. ParseWebMessage
+// already rewrites one into its target's ID and new content; the fallback
+// parse leaves the MESSAGE_EDIT protocol message as a live event would.
+func historyEditTarget(evt *events.Message, wm *waWeb.WebMessageInfo) (targetID string, edited *waE2E.Message) {
+	if evt.Info.ID != wm.GetKey().GetID() {
+		return evt.Info.ID, evt.Message
+	}
+	if kind, id := classifyMessageEvent(evt.Message); kind == kindEdit {
+		return id, evt.Message.GetProtocolMessage().GetEditedMessage()
+	}
+	return "", nil
+}
+
 func (b *Bridge) handlePushName(evt *events.PushName) {
 	// evt.JID.String() already carries the server suffix and may be a LID —
 	// resolve it so the key matches the conversation row.
@@ -544,37 +847,43 @@ func (b *Bridge) BackfillContactNames() {
 	}
 	b.log.Infof("Backfill: %d contacts in store", len(contacts))
 
-	rows, err := b.msgDB.Query(`SELECT jid, COALESCE(name, '') FROM conversations WHERE jid LIKE '%@s.whatsapp.net'`)
+	// @lid rows are DMs whose phone number isn't known yet; whatsmeow keys
+	// their push/business names by the LID. Read everything before writing
+	// (a cursor held open across the updates deadlocks a single connection).
+	type convName struct{ jid, name string }
+	var convs []convName
+	rows, err := b.msgDB.Query(`SELECT jid, COALESCE(name, '') FROM conversations WHERE jid LIKE '%@s.whatsapp.net' OR jid LIKE '%@lid'`)
 	if err != nil {
 		return
 	}
-	defer rows.Close()
+	for rows.Next() {
+		var c convName
+		if rows.Scan(&c.jid, &c.name) == nil {
+			convs = append(convs, c)
+		}
+	}
+	rows.Close()
 
 	updated := 0
-	for rows.Next() {
-		var jid, currentName string
-		rows.Scan(&jid, &currentName)
-
-		parsedJID, parseErr := types.ParseJID(jid)
+	for _, c := range convs {
+		parsedJID, parseErr := types.ParseJID(c.jid)
 		if parseErr != nil {
 			continue
 		}
 		contact, ok := contacts[parsedJID]
 		if !ok {
-			// Fallback: single lookup (covers stores where GetAllContacts
-			// lags behind individual sync entries).
-			if c, err := b.client.Store.Contacts.GetContact(context.Background(), parsedJID); err == nil && c.Found {
-				contact = c
-			}
+			// Fallback: single lookup under the phone and LID keys (covers
+			// stores where GetAllContacts lags behind individual sync entries).
+			contact = b.lookupContact(b.resolveLIDJID(parsedJID), parsedJID)
 		}
 
 		name, authoritative := bestContactName(contact, "")
-		if !authoritative && currentName != "" {
-			continue // already named and no address book entry — leave it
+		if !authoritative && c.name != "" {
+			continue // already named and nothing better than a push name — leave it
 		}
 
-		if name != "" && name != currentName {
-			b.UpdateConversationName(jid, name)
+		if name != "" && name != c.name {
+			b.UpdateConversationName(c.jid, name)
 			updated++
 		}
 	}
@@ -585,6 +894,50 @@ func (b *Bridge) BackfillContactNames() {
 	}
 }
 
+// reconcile runs the LID merge and name repair passes. A sync burst fires
+// one request per app-state patch; the coalescer keeps runs from overlapping
+// (two concurrent merges of one row used to add its unread count twice) and
+// folds requests that arrive mid-run into a single follow-up run.
+func (b *Bridge) reconcile() {
+	b.reconciler.run(func() {
+		b.MergeLIDConversations()
+		b.CanonicalizeSenderJIDs()
+		b.RepairConversationMetadata()
+		b.BackfillContactNames()
+		b.BackfillParticipantNames()
+	})
+}
+
+// coalescer runs a function without overlap: calls made while it runs
+// return at once and collapse into one more run afterwards.
+type coalescer struct {
+	mu      sync.Mutex
+	running bool
+	again   bool
+}
+
+func (c *coalescer) run(fn func()) {
+	c.mu.Lock()
+	if c.running {
+		c.again = true
+		c.mu.Unlock()
+		return
+	}
+	c.running = true
+	c.mu.Unlock()
+	for {
+		fn()
+		c.mu.Lock()
+		if !c.again {
+			c.running = false
+			c.mu.Unlock()
+			return
+		}
+		c.again = false
+		c.mu.Unlock()
+	}
+}
+
 // MergeLIDConversations folds conversation rows keyed by @lid JIDs into
 // their phone-based rows. Duplicates appeared when an event path stored a
 // LID key (history sync, the old push-name handler) while live messages
@@ -592,52 +945,91 @@ func (b *Bridge) BackfillContactNames() {
 // (plus a post-connect fallback); unresolvable LIDs are left untouched and
 // retried on the next run.
 func (b *Bridge) MergeLIDConversations() {
-	rows, err := b.msgDB.Query(`SELECT jid, COALESCE(name, ''), is_group, COALESCE(last_message_id, ''), last_timestamp, unread_count FROM conversations WHERE jid LIKE '%@lid'`)
+	rows, err := b.msgDB.Query(`SELECT jid FROM conversations WHERE jid LIKE '%@lid'`)
 	if err != nil {
 		return
 	}
-	type lidRow struct {
-		jid, name, lastMsgID string
-		isGroup              bool
-		lastTS               int64
-		unread               int
-	}
-	var lids []lidRow
+	var lids []string
 	for rows.Next() {
-		var r lidRow
-		var isGroupInt int
-		if err := rows.Scan(&r.jid, &r.name, &isGroupInt, &r.lastMsgID, &r.lastTS, &r.unread); err != nil {
-			continue
+		var jid string
+		if rows.Scan(&jid) == nil {
+			lids = append(lids, jid)
 		}
-		r.isGroup = isGroupInt == 1
-		lids = append(lids, r)
 	}
 	rows.Close()
 
 	merged := 0
-	for _, r := range lids {
-		pn := b.resolveLIDString(r.jid)
-		if pn == r.jid {
+	for _, lid := range lids {
+		pn := b.resolveLIDString(lid)
+		if pn == lid {
 			continue // mapping not known yet
 		}
-		// Re-key messages and participants, then merge the conversation row.
-		// UpsertConversation fills the target's name/last-message only where
-		// they're missing or older, which is exactly the merge we want.
-		b.msgDB.Exec(`UPDATE messages SET conversation_jid = ? WHERE conversation_jid = ?`, pn, r.jid)
-		b.msgDB.Exec(`UPDATE OR IGNORE participants SET conversation_jid = ? WHERE conversation_jid = ?`, pn, r.jid)
-		b.msgDB.Exec(`DELETE FROM participants WHERE conversation_jid = ?`, r.jid)
-		b.UpsertConversation(pn, r.name, r.isGroup, r.lastMsgID, r.lastTS)
-		if r.unread > 0 {
-			b.msgDB.Exec(`UPDATE conversations SET unread_count = unread_count + ? WHERE jid = ?`, r.unread, pn)
+		ok, err := b.mergeConversation(lid, pn)
+		if err != nil {
+			b.log.Errorf("Failed to merge LID conversation %s into %s: %v", lid, pn, err)
+			continue
 		}
-		b.msgDB.Exec(`DELETE FROM conversations WHERE jid = ?`, r.jid)
-		b.log.Infof("Merged LID conversation %s into %s", r.jid, pn)
-		merged++
+		if ok {
+			b.log.Infof("Merged LID conversation %s into %s", lid, pn)
+			merged++
+		}
 	}
 	if merged > 0 {
 		b.log.Infof("Merged %d LID conversations into phone-based rows", merged)
 		b.BroadcastEvent("conversation_updated", struct{}{})
 	}
+}
+
+// mergeConversation moves one conversation's messages, participants, unread
+// count and mute onto another, atomically. The source row is re-read inside
+// the transaction, so a merge that already happened is a no-op (false)
+// rather than adding the unread count again.
+func (b *Bridge) mergeConversation(from, to string) (bool, error) {
+	tx, err := b.msgDB.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var name, lastMsgID string
+	var isGroup, unread int
+	var lastTS, mutedUntil int64
+	err = tx.QueryRow(`SELECT COALESCE(name, ''), is_group, COALESCE(last_message_id, ''), last_timestamp, unread_count, muted_until
+		FROM conversations WHERE jid = ?`, from).Scan(&name, &isGroup, &lastMsgID, &lastTS, &unread, &mutedUntil)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	// Re-key messages and participants, then merge the conversation row.
+	// upsertConversation fills the target's name/last-message only where
+	// they're missing or older, which is exactly the merge we want.
+	for _, q := range []string{
+		`UPDATE messages SET conversation_jid = ? WHERE conversation_jid = ?`,
+		`UPDATE OR IGNORE participants SET conversation_jid = ? WHERE conversation_jid = ?`,
+	} {
+		if _, err := tx.Exec(q, to, from); err != nil {
+			return false, err
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM participants WHERE conversation_jid = ?`, from); err != nil {
+		return false, err
+	}
+	if err := b.upsertConversation(tx, to, name, isGroup == 1, lastMsgID, lastTS); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(`UPDATE conversations SET unread_count = unread_count + ?,
+		muted_until = CASE WHEN ? = -1 OR muted_until = -1 THEN -1 ELSE MAX(muted_until, ?) END,
+		is_muted = CASE WHEN ? <> 0 OR muted_until <> 0 THEN 1 ELSE 0 END
+		WHERE jid = ?`, unread, mutedUntil, mutedUntil, mutedUntil, to); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(`DELETE FROM conversations WHERE jid = ?`, from); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 // CanonicalizeSenderJIDs re-keys message, reaction, and participant sender JIDs
@@ -668,11 +1060,29 @@ func (b *Bridge) CanonicalizeSenderJIDs() {
 		}
 		// messages.sender_jid isn't unique, so a plain update is safe; the
 		// PK-bearing tables use UPDATE OR IGNORE + delete to fold duplicates.
-		b.msgDB.Exec(`UPDATE messages SET sender_jid = ? WHERE sender_jid = ?`, pn, lid)
-		b.msgDB.Exec(`UPDATE OR IGNORE reactions SET sender_jid = ? WHERE sender_jid = ?`, pn, lid)
-		b.msgDB.Exec(`DELETE FROM reactions WHERE sender_jid = ?`, lid)
-		b.msgDB.Exec(`UPDATE OR IGNORE participants SET jid = ? WHERE jid = ?`, pn, lid)
-		b.msgDB.Exec(`DELETE FROM participants WHERE jid = ?`, lid)
+		if err := b.inTx(func(tx *sql.Tx) error {
+			for _, q := range []string{
+				`UPDATE messages SET sender_jid = ? WHERE sender_jid = ?`,
+				`UPDATE OR IGNORE reactions SET sender_jid = ? WHERE sender_jid = ?`,
+				`UPDATE OR IGNORE participants SET jid = ? WHERE jid = ?`,
+			} {
+				if _, err := tx.Exec(q, pn, lid); err != nil {
+					return err
+				}
+			}
+			for _, q := range []string{
+				`DELETE FROM reactions WHERE sender_jid = ?`,
+				`DELETE FROM participants WHERE jid = ?`,
+			} {
+				if _, err := tx.Exec(q, lid); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			b.log.Errorf("Failed to canonicalize sender %s: %v", lid, err)
+			continue
+		}
 		changed++
 	}
 	if changed > 0 {
@@ -703,19 +1113,14 @@ func (b *Bridge) BackfillParticipantNames() {
 	}
 }
 
-func (b *Bridge) handleCallOffer(evt *events.CallOffer) {
-	b.BroadcastEvent("call_offer", CallOfferEvent{
-		FromJID: evt.CallCreator.String(),
-		CallID:  evt.CallID,
-		IsVideo: false, // CallOffer doesn't expose IsVideo directly
-	})
-}
-
 func (b *Bridge) handleGroupInfo(evt *events.GroupInfo) {
 	jid := evt.JID.String()
 	if evt.Name != nil {
 		b.setGroupName(jid, evt.Name.Name)
 		b.UpdateConversationName(jid, evt.Name.Name)
+	}
+	if len(evt.Promote) > 0 || len(evt.Demote) > 0 {
+		b.forgetGroupAdmins(jid)
 	}
 	b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: jid})
 }
@@ -724,52 +1129,126 @@ func (b *Bridge) handleGroupInfo(evt *events.GroupInfo) {
 // hour per group — GetGroupInfo is a network round-trip and groups rarely
 // rename. Rename events (handleGroupInfo) refresh the cache immediately.
 func (b *Bridge) groupName(jid types.JID) string {
+	return b.groupEntry(jid, false).name
+}
+
+// isGroupAdmin reports whether a person (any of their JID forms) is an admin
+// of the group, per the server's group info, cached like the name.
+func (b *Bridge) isGroupAdmin(group types.JID, who ...types.JID) bool {
+	admins := b.groupEntry(group, true).admins
+	for _, w := range who {
+		if w.IsEmpty() {
+			continue
+		}
+		if admins[w.User] || admins[b.resolveLIDJID(w.ToNonAD()).User] {
+			return true
+		}
+	}
+	return false
+}
+
+// groupEntry returns the cached group info, fetching it when it's over an
+// hour old or (needAdmins) its admin list isn't known. Failures aren't
+// cached — the next call retries.
+func (b *Bridge) groupEntry(jid types.JID, needAdmins bool) cachedGroupName {
 	key := jid.String()
 	b.groupNameMu.Lock()
 	cached, ok := b.groupNames[key]
 	b.groupNameMu.Unlock()
-	if ok && time.Since(cached.fetched) < time.Hour {
-		return cached.name
+	if ok && time.Since(cached.fetched) < time.Hour && (!needAdmins || cached.admins != nil) {
+		return cached
 	}
 
 	groupInfo, err := b.client.GetGroupInfo(context.Background(), jid)
 	if err != nil {
-		// Don't cache failures — retry on the next message.
 		b.log.Warnf("GetGroupInfo failed for %s: %v", key, err)
-		return ""
+		return cached
 	}
 	if groupInfo.Name == "" {
 		b.log.Warnf("GetGroupInfo returned empty name for %s", key)
 	}
-	b.setGroupName(key, groupInfo.Name)
-	return groupInfo.Name
+	entry := cachedGroupName{name: groupInfo.Name, admins: map[string]bool{}, fetched: time.Now()}
+	for _, p := range groupInfo.Participants {
+		if p.IsAdmin || p.IsSuperAdmin {
+			for _, j := range []types.JID{p.JID, p.PhoneNumber, p.LID} {
+				if !j.IsEmpty() {
+					entry.admins[j.User] = true
+				}
+			}
+		}
+	}
+	b.groupNameMu.Lock()
+	b.groupNames[key] = entry
+	b.groupNameMu.Unlock()
+	return entry
 }
 
+// setGroupName records a rename; the admin list is kept.
 func (b *Bridge) setGroupName(jid, name string) {
 	b.groupNameMu.Lock()
-	b.groupNames[jid] = cachedGroupName{name: name, fetched: time.Now()}
+	entry := b.groupNames[jid]
+	entry.name, entry.fetched = name, time.Now()
+	b.groupNames[jid] = entry
+	b.groupNameMu.Unlock()
+}
+
+// forgetGroupAdmins makes the next admin check refetch the group's info.
+func (b *Bridge) forgetGroupAdmins(jid string) {
+	b.groupNameMu.Lock()
+	if entry, ok := b.groupNames[jid]; ok {
+		entry.admins = nil
+		b.groupNames[jid] = entry
+	}
 	b.groupNameMu.Unlock()
 }
 
 // Helper functions
 
 // bestContactName picks a DM display name. The user's address book FullName
-// (synced from the primary device) is authoritative — it may overwrite an
-// existing name. Push names (self-chosen, mutable) and business names only
+// (synced from the primary device) wins, then a business's verified name
+// (WhatsApp shows it in place of the push name); both are authoritative —
+// they may overwrite an existing name. Push names (self-chosen, mutable) only
 // fill in when there's nothing better; eventPushName is the push name carried
 // by a live message event ("" when not applicable, e.g. our own messages).
 func bestContactName(contact types.ContactInfo, eventPushName string) (name string, authoritative bool) {
 	switch {
 	case contact.FullName != "":
 		return contact.FullName, true
+	case contact.BusinessName != "":
+		return contact.BusinessName, true
 	case eventPushName != "":
 		return eventPushName, false
 	case contact.PushName != "":
 		return contact.PushName, false
-	case contact.BusinessName != "":
-		return contact.BusinessName, false
 	}
 	return "", false
+}
+
+// dmName is bestContactName for a live DM, with the verified business name
+// the message itself carries — whatsmeow stores it in the contact store
+// asynchronously, so the first message from a business can predate it there.
+func dmName(contact types.ContactInfo, verifiedName, eventPushName string) (name string, authoritative bool) {
+	if contact.FullName == "" && verifiedName != "" {
+		return verifiedName, true
+	}
+	return bestContactName(contact, eventPushName)
+}
+
+// handleBusinessName applies a business's (changed) verified name to its DM,
+// unless the user's address book names it.
+func (b *Bridge) handleBusinessName(evt *events.BusinessName) {
+	if evt.NewBusinessName == "" {
+		return
+	}
+	user := evt.JID.ToNonAD()
+	resolved := b.resolveLIDJID(user)
+	if b.lookupContact(resolved, user).FullName != "" {
+		return
+	}
+	jid := resolved.String()
+	if b.UpdateConversationName(jid, evt.NewBusinessName) {
+		b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: jid})
+	}
 }
 
 // lookupContact fetches a contact record, checking under the resolved phone
@@ -887,9 +1366,10 @@ func applyMentions(text string, mentionedJIDs []string, nameFor func(types.JID) 
 
 // buildMessageRow assembles the MessageRow fields shared by the live message
 // handler and history sync: content classification, raw proto (kept for
-// later media download), reply context, and media mime type.
+// later media download), reply context, and media mime type. msg is the
+// content message (see contentMessage).
 func (b *Bridge) buildMessageRow(msg *waE2E.Message, id, convJID, senderJID string, ts int64, isFromMe bool, status string) *MessageRow {
-	contentType, textBody := classifyMessage(msg)
+	contentType, textBody, _ := extractContent(msg)
 	textBody = b.resolveMentions(msg, convJID, textBody)
 	rawProto, _ := proto.Marshal(msg)
 
@@ -918,58 +1398,11 @@ func (b *Bridge) buildMessageRow(msg *waE2E.Message, id, convJID, senderJID stri
 	}
 }
 
-func classifyMessage(msg *waE2E.Message) (contentType string, textBody string) {
-	switch {
-	case msg.GetConversation() != "":
-		return "text", msg.GetConversation()
-	case msg.GetExtendedTextMessage() != nil:
-		return "text", msg.GetExtendedTextMessage().GetText()
-	case msg.GetImageMessage() != nil:
-		return "image", msg.GetImageMessage().GetCaption()
-	case msg.GetVideoMessage() != nil:
-		return "video", msg.GetVideoMessage().GetCaption()
-	case msg.GetAudioMessage() != nil:
-		return "audio", ""
-	case msg.GetDocumentMessage() != nil:
-		return "document", msg.GetDocumentMessage().GetFileName()
-	case msg.GetStickerMessage() != nil:
-		return "sticker", ""
-	case msg.GetLocationMessage() != nil:
-		return "location", fmt.Sprintf("%.6f, %.6f", msg.GetLocationMessage().GetDegreesLatitude(), msg.GetLocationMessage().GetDegreesLongitude())
-	case msg.GetContactMessage() != nil:
-		return "contact", msg.GetContactMessage().GetDisplayName()
-	default:
-		return "text", ""
-	}
-}
-
-func getContextInfo(msg *waE2E.Message) *waE2E.ContextInfo {
-	if ext := msg.GetExtendedTextMessage(); ext != nil {
-		return ext.GetContextInfo()
-	}
-	if img := msg.GetImageMessage(); img != nil {
-		return img.GetContextInfo()
-	}
-	if vid := msg.GetVideoMessage(); vid != nil {
-		return vid.GetContextInfo()
-	}
-	if aud := msg.GetAudioMessage(); aud != nil {
-		return aud.GetContextInfo()
-	}
-	if doc := msg.GetDocumentMessage(); doc != nil {
-		return doc.GetContextInfo()
-	}
-	if stk := msg.GetStickerMessage(); stk != nil {
-		return stk.GetContextInfo()
-	}
-	return nil
-}
-
 func getMediaMime(msg *waE2E.Message) string {
 	if img := msg.GetImageMessage(); img != nil {
 		return img.GetMimetype()
 	}
-	if vid := msg.GetVideoMessage(); vid != nil {
+	if vid := videoOf(msg); vid != nil {
 		return vid.GetMimetype()
 	}
 	if aud := msg.GetAudioMessage(); aud != nil {
@@ -988,7 +1421,7 @@ func getInlineThumbnail(msg *waE2E.Message) []byte {
 	if img := msg.GetImageMessage(); img != nil {
 		return img.GetJPEGThumbnail()
 	}
-	if vid := msg.GetVideoMessage(); vid != nil {
+	if vid := videoOf(msg); vid != nil {
 		return vid.GetJPEGThumbnail()
 	}
 	if doc := msg.GetDocumentMessage(); doc != nil {
@@ -997,13 +1430,30 @@ func getInlineThumbnail(msg *waE2E.Message) []byte {
 	return nil
 }
 
-func getEditTargetID(msg *waE2E.Message) string {
-	if edit := msg.GetProtocolMessage(); edit != nil {
-		if edit.GetKey() != nil {
-			return edit.GetKey().GetID()
-		}
+// applyEdit replaces a stored message's text with its edited version — only
+// if the editor sent it, in this chat (the server can't check; message IDs are
+// visible to every group member). An edit whose new text can't be extracted
+// is ignored rather than blanking the row.
+func (b *Bridge) applyEdit(chatJID, targetID string, edited *waE2E.Message, by author) {
+	_, newText, _ := extractContent(edited)
+	if newText == "" {
+		b.log.Warnf("Ignoring edit of %s in %s: no text in edited content", targetID, chatJID)
+		return
 	}
-	return ""
+	newText = b.resolveMentions(edited, chatJID, newText)
+	applied, err := b.UpdateMessageEdit(targetID, chatJID, newText, &by)
+	if err != nil {
+		b.log.Errorf("Failed to apply edit of %s: %v", targetID, err)
+		return
+	}
+	if !applied {
+		b.log.Debugf("Ignoring edit of %s in %s: no such message from the editor", targetID, chatJID)
+		return
+	}
+	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
+		ConversationJID: chatJID,
+		MessageID:       targetID,
+	})
 }
 
 func (b *Bridge) buildTextMessage(text string, replyToID string) *waE2E.Message {
@@ -1020,6 +1470,33 @@ func (b *Bridge) buildTextMessage(text string, replyToID string) *waE2E.Message 
 				StanzaID: proto.String(replyToID),
 			},
 		},
+	}
+}
+
+// videoOf returns a message's video, including a round "video note" (PTV).
+func videoOf(msg *waE2E.Message) *waE2E.VideoMessage {
+	if vid := msg.GetVideoMessage(); vid != nil {
+		return vid
+	}
+	return msg.GetPtvMessage()
+}
+
+// saveInlineThumbnail stores a media message's embedded JPEG preview.
+func (b *Bridge) saveInlineThumbnail(msgID string, msg *waE2E.Message) {
+	if thumb := getInlineThumbnail(msg); len(thumb) > 0 {
+		if thumbPath := b.saveThumbnail(msgID, thumb); thumbPath != "" {
+			b.UpdateThumbnailPath(msgID, thumbPath)
+		}
+	}
+}
+
+// requestFromPhone asks the primary device to resend a message it masked
+// from linked devices (some business messages are). The copy arrives as a
+// normal message event with UnavailableRequestID set.
+func (b *Bridge) requestFromPhone(info types.MessageInfo) {
+	req := b.client.BuildUnavailableMessageRequest(info.Chat, info.Sender, info.ID)
+	if _, err := b.client.SendPeerMessage(context.Background(), req); err != nil {
+		b.log.Warnf("Failed to request %s from phone: %v", info.ID, err)
 	}
 }
 

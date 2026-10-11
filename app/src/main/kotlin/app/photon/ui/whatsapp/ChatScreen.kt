@@ -26,6 +26,19 @@ private fun formatJidAsPhone(jid: String): String {
     }
 }
 
+/**
+ * The read receipt to send for a chat's messages (newest first): the newest
+ * incoming message's id plus up to 20 incoming ids, or null when that one is
+ * already marked. Call rows are skipped — their ids are Photon's own, not
+ * message ids WhatsApp can take a receipt for.
+ */
+internal fun markReadRequest(messages: List<Message>, lastMarkedReadId: String?): Pair<String, List<String>>? {
+    val incoming = messages.filter { !it.isFromMe && it.contentType != "call" }
+    val newestId = incoming.firstOrNull()?.id ?: return null
+    if (newestId == lastMarkedReadId) return null
+    return newestId to incoming.take(20).map { it.id }
+}
+
 @Composable
 fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, onBack: () -> Unit) {
     val repo = PhotonService._chatRepository ?: return
@@ -38,9 +51,34 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
     val conversation = convs?.firstOrNull { it.jid == jid } ?: remember(jid) { repo.getConversation(jid) }
     val isGroup = conversation?.isGroup ?: jid.contains("@g.us")
     var viewingMedia by remember { mutableStateOf<Message?>(null) }
-    // Newest incoming message id we've already marked read, so we don't
-    // re-send markRead for the same messages on every list emission.
+    // Newest incoming message id the bridge has confirmed read, so we don't
+    // re-send markRead for the same messages on every list emission. Set only
+    // once a request succeeds: a failed one (bridge restarting, WhatsApp
+    // offline) is retried on the next list change or when WhatsApp reconnects.
     var lastMarkedReadId by remember(jid) { mutableStateOf<String?>(null) }
+    var markReadInFlight by remember(jid) { mutableStateOf(false) }
+    var latestMessages by remember(jid) { mutableStateOf<List<Message>>(emptyList()) }
+
+    fun markRead() {
+        if (markReadInFlight) return
+        val (newestId, ids) = markReadRequest(latestMessages, lastMarkedReadId) ?: return
+        markReadInFlight = true
+        scope.launch {
+            try {
+                if (repo.markRead(jid, ids).string("error") == null) lastMarkedReadId = newestId
+            } catch (_: Exception) {
+            } finally {
+                markReadInFlight = false
+            }
+            // Catch up on messages that arrived while the request was out.
+            if (lastMarkedReadId == newestId) markRead()
+        }
+    }
+
+    val waState = PhotonService._wsClient?.whatsappState?.collectAsState()?.value
+    LaunchedEffect(waState) {
+        if (waState == "connected") markRead()
+    }
 
     // Participant names as a flow so they refresh when names resolve (the
     // conversations flow can't carry these — see ChatRepository.participantNames).
@@ -72,14 +110,8 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
         onBack = onBack,
         onMediaTap = { msg -> viewingMedia = msg },
         onMessagesLoaded = { messages ->
-            // messages arrive newest-first; only mark read when a new
-            // incoming message appears.
-            val newestIncomingId = messages.firstOrNull { !it.isFromMe }?.id
-            if (newestIncomingId != null && newestIncomingId != lastMarkedReadId) {
-                lastMarkedReadId = newestIncomingId
-                val unreadIds = messages.filter { !it.isFromMe }.take(20).map { it.id }
-                scope.launch { try { repo.markRead(jid, unreadIds) } catch (_: Exception) {} }
-            }
+            latestMessages = messages
+            markRead()
         },
         onReact = { messageId, senderJid, emoji ->
             scope.launch { try { repo.sendReaction(jid, messageId, senderJid, emoji) } catch (_: Exception) {} }

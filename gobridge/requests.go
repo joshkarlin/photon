@@ -4,75 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
+	"math"
 
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
-	"nhooyr.io/websocket"
 )
 
-// RegisterWSHandler registers the WebSocket handler on the given mux.
-func (b *Bridge) RegisterWSHandler(mux *http.ServeMux) {
-	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-			InsecureSkipVerify: true, // localhost only
-		})
-		if err != nil {
-			b.log.Errorf("WS accept error: %v", err)
-			return
-		}
-
-		b.AddConn(conn)
-		b.log.Infof("WebSocket client connected")
-
-		// Send current connection state
-		state, reason := b.currentConnectionState()
-		b.sendToConn(conn, WsMessage{
-			Type:    "connection_state",
-			Payload: mustMarshal(ConnectionStateEvent{State: state, Reason: reason}),
-		})
-
-		defer func() {
-			b.RemoveConn(conn)
-			conn.Close(websocket.StatusNormalClosure, "")
-			b.log.Infof("WebSocket client disconnected")
-		}()
-
-		// Read loop
-		for {
-			_, data, err := conn.Read(r.Context())
-			if err != nil {
-				break
-			}
-
-			var msg WsMessage
-			if err := json.Unmarshal(data, &msg); err != nil {
-				b.log.Warnf("Invalid WS message: %v", err)
-				continue
-			}
-
-			// Handle each request in its own goroutine so a slow one
-			// (send_media uploads) doesn't block subsequent requests on the
-			// socket. Responses carry the request's correlation ID, so
-			// out-of-order replies are fine, and nhooyr's Conn serializes
-			// concurrent writes internally (BroadcastEvent already relies
-			// on that).
-			go func(msg WsMessage) {
-				b.sendToConn(conn, b.handleRequest(r.Context(), msg))
-			}(msg)
-		}
-	})
-}
-
-func (b *Bridge) sendToConn(conn *websocket.Conn, msg WsMessage) {
-	data, err := json.Marshal(msg)
-	if err != nil {
-		b.log.Errorf("Failed to marshal response: %v", err)
-		return
-	}
-	conn.Write(context.Background(), websocket.MessageText, data)
-}
-
+// handleRequest runs one request from Kotlin and builds its response.
 func (b *Bridge) handleRequest(ctx context.Context, msg WsMessage) WsMessage {
 	var payload json.RawMessage
 	var err error
@@ -235,8 +173,15 @@ func (b *Bridge) handleMarkRead(ctx context.Context, raw json.RawMessage) (json.
 	// Resolve LID → phone so the badge clears on the same conversation row the
 	// message/receipt handlers write (handleReceipt resolves for this reason).
 	jid := b.resolveLIDString(p.JID)
-	b.ResetUnread(jid)
-	err := b.MarkRead(ctx, jid, p.MessageIDs)
+	// Every incoming row is now read, not just the IDs listed (the UI sends
+	// the newest few): a later revoke of an older message must not think it
+	// was still unread.
+	b.MarkChatReadUpTo(jid, math.MaxInt64)
+	ids := b.WithoutCallRows(p.MessageIDs)
+	if len(ids) == 0 {
+		return mustMarshal(struct{}{}), nil
+	}
+	err := b.MarkRead(ctx, jid, ids)
 	return mustMarshal(struct{}{}), err
 }
 
@@ -262,7 +207,7 @@ func (b *Bridge) handleEditMessage(ctx context.Context, raw json.RawMessage) (js
 		return nil, err
 	}
 
-	b.UpdateMessageEdit(p.MessageID, p.NewText, 1)
+	b.UpdateMessageEdit(p.MessageID, targetJID.String(), p.NewText, &author{isMe: true})
 	// Tell connected UIs to refresh, mirroring the live edit path which
 	// broadcasts message_updated (ws request responses don't flow through the
 	// event stream).

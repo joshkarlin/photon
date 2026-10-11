@@ -15,7 +15,6 @@ import (
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
-	"nhooyr.io/websocket"
 )
 
 // RetentionConfig controls how long messages and media are kept.
@@ -25,13 +24,14 @@ type RetentionConfig struct {
 	MediaTTLMins int // Minutes before temp media files are deleted
 }
 
-// cachedGroupName is a groupNames cache entry; see Bridge.groupName.
+// cachedGroupName is a groupNames cache entry; see Bridge.groupEntry.
 type cachedGroupName struct {
 	name    string
+	admins  map[string]bool // user parts (phone and LID) of admins; nil = not fetched
 	fetched time.Time
 }
 
-// Bridge holds the whatsmeow client, message DB, and WebSocket connections.
+// Bridge holds the whatsmeow client, the message DB, and the line to Kotlin.
 type Bridge struct {
 	client  *whatsmeow.Client
 	msgDB   *sql.DB
@@ -39,8 +39,13 @@ type Bridge struct {
 	log     waLog.Logger
 
 	mu        sync.RWMutex
-	conns     []*websocket.Conn
 	retention RetentionConfig
+
+	// out carries responses and events to Kotlin (stdout); see transport.go.
+	out *lineWriter
+	// emit delivers one outbound event envelope to Kotlin. NewBridge wires it
+	// to the transport; tests swap in a recorder.
+	emit func(WsMessage)
 
 	connectionStateMu sync.RWMutex
 	connectionState   string
@@ -52,11 +57,14 @@ type Bridge struct {
 
 	groupNameMu sync.Mutex
 	groupNames  map[string]cachedGroupName
+
+	calls      callTracker
+	reconciler coalescer
 }
 
 // NewBridge creates a new Bridge instance.
 func NewBridge(client *whatsmeow.Client, msgDB *sql.DB, dataDir string, log waLog.Logger) *Bridge {
-	return &Bridge{
+	b := &Bridge{
 		client:          client,
 		msgDB:           msgDB,
 		dataDir:         dataDir,
@@ -69,6 +77,8 @@ func NewBridge(client *whatsmeow.Client, msgDB *sql.DB, dataDir string, log waLo
 			MediaTTLMins: 5,
 		},
 	}
+	b.emit = b.writeEvent
+	return b
 }
 
 // SetRetention updates the retention configuration.
@@ -202,26 +212,7 @@ func (b *Bridge) pruneMediaDir(dir string, cutoff time.Time, column string) {
 	}
 }
 
-// AddConn registers a WebSocket connection for event broadcasting.
-func (b *Bridge) AddConn(conn *websocket.Conn) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.conns = append(b.conns, conn)
-}
-
-// RemoveConn unregisters a WebSocket connection.
-func (b *Bridge) RemoveConn(conn *websocket.Conn) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for i, c := range b.conns {
-		if c == conn {
-			b.conns = append(b.conns[:i], b.conns[i+1:]...)
-			return
-		}
-	}
-}
-
-// BroadcastEvent sends a JSON event to all connected WebSocket clients.
+// BroadcastEvent sends a JSON event to Kotlin.
 func (b *Bridge) BroadcastEvent(eventType string, payload interface{}) {
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -229,20 +220,8 @@ func (b *Bridge) BroadcastEvent(eventType string, payload interface{}) {
 		return
 	}
 
-	msg := WsMessage{
-		Type:    eventType,
-		Payload: payloadBytes,
-	}
-	msgBytes, err := json.Marshal(msg)
-	if err != nil {
-		b.log.Errorf("Failed to marshal event: %v", err)
-		return
-	}
-
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	for _, conn := range b.conns {
-		conn.Write(context.Background(), websocket.MessageText, msgBytes)
+	if b.emit != nil {
+		b.emit(WsMessage{Type: eventType, Payload: payloadBytes})
 	}
 }
 
@@ -391,6 +370,10 @@ func (b *Bridge) RetryMessage(ctx context.Context, messageID string) error {
 		if mediaURL == "" {
 			b.markMessageFailed(jid, messageID)
 			return fmt.Errorf("retry: media row has no source file path")
+		}
+		if err := b.sendableFile(mediaURL); err != nil {
+			b.markMessageFailed(jid, messageID)
+			return fmt.Errorf("retry: %w", err)
 		}
 		data, err := os.ReadFile(mediaURL)
 		if err != nil {

@@ -26,10 +26,25 @@ fun Cursor.toConversation(): Conversation {
         lastMessageId = getStringOrNull("last_message_id"),
         lastTimestamp = getLong(getColumnIndexOrThrow("last_timestamp")),
         unreadCount = getInt(getColumnIndexOrThrow("unread_count")),
-        isMuted = getInt(getColumnIndexOrThrow("is_muted")) == 1,
+        isMuted = isMutedAt(
+            flag = getInt(getColumnIndexOrThrow("is_muted")) == 1,
+            mutedUntil = getLongOrNull("muted_until"),
+            nowSeconds = System.currentTimeMillis() / 1000,
+        ),
         avatarUrl = getStringOrNull("avatar_url"),
         updatedAt = getLong(getColumnIndexOrThrow("updated_at")),
     )
+}
+
+/**
+ * Whether a mute is in force now. WhatsApp rows carry muted_until (-1 = muted
+ * forever, 0 = not muted, otherwise the unix second the mute ends) so timed
+ * mutes lapse on their own; tables without the column (Signal) use the flag.
+ */
+fun isMutedAt(flag: Boolean, mutedUntil: Long?, nowSeconds: Long): Boolean = when (mutedUntil) {
+    null -> flag
+    -1L -> true
+    else -> mutedUntil > nowSeconds
 }
 
 fun Cursor.toMessages(): List<Message> {

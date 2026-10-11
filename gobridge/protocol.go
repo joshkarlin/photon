@@ -2,7 +2,8 @@ package main
 
 import "encoding/json"
 
-// WsMessage is the envelope for all WebSocket messages.
+// WsMessage is the envelope for every request, response and event exchanged
+// with Kotlin (one per line; see transport.go).
 type WsMessage struct {
 	ID      string          `json:"id,omitempty"`
 	Type    string          `json:"type"`
@@ -123,10 +124,30 @@ type MessageUpdatedEvent struct {
 	MessageID       string `json:"message_id"`
 }
 
+// MessageRevokedEvent: a message was deleted for everyone and now renders as
+// "[ deleted ]". When WasUnread and UnreadCount is 0, the notification that
+// announced it should go.
+type MessageRevokedEvent struct {
+	ConversationJID string `json:"conversation_jid"`
+	MessageID       string `json:"message_id"`
+	WasUnread       bool   `json:"was_unread"`
+	UnreadCount     int    `json:"unread_count"`
+}
+
+// ReceiptEvent reports a contact's delivered/read receipt for our outgoing
+// messages. It never means the user read anything — see ReadSelfEvent.
 type ReceiptEvent struct {
 	ConversationJID string   `json:"conversation_jid"`
 	MessageIDs      []string `json:"message_ids"`
 	Type            string   `json:"type"` // "delivered", "read"
+}
+
+// ReadSelfEvent means the user read the conversation on another of their
+// devices (or marked it read there): unread is now 0, so its notification can
+// go. MessageIDs is empty when a whole chat was marked read.
+type ReadSelfEvent struct {
+	ConversationJID string   `json:"conversation_jid"`
+	MessageIDs      []string `json:"message_ids,omitempty"`
 }
 
 type TypingEvent struct {
@@ -145,10 +166,31 @@ type HistorySyncProgressEvent struct {
 	MessagesTotal      int `json:"messages_total"`
 }
 
-type CallOfferEvent struct {
-	FromJID string `json:"from_jid"`
-	CallID  string `json:"call_id"`
-	IsVideo bool   `json:"is_video"`
+// CallIncomingEvent: a call is ringing on the user's other devices.
+type CallIncomingEvent struct {
+	ConversationJID string `json:"conversation_jid"`
+	CallerName      string `json:"caller_name"`
+	IsVideo         bool   `json:"is_video"`
+	CallID          string `json:"call_id"`
+	IsGroup         bool   `json:"is_group"`
+}
+
+// CallEndedEvent: a ringing call stopped without being missed — answered
+// elsewhere, or declined by the user on another device.
+type CallEndedEvent struct {
+	ConversationJID string `json:"conversation_jid"`
+	CallID          string `json:"call_id"`
+	Answered        bool   `json:"answered"`
+}
+
+// CallMissedEvent: a call ended unanswered; a "Missed … call" row was added
+// to the chat and counted as unread.
+type CallMissedEvent struct {
+	ConversationJID string `json:"conversation_jid"`
+	CallerName      string `json:"caller_name"`
+	IsVideo         bool   `json:"is_video"`
+	IsGroup         bool   `json:"is_group"`
+	CallID          string `json:"call_id"`
 }
 
 type ErrorResponse struct {

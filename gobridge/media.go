@@ -21,8 +21,8 @@ func downloadableMedia(msg *waE2E.Message) whatsmeow.DownloadableMessage {
 	switch {
 	case msg.GetImageMessage() != nil:
 		return msg.GetImageMessage()
-	case msg.GetVideoMessage() != nil:
-		return msg.GetVideoMessage()
+	case videoOf(msg) != nil:
+		return videoOf(msg)
 	case msg.GetAudioMessage() != nil:
 		return msg.GetAudioMessage()
 	case msg.GetDocumentMessage() != nil:
@@ -72,6 +72,18 @@ func (b *Bridge) DownloadMediaByID(msgID string) (string, error) {
 	return b.DownloadMedia(msgID, msg)
 }
 
+// isBridgeMediaPath reports whether path is a file the bridge itself wrote
+// (downloaded media or a thumbnail), as opposed to a user's staged send file.
+func (b *Bridge) isBridgeMediaPath(path string) bool {
+	clean := filepath.Clean(path)
+	for _, dir := range []string{"media", "thumbs"} {
+		if filepath.Dir(clean) == filepath.Join(b.dataDir, dir) {
+			return true
+		}
+	}
+	return false
+}
+
 // saveThumbnail saves inline JPEG thumbnail bytes to disk.
 func (b *Bridge) saveThumbnail(msgID string, data []byte) string {
 	path := filepath.Join(b.dataDir, "thumbs", msgID+".jpg")
@@ -89,6 +101,9 @@ func (b *Bridge) saveThumbnail(msgID string, data []byte) string {
 // row goes in with status="sending" before the upload starts so users see
 // it the instant they tap send.
 func (b *Bridge) UploadAndSend(jid, filePath, mimeType, caption, replyToID string) (string, int64, error) {
+	if err := b.sendableFile(filePath); err != nil {
+		return "", 0, err
+	}
 	targetJID, err := types.ParseJID(jid)
 	if err != nil {
 		return "", 0, err

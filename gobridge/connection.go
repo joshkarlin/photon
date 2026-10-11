@@ -17,8 +17,8 @@ const (
 )
 
 // setConnectionState stores and publishes the WhatsApp state. Keeping this in
-// the bridge (rather than only in the Android WebSocket client) means a UI
-// reconnect gets the real WhatsApp state immediately.
+// the bridge (rather than only in the Android client) means a restarted
+// connection gets the real WhatsApp state immediately.
 func (b *Bridge) setConnectionState(state, reason string) {
 	b.connectionStateMu.Lock()
 	b.connectionState = state
@@ -75,7 +75,7 @@ func (b *Bridge) pauseReconnect(reason string) {
 }
 
 // StartConnectionWatchdog retries a paired session when whatsmeow's socket is
-// gone without relying solely on a local WebSocket refresh. It deliberately
+// gone without relying solely on a refresh request from the app. It deliberately
 // uses a bounded backoff so a phone/network outage does not create a tight
 // reconnect loop.
 func (b *Bridge) StartConnectionWatchdog(ctx context.Context) {

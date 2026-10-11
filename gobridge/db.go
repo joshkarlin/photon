@@ -39,7 +39,8 @@ func (b *Bridge) InitMessageDB(ctx context.Context) error {
 			unread_count    INTEGER NOT NULL DEFAULT 0,
 			is_muted        INTEGER NOT NULL DEFAULT 0,
 			avatar_url      TEXT,
-			updated_at      INTEGER NOT NULL DEFAULT 0
+			updated_at      INTEGER NOT NULL DEFAULT 0,
+			muted_until     INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS messages (
 			id              TEXT PRIMARY KEY,
@@ -83,8 +84,54 @@ func (b *Bridge) InitMessageDB(ctx context.Context) error {
 			return fmt.Errorf("schema exec failed: %w", err)
 		}
 	}
+	if err := b.migrateMessageDB(ctx); err != nil {
+		return err
+	}
 	b.log.Infof("Message DB schema initialized (%d statements)", len(statements))
 	return nil
+}
+
+// migrateMessageDB upgrades existing installs in place. Each step is
+// idempotent; CREATE TABLE IF NOT EXISTS above never alters an existing table.
+func (b *Bridge) migrateMessageDB(ctx context.Context) error {
+	// muted_until: 0 = not muted, -1 = muted forever, otherwise the unix
+	// second the mute ends. Rows muted before this column existed have no
+	// known end, so start them as "forever"; BackfillMutedUntil then copies
+	// the real end time from whatsmeow's own chat settings.
+	added, err := b.addColumnIfMissing(ctx, "conversations", "muted_until", "INTEGER NOT NULL DEFAULT 0")
+	if err != nil {
+		return err
+	}
+	if added {
+		if _, err := b.msgDB.ExecContext(ctx, `UPDATE conversations SET muted_until = -1 WHERE is_muted = 1`); err != nil {
+			return fmt.Errorf("migrate muted_until: %w", err)
+		}
+		b.log.Infof("Migrated conversations: added muted_until")
+	}
+	return nil
+}
+
+// addColumnIfMissing adds a column unless the table already has it.
+func (b *Bridge) addColumnIfMissing(ctx context.Context, table, column, def string) (added bool, err error) {
+	rows, err := b.msgDB.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false, fmt.Errorf("inspect %s: %w", table, err)
+	}
+	exists := false
+	for rows.Next() {
+		var name string
+		if rows.Scan(&name) == nil && name == column {
+			exists = true
+		}
+	}
+	rows.Close()
+	if exists {
+		return false, nil
+	}
+	if _, err := b.msgDB.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+def); err != nil {
+		return false, fmt.Errorf("add %s.%s: %w", table, column, err)
+	}
+	return true, nil
 }
 
 // RepairConversationMetadata fixes existing conversation rows whose is_group or
@@ -104,14 +151,38 @@ func (b *Bridge) RepairConversationMetadata() {
 	`)
 }
 
+// execer is a *sql.DB or *sql.Tx.
+type execer interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+}
+
+// inTx runs fn in a transaction, committing only if it succeeds.
+func (b *Bridge) inTx(fn func(*sql.Tx) error) error {
+	tx, err := b.msgDB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // UpsertConversation creates or updates a conversation record.
 func (b *Bridge) UpsertConversation(jid, name string, isGroup bool, lastMsgID string, lastTS int64) {
+	if err := b.upsertConversation(b.msgDB, jid, name, isGroup, lastMsgID, lastTS); err != nil {
+		b.log.Errorf("Failed to upsert conversation %s: %v", jid, err)
+	}
+}
+
+func (b *Bridge) upsertConversation(ex execer, jid, name string, isGroup bool, lastMsgID string, lastTS int64) error {
 	isGroupInt := 0
 	if isGroup {
 		isGroupInt = 1
 	}
 
-	_, err := b.msgDB.Exec(`
+	_, err := ex.Exec(`
 		INSERT INTO conversations (jid, name, is_group, last_message_id, last_timestamp, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(jid) DO UPDATE SET
@@ -126,10 +197,7 @@ func (b *Bridge) UpsertConversation(jid, name string, isGroup bool, lastMsgID st
 			last_timestamp = MAX(excluded.last_timestamp, conversations.last_timestamp),
 			updated_at = excluded.updated_at
 	`, jid, name, isGroupInt, lastMsgID, lastTS, lastTS)
-
-	if err != nil {
-		b.log.Errorf("Failed to upsert conversation %s: %v", jid, err)
-	}
+	return err
 }
 
 // IncrementUnread increments the unread count for a conversation.
@@ -172,6 +240,37 @@ func (b *Bridge) SendersForMessages(ids []string) map[string]string {
 	return out
 }
 
+// WithoutCallRows drops call rows from a list of message IDs. Their IDs are
+// Photon's own ("call_<id>"), not message IDs WhatsApp could take a read
+// receipt for.
+func (b *Bridge) WithoutCallRows(ids []string) []string {
+	if len(ids) == 0 {
+		return ids
+	}
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	calls := map[string]bool{}
+	rows, err := b.msgDB.Query(`SELECT id FROM messages WHERE content_type = 'call' AND id IN (`+sqlInList(len(ids))+`)`, args...)
+	if err == nil {
+		for rows.Next() {
+			var id string
+			if rows.Scan(&id) == nil {
+				calls[id] = true
+			}
+		}
+		rows.Close()
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !calls[id] && !strings.HasPrefix(id, "call_") {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // ResetUnread sets unread count to 0 for a conversation.
 func (b *Bridge) ResetUnread(jid string) {
 	_, err := b.msgDB.Exec(`UPDATE conversations SET unread_count = 0 WHERE jid = ?`, jid)
@@ -180,18 +279,111 @@ func (b *Bridge) ResetUnread(jid string) {
 	}
 }
 
-// UpdateMute sets is_muted for a conversation, inserting the row if it
-// doesn't exist yet (mute events can arrive before any message in a chat).
-func (b *Bridge) UpdateMute(jid string, muted bool) {
+// MarkChatReadUpTo marks the chat's incoming messages up to ts read and
+// lowers the unread count to the messages that arrived after ts (never raising
+// it — the count can include messages pruned or never stored). Returns the
+// remaining unread count.
+func (b *Bridge) MarkChatReadUpTo(jid string, ts int64) (remaining int) {
+	if _, err := b.msgDB.Exec(`UPDATE messages SET status = 'read'
+		WHERE conversation_jid = ? AND is_from_me = 0 AND status NOT IN ('read', 'deleted') AND timestamp <= ?`, jid, ts); err != nil {
+		b.log.Errorf("Failed to mark %s read: %v", jid, err)
+	}
+	if _, err := b.msgDB.Exec(`UPDATE conversations SET unread_count = MIN(unread_count, (
+			SELECT COUNT(*) FROM messages
+			WHERE conversation_jid = ? AND is_from_me = 0 AND status NOT IN ('read', 'deleted') AND timestamp > ?
+		)) WHERE jid = ?`, jid, ts, jid); err != nil {
+		b.log.Errorf("Failed to recount unread for %s: %v", jid, err)
+	}
+	b.msgDB.QueryRow(`SELECT unread_count FROM conversations WHERE jid = ?`, jid).Scan(&remaining)
+	return remaining
+}
+
+// RevokeResult describes a message blanked by a "delete for everyone".
+type RevokeResult struct {
+	ConversationJID string
+	WasUnread       bool     // it was an incoming message the user hadn't read
+	Unread          int      // the conversation's unread count afterwards
+	Files           []string // downloaded media/thumbnail paths now orphaned
+}
+
+// RevokeMessage blanks a message deleted for everyone so it renders as
+// "[ deleted ]" (text type, no body, status "deleted"), drops its reactions,
+// and takes it out of the unread count if it was still unread. Only a message
+// in chatJID sent by `by` matches (nil: any sender). ok is false when no such
+// message is stored (pruned, outside the history window, or not theirs).
+func (b *Bridge) RevokeMessage(id, chatJID string, by *author) (res RevokeResult, ok bool) {
+	tx, err := b.msgDB.Begin()
+	if err != nil {
+		b.log.Errorf("Revoke %s: %v", id, err)
+		return res, false
+	}
+	defer tx.Rollback()
+
+	query := `SELECT conversation_jid, is_from_me, status, media_url, thumbnail_path FROM messages WHERE id = ? AND conversation_jid = ?`
+	args := []interface{}{id, chatJID}
+	if by != nil {
+		clause, extra := by.sqlClause()
+		query += " AND " + clause
+		args = append(args, extra...)
+	}
+	var isFromMe int
+	var status string
+	var mediaURL, thumbPath sql.NullString
+	err = tx.QueryRow(query, args...).Scan(&res.ConversationJID, &isFromMe, &status, &mediaURL, &thumbPath)
+	if err != nil {
+		return res, false
+	}
+	res.WasUnread = isFromMe == 0 && status != "read" && status != "deleted"
+	// Only bridge-owned downloads are removed — an outgoing row's media_url is
+	// the user's own staged file.
+	if isFromMe == 0 {
+		for _, p := range []sql.NullString{mediaURL, thumbPath} {
+			if p.Valid && p.String != "" {
+				res.Files = append(res.Files, p.String)
+			}
+		}
+	}
+
+	if _, err := tx.Exec(`UPDATE messages SET content_type = 'text', text_body = NULL, media_url = NULL,
+		media_mime = NULL, media_size = NULL, thumbnail_path = NULL, raw_proto = NULL, status = 'deleted'
+		WHERE id = ?`, id); err != nil {
+		b.log.Errorf("Revoke %s: %v", id, err)
+		return res, false
+	}
+	tx.Exec(`DELETE FROM reactions WHERE message_id = ?`, id)
+	if res.WasUnread {
+		tx.Exec(`UPDATE conversations SET unread_count = MAX(unread_count - 1, 0) WHERE jid = ?`, res.ConversationJID)
+	}
+	tx.QueryRow(`SELECT unread_count FROM conversations WHERE jid = ?`, res.ConversationJID).Scan(&res.Unread)
+	if err := tx.Commit(); err != nil {
+		b.log.Errorf("Revoke %s: %v", id, err)
+		return res, false
+	}
+	return res, true
+}
+
+// MarkChatUnread mirrors WhatsApp's "mark as unread": the chat shows as unread
+// even though every message in it has been seen.
+func (b *Bridge) MarkChatUnread(jid string) {
+	if _, err := b.msgDB.Exec(`UPDATE conversations SET unread_count = MAX(unread_count, 1) WHERE jid = ?`, jid); err != nil {
+		b.log.Errorf("Failed to mark %s unread: %v", jid, err)
+	}
+}
+
+// UpdateMute stores a conversation's mute (see migrateMessageDB for
+// muted_until's encoding), inserting the row if it doesn't exist yet (mute
+// events can arrive before any message in a chat). is_muted stays as "a mute
+// is set"; whether it's still in force depends on the time it's read.
+func (b *Bridge) UpdateMute(jid string, mutedUntil int64) {
 	m := 0
-	if muted {
+	if mutedUntil != 0 {
 		m = 1
 	}
 	_, err := b.msgDB.Exec(`
-		INSERT INTO conversations (jid, is_muted, updated_at)
-		VALUES (?, ?, 0)
-		ON CONFLICT(jid) DO UPDATE SET is_muted = excluded.is_muted
-	`, jid, m)
+		INSERT INTO conversations (jid, is_muted, muted_until, updated_at)
+		VALUES (?, ?, ?, 0)
+		ON CONFLICT(jid) DO UPDATE SET is_muted = excluded.is_muted, muted_until = excluded.muted_until
+	`, jid, m, mutedUntil)
 	if err != nil {
 		b.log.Errorf("Failed to update mute for %s: %v", jid, err)
 	}
@@ -217,10 +409,30 @@ func (m *MessageRow) insertArgs() []interface{} {
 	}
 }
 
-// InsertMessage inserts a message record.
-func (b *Bridge) InsertMessage(msg *MessageRow) error {
-	_, err := b.msgDB.Exec(insertMessageSQL, msg.insertArgs()...)
-	return err
+// InsertMessage inserts a message record. inserted is false when a row with
+// the same ID already exists — a redelivery of something already stored.
+func (b *Bridge) InsertMessage(msg *MessageRow) (inserted bool, err error) {
+	res, err := b.msgDB.Exec(insertMessageSQL, msg.insertArgs()...)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// ReplaceMessageContent overwrites a stored message's content with a fuller
+// copy of it (the phone's resend of a placeholder). Returns false when no
+// row matched.
+func (b *Bridge) ReplaceMessageContent(m *MessageRow) bool {
+	res, err := b.msgDB.Exec(`UPDATE messages SET content_type = ?, text_body = ?, media_mime = ?,
+		reply_to_id = ?, raw_proto = ? WHERE id = ? AND status <> 'deleted'`,
+		m.ContentType, m.TextBody, m.MediaMime, m.ReplyToID, m.RawProto, m.ID)
+	if err != nil {
+		b.log.Errorf("Failed to replace content of %s: %v", m.ID, err)
+		return false
+	}
+	n, _ := res.RowsAffected()
+	return n > 0
 }
 
 // InsertMessages inserts a batch of messages in a single transaction. Used by
@@ -256,20 +468,57 @@ func (b *Bridge) UpdateMessageStatus(id, status string) error {
 	return err
 }
 
-// UpdateMessageStatusBatch updates the delivery status of several messages in
-// one statement (receipts often cover many IDs at once).
-func (b *Bridge) UpdateMessageStatusBatch(ids []string, status string) error {
-	if len(ids) == 0 {
+// sqlInList returns "?,?,…" for n placeholders.
+func sqlInList(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return "?" + strings.Repeat(",?", n-1)
+}
+
+// outgoingStatusesBelow lists the statuses a receipt may advance from. Status
+// only moves forward (a late "delivered" never downgrades "read"), a receipt
+// proves a "failed" send actually went through, and "deleted" is final.
+var outgoingStatusesBelow = map[string][]string{
+	"delivered": {"sending", "sent", "failed"},
+	"read":      {"sending", "sent", "failed", "delivered"},
+}
+
+// AdvanceOutgoingStatus applies a contact's delivered/read receipt to our own
+// outgoing rows (receipts often cover many IDs at once). Incoming rows with a
+// matching ID are never touched.
+func (b *Bridge) AdvanceOutgoingStatus(ids []string, status string) error {
+	from := outgoingStatusesBelow[status]
+	if len(ids) == 0 || len(from) == 0 {
 		return nil
 	}
-	args := make([]interface{}, 0, len(ids)+1)
+	args := make([]interface{}, 0, 1+len(ids)+len(from))
 	args = append(args, status)
 	for _, id := range ids {
 		args = append(args, id)
 	}
-	query := `UPDATE messages SET status = ? WHERE id IN (?` + strings.Repeat(",?", len(ids)-1) + `)`
-	_, err := b.msgDB.Exec(query, args...)
+	for _, s := range from {
+		args = append(args, s)
+	}
+	_, err := b.msgDB.Exec(`UPDATE messages SET status = ? WHERE id IN (`+sqlInList(len(ids))+
+		`) AND is_from_me = 1 AND status IN (`+sqlInList(len(from))+`)`, args...)
 	return err
+}
+
+// MarkIncomingRead records that the user read a conversation on another
+// device: the listed incoming rows become "read" and the unread badge clears.
+func (b *Bridge) MarkIncomingRead(jid string, ids []string) {
+	if len(ids) > 0 {
+		args := make([]interface{}, 0, len(ids)+1)
+		args = append(args, jid)
+		for _, id := range ids {
+			args = append(args, id)
+		}
+		if _, err := b.msgDB.Exec(`UPDATE messages SET status = 'read' WHERE conversation_jid = ? AND is_from_me = 0 AND status <> 'deleted' AND id IN (`+sqlInList(len(ids))+`)`, args...); err != nil {
+			b.log.Errorf("Failed to mark messages read in %s: %v", jid, err)
+		}
+	}
+	b.ResetUnread(jid)
 }
 
 // UpdateMessageStatusAndTimestamp updates both fields together. Used when a
@@ -280,10 +529,19 @@ func (b *Bridge) UpdateMessageStatusAndTimestamp(id, status string, ts int64) er
 	return err
 }
 
-// UpdateMessageEdit updates a message's text after an edit.
-func (b *Bridge) UpdateMessageEdit(id, newText string, editVersion int) error {
-	_, err := b.msgDB.Exec(`UPDATE messages SET text_body = ?, edit_version = ? WHERE id = ?`, newText, editVersion, id)
-	return err
+// UpdateMessageEdit replaces a message's text (the caption, for media) after
+// an edit and bumps its edit version. Only a message in chatJID sent by `by`
+// matches; deleted messages stay deleted. Returns whether one was edited.
+func (b *Bridge) UpdateMessageEdit(id, chatJID, newText string, by *author) (bool, error) {
+	clause, extra := by.sqlClause()
+	args := append([]interface{}{newText, id, chatJID}, extra...)
+	res, err := b.msgDB.Exec(`UPDATE messages SET text_body = ?, edit_version = edit_version + 1
+		WHERE id = ? AND conversation_jid = ? AND status <> 'deleted' AND `+clause, args...)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // UpsertReaction inserts or updates a reaction. Empty emoji removes the reaction.
@@ -343,12 +601,16 @@ func (b *Bridge) purgeNumberPlaceholders(groupJID string) int64 {
 	return n
 }
 
-// UpdateConversationName updates a conversation's display name.
-func (b *Bridge) UpdateConversationName(jid, name string) {
-	_, err := b.msgDB.Exec(`UPDATE conversations SET name = ? WHERE jid = ?`, name, jid)
+// UpdateConversationName updates a conversation's display name. Returns
+// whether the stored name changed.
+func (b *Bridge) UpdateConversationName(jid, name string) bool {
+	res, err := b.msgDB.Exec(`UPDATE conversations SET name = ? WHERE jid = ? AND name IS NOT ?`, name, jid, name)
 	if err != nil {
 		b.log.Errorf("Failed to update name for %s: %v", jid, err)
+		return false
 	}
+	n, _ := res.RowsAffected()
+	return n > 0
 }
 
 // UpdateConversationNameIfEmpty only sets the name if it's currently empty/null.

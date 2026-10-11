@@ -14,6 +14,8 @@ import app.photon.R
 import app.photon.PhotonApp
 import app.photon.data.db.PhotonDatabase
 import app.photon.data.model.boolean
+import app.photon.data.model.int
+import app.photon.data.model.Platform
 import app.photon.data.model.isPseudoWhatsAppJid
 import app.photon.data.model.string
 import app.photon.data.repository.ChatRepository
@@ -28,12 +30,19 @@ import app.photon.signal.SignalRepository
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.store.SignalProtocolDatabase
 import app.photon.signal.store.PhotonProtocolStore
+import app.photon.data.model.WsEvent
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.concurrent.thread
 
 class PhotonService : Service() {
 
@@ -41,13 +50,14 @@ class PhotonService : Service() {
     private lateinit var goBridge: GoBridge
     private lateinit var wsClient: WsClient
     private lateinit var chatRepository: ChatRepository
+    private var bridgeJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
         startForeground(NOTIFICATION_ID, buildNotification("Running"))
 
         goBridge = GoBridge(this)
-        wsClient = WsClient(goBridge.port)
+        wsClient = WsClient(goBridge)
         val database = PhotonDatabase(this)
         chatRepository = ChatRepository(database, wsClient, scope)
 
@@ -103,14 +113,20 @@ class PhotonService : Service() {
             }
         }
 
-        // Start Go bridge and connect WebSocket
-        scope.launch {
+        // Subscribed before the bridge starts, so no notification is missed.
+        val whatsappEvents = wsClient.subscribeLossless(WHATSAPP_SERVICE_EVENTS)
+
+        // Start the Go bridge and keep it running
+        bridgeJob = scope.launch {
             try {
-                goBridge.start()
-                connectWithRetry()
+                try {
+                    wsClient.connect()
+                } catch (e: Exception) {
+                    Log.e("PhotonService", "Failed to start Go bridge", e)
+                }
                 updateNotification()
                 // Listen for WhatsApp messages and show notifications
-                launch { listenForWhatsAppMessages() }
+                launch { listenForWhatsAppMessages(whatsappEvents) }
                 // Update notification periodically to reflect connection state
                 launch {
                     while (true) {
@@ -130,36 +146,34 @@ class PhotonService : Service() {
                         }
                     }
                 }
-                monitorProcess()
+                superviseBridge()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                Log.e("PhotonService", "Failed to start Go bridge", e)
+                Log.e("PhotonService", "WhatsApp bridge supervisor failed", e)
             }
         }
     }
 
-    private suspend fun connectWithRetry() {
-        repeat(20) { attempt ->
-            delay(500)
+    /**
+     * Restarts the bridge whenever it exits (crash, low-memory kill), backing
+     * off exponentially to a 60s cap so one that dies on startup doesn't spin.
+     */
+    private suspend fun superviseBridge() {
+        val backoff = RestartBackoff()
+        while (true) {
+            wsClient.isConnected.first { !it }
+            val wait = backoff.next()
+            Log.w("PhotonService", "WhatsApp bridge not running; restarting in ${wait}ms")
+            delay(wait)
             try {
                 wsClient.connect()
-                Log.i("PhotonService", "WebSocket connected on attempt ${attempt + 1}")
-                return
             } catch (e: Exception) {
-                Log.d("PhotonService", "WS connect attempt ${attempt + 1} failed: ${e.message}")
+                Log.e("PhotonService", "Failed to restart Go bridge", e)
             }
-        }
-        Log.e("PhotonService", "Failed to connect WebSocket after 20 attempts")
-    }
-
-    private suspend fun monitorProcess() {
-        while (true) {
-            delay(5000)
-            if (!goBridge.isRunning()) {
-                Log.w("PhotonService", "Go bridge process died, restarting...")
-                goBridge.start()
-                delay(1000)
-                wsClient.disconnect()
-                connectWithRetry()
+            // A bridge that stays up for a while has recovered.
+            if (withTimeoutOrNull(BRIDGE_STABLE_MS) { wsClient.isConnected.first { !it } } == null) {
+                backoff.reset()
             }
         }
     }
@@ -172,8 +186,10 @@ class PhotonService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        wsClient.disconnect()
-        goBridge.stop()
+        bridgeJob?.cancel()
+        // Stopping waits for the bridge to exit; keep that off the main thread.
+        val client = wsClient
+        thread(name = "gobridge-stop") { client.disconnect() }
         _wsClient = null
         _chatRepository = null
         _database = null
@@ -188,41 +204,81 @@ class PhotonService : Service() {
         _signalProtocolDb = null
     }
 
-    private suspend fun listenForWhatsAppMessages() {
-        _wsClient?.events?.collect { evt ->
-            when (evt.type) {
-                "new_message" -> {
-                    if (evt.boolean("is_from_me") == true) return@collect
-
-                    val convJid = evt.string("conversation_jid") ?: return@collect
-                    // Pseudo-chats (status broadcasts etc.) shouldn't ring.
-                    if (isPseudoWhatsAppJid(convJid)) return@collect
-
-                    val conversation = _chatRepository?.getConversation(convJid)
-                    if (conversation?.isMuted == true) return@collect
-
-                    val name = evt.string("sender_name")?.takeIf { it.isNotBlank() }
-                        ?: conversation?.name
-                        ?: convJid.substringBefore("@")
-
-                    NotificationHelper.showMessageNotification(
-                        this@PhotonService, name, evt.string("text_body"), app.photon.data.model.Platform.WHATSAPP, convJid,
-                    )
-                }
-                "receipt" -> {
-                    // Reading on any linked device fires a read receipt; clear the
-                    // Photon notification for that conversation so the banner doesn't
-                    // linger after the message has been consumed.
-                    if (evt.string("type") == "read") {
-                        val convJid = evt.string("conversation_jid")
-                        if (!convJid.isNullOrBlank()) {
-                            NotificationHelper.cancelForConversation(this@PhotonService, convJid)
-                        }
-                    }
-                }
+    private suspend fun listenForWhatsAppMessages(events: ReceiveChannel<WsEvent>) {
+        events.consumeEach { evt ->
+            try {
+                handleWhatsAppEvent(evt)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // One failed event (a DB read during a reset, say) mustn't end
+                // notifications for the rest of the session.
+                Log.w("PhotonService", "Failed to handle WhatsApp ${evt.type}", e)
             }
         }
     }
+
+    private fun handleWhatsAppEvent(evt: WsEvent) {
+        when (evt.type) {
+            "new_message" -> {
+                if (evt.boolean("is_from_me") == true) return
+
+                val convJid = evt.string("conversation_jid") ?: return
+                // Pseudo-chats (status broadcasts etc.) shouldn't ring.
+                if (isPseudoWhatsAppJid(convJid)) return
+
+                val conversation = _chatRepository?.getConversation(convJid)
+                if (conversation?.isMuted == true) return
+
+                val name = evt.string("sender_name")?.takeIf { it.isNotBlank() }
+                    ?: conversation?.name
+                    ?: convJid.substringBefore("@")
+
+                NotificationHelper.showMessageNotification(
+                    this@PhotonService, name, evt.string("text_body"), Platform.WHATSAPP, convJid,
+                )
+            }
+            "read_self" -> {
+                // The user read (or marked read) this chat on another device;
+                // the banner shouldn't linger. Plain "receipt" events are the
+                // other person reading OUR messages and must not cancel.
+                val convJid = evt.string("conversation_jid")
+                if (!convJid.isNullOrBlank()) {
+                    NotificationHelper.cancelForConversation(this@PhotonService, convJid)
+                }
+            }
+            "message_revoked" -> {
+                // A sender deleted the only unread message: withdraw the banner
+                // that announced it.
+                val convJid = evt.string("conversation_jid")
+                if (!convJid.isNullOrBlank() && evt.boolean("was_unread") == true && evt.int("unread_count") == 0) {
+                    NotificationHelper.cancelForConversation(this@PhotonService, convJid)
+                }
+            }
+            // Calls ring regardless of mute, as WhatsApp itself does.
+            "call_incoming" -> {
+                val convJid = evt.string("conversation_jid") ?: return
+                NotificationHelper.showIncomingCall(
+                    this@PhotonService, callerName(evt, convJid), Platform.WHATSAPP, convJid,
+                    isVideo = evt.boolean("is_video") == true,
+                )
+            }
+            "call_ended" -> {
+                val convJid = evt.string("conversation_jid") ?: return
+                NotificationHelper.cancelIncomingCall(this@PhotonService, convJid)
+            }
+            "call_missed" -> {
+                val convJid = evt.string("conversation_jid") ?: return
+                NotificationHelper.showMissedCall(
+                    this@PhotonService, callerName(evt, convJid), Platform.WHATSAPP, convJid,
+                    isVideo = evt.boolean("is_video") == true,
+                )
+            }
+        }
+    }
+
+    private fun callerName(evt: WsEvent, convJid: String): String =
+        evt.string("caller_name")?.takeIf { it.isNotBlank() } ?: convJid.substringBefore("@")
 
     /**
      * Outgoing media staged by MessageInput (voice notes, picked files) lands
@@ -279,6 +335,14 @@ class PhotonService : Service() {
 
     companion object {
         private const val NOTIFICATION_ID = 1
+
+        // Bridge events the notification layer acts on; delivered losslessly.
+        private val WHATSAPP_SERVICE_EVENTS = setOf(
+            "new_message", "read_self", "message_revoked", "call_incoming", "call_ended", "call_missed",
+        )
+
+        // A restarted bridge that stays up this long resets the restart backoff.
+        private const val BRIDGE_STABLE_MS = 60_000L
 
         // Simple service locator — the app is small enough to not need DI.
         // The three repository singletons that the chat-list UIs read are
@@ -348,25 +412,25 @@ class PhotonService : Service() {
         }
 
         /**
-         * Stop the bridge, wipe all WhatsApp data, restart, and reconnect.
+         * Stop the bridge, wipe all WhatsApp data, and start it again.
          * Lives here (not in the settings UI) so the bridge's file layout
          * and the restart choreography have a single owner.
          */
         suspend fun resetWhatsApp(filesDir: java.io.File) {
-            _wsClient?.disconnect()
-            _goBridge?.stop()
-            kotlinx.coroutines.delay(300)
-            filesDir.listFiles()?.filter {
-                it.name.startsWith("messages.db") || it.name.startsWith("whatsmeow.db")
-            }?.forEach { it.delete() }
-            java.io.File(filesDir, "media").deleteRecursively()
-            java.io.File(filesDir, "thumbs").deleteRecursively()
-            // The Kotlin reader holds a long-lived handle; the deleted inode
-            // would keep serving stale rows without this.
-            _database?.invalidate()
-            _goBridge?.start()
-            kotlinx.coroutines.delay(1000)
-            try { _wsClient?.connect() } catch (_: Exception) {}
+            val wipe = {
+                filesDir.listFiles()?.filter {
+                    it.name.startsWith("messages.db") || it.name.startsWith("whatsmeow.db")
+                }?.forEach { it.delete() }
+                java.io.File(filesDir, "media").deleteRecursively()
+                java.io.File(filesDir, "thumbs").deleteRecursively()
+                // The Kotlin reader holds a long-lived handle; the deleted inode
+                // would keep serving stale rows without this.
+                _database?.invalidate()
+            }
+            // whileStopped keeps the supervisor from restarting the bridge
+            // mid-wipe.
+            val ws = _wsClient
+            if (ws == null) wipe() else ws.whileStopped { wipe() }
         }
 
         /**
