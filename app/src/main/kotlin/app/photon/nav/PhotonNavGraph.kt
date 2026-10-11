@@ -9,19 +9,14 @@ import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
-import app.photon.service.Sessions
-import app.photon.ui.home.PlatformPick
-import app.photon.ui.home.PlatformsScreen
-import app.photon.ui.contact.ContactScreen
-import app.photon.ui.settings.SettingsScreen
-import app.photon.ui.all.AllChatsScreen
 import app.photon.data.model.Platform
-import app.photon.ui.signal.SignalChatListScreen
-import app.photon.ui.sms.SmsChatListScreen
-import app.photon.ui.signal.SignalPairingScreen
-import app.photon.ui.signal.SignalScreen
-import app.photon.ui.whatsapp.ChatListScreen
+import app.photon.service.Sessions
+import app.photon.ui.chat.ChatListScreen
 import app.photon.ui.chat.ChatScreen
+import app.photon.ui.contact.ContactScreen
+import app.photon.ui.home.PlatformsScreen
+import app.photon.ui.settings.SettingsScreen
+import app.photon.ui.signal.SignalPairingScreen
 import app.photon.ui.whatsapp.PairingScreen
 
 @Composable
@@ -31,9 +26,10 @@ fun PhotonNavGraph(
     onDeepLinkHandled: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    // All Chats is the start destination — kept at the bottom of the back stack
-    // so lateral provider switches always collapse to a single chat-list screen.
-    val rootRoute = Routes.ALL_CHATS
+    // The chat list is the start destination (All Chats) and stays at the
+    // bottom of the back stack, so switching platform always collapses to a
+    // single chat list.
+    val rootRoute = Routes.CHATS
 
     fun lateralSwitch(target: String) {
         navController.navigate(target) {
@@ -62,46 +58,41 @@ fun PhotonNavGraph(
         popEnterTransition = { androidx.compose.animation.EnterTransition.None },
         popExitTransition = { androidx.compose.animation.ExitTransition.None },
     ) {
+        composable(
+            route = Routes.CHATS,
+            arguments = listOf(
+                navArgument("platform") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+            ),
+        ) { backStackEntry ->
+            ChatListScreen(
+                filter = Routes.platformOf(backStackEntry.arguments?.getString("platform")),
+                onChat = ::openChat,
+                onSwitch = { navController.navigate(Routes.PLATFORMS) },
+                onSettings = { navController.navigate(Routes.SETTINGS) },
+            )
+        }
         composable(Routes.PLATFORMS) {
             PlatformsScreen(
-                onPick = { pick ->
-                    val target = when (pick) {
-                        PlatformPick.ALL -> Routes.ALL_CHATS
-                        PlatformPick.SMS -> Routes.SMS_CHATS
-                        PlatformPick.WHATSAPP -> whatsappRoute(Sessions.whatsapp?.bridge?.whatsappState?.value)
-                        PlatformPick.SIGNAL -> Routes.SIGNAL
-                    }
-                    lateralSwitch(target)
+                onPick = { filter ->
+                    lateralSwitch(
+                        pickedRoute(
+                            filter,
+                            whatsappState = Sessions.whatsapp?.bridge?.whatsappState?.value,
+                            signalLinked = Sessions.signal?.credentials?.isRegistered() == true,
+                        ),
+                    )
                 },
             )
         }
         composable(Routes.WHATSAPP_PAIRING) {
             PairingScreen(
                 onPaired = {
-                    navController.navigate(Routes.WHATSAPP_CHATS) {
+                    navController.navigate(Routes.chats(Platform.WHATSAPP)) {
                         popUpTo(Routes.WHATSAPP_PAIRING) { inclusive = true }
-                    }
-                },
-                onBack = { navController.popBackStack() },
-            )
-        }
-        composable(Routes.WHATSAPP_CHATS) {
-            ChatListScreen(
-                onChat = { jid -> openChat(Platform.WHATSAPP, jid) },
-                onSwitch = { navController.navigate(Routes.PLATFORMS) },
-                onSettings = { navController.navigate(Routes.SETTINGS) },
-            )
-        }
-        composable(Routes.SIGNAL) {
-            SignalScreen(
-                onPaired = {
-                    navController.navigate(Routes.SIGNAL_CHATS) {
-                        popUpTo(Routes.SIGNAL) { inclusive = true }
-                    }
-                },
-                onNotPaired = {
-                    navController.navigate(Routes.SIGNAL_PAIRING) {
-                        popUpTo(Routes.SIGNAL) { inclusive = true }
                     }
                 },
                 onBack = { navController.popBackStack() },
@@ -110,18 +101,11 @@ fun PhotonNavGraph(
         composable(Routes.SIGNAL_PAIRING) {
             SignalPairingScreen(
                 onPaired = {
-                    navController.navigate(Routes.SIGNAL_CHATS) {
+                    navController.navigate(Routes.chats(Platform.SIGNAL)) {
                         popUpTo(Routes.SIGNAL_PAIRING) { inclusive = true }
                     }
                 },
                 onBack = { navController.popBackStack() },
-            )
-        }
-        composable(Routes.SIGNAL_CHATS) {
-            SignalChatListScreen(
-                onChat = { jid -> openChat(Platform.SIGNAL, jid) },
-                onSwitch = { navController.navigate(Routes.PLATFORMS) },
-                onSettings = { navController.navigate(Routes.SETTINGS) },
             )
         }
         composable(
@@ -140,20 +124,6 @@ fun PhotonNavGraph(
                     navController.navigate(Routes.contact(Uri.encode(phone), Uri.encode(name)))
                 },
                 onBack = { navController.popBackStack() },
-            )
-        }
-        composable(Routes.ALL_CHATS) {
-            AllChatsScreen(
-                onChat = ::openChat,
-                onSwitch = { navController.navigate(Routes.PLATFORMS) },
-                onSettings = { navController.navigate(Routes.SETTINGS) },
-            )
-        }
-        composable(Routes.SMS_CHATS) {
-            SmsChatListScreen(
-                onChat = { address -> openChat(Platform.SMS, address) },
-                onSwitch = { navController.navigate(Routes.PLATFORMS) },
-                onSettings = { navController.navigate(Routes.SETTINGS) },
             )
         }
         composable(
@@ -188,11 +158,3 @@ fun PhotonNavGraph(
         }
     }
 }
-
-/**
- * Where picking WhatsApp goes. Pairing only once the bridge reports there's
- * no session ("logged_out"): a paired account that is connecting, reconnecting
- * or not yet reported on belongs in its chats, which show the connection state.
- */
-internal fun whatsappRoute(state: String?): String =
-    if (state == "logged_out") Routes.WHATSAPP_PAIRING else Routes.WHATSAPP_CHATS

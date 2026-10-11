@@ -53,7 +53,7 @@ class ChatRouteTest {
         assertEquals(Routes.CHAT, chat.destination.route)
         assertEquals("SIGNAL", chat.arguments?.getString("platform"))
         assertEquals(group, Uri.decode(chat.arguments?.getString("jid")))
-        assertEquals(Routes.ALL_CHATS, nav.previousBackStackEntry?.destination?.route)
+        assertEquals(Routes.CHATS, nav.previousBackStackEntry?.destination?.route)
         assertTrue(handled)
     }
 

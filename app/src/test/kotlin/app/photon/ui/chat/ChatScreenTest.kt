@@ -1,27 +1,18 @@
 package app.photon.ui.chat
 
 import androidx.activity.ComponentActivity
-import androidx.compose.runtime.Composable
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import app.photon.chat.ChatBackend
-import app.photon.chat.ChatBackendException
-import app.photon.chat.ChatCapabilities
-import app.photon.data.model.Conversation
+import app.photon.chat.FakeChatBackend
 import app.photon.data.model.Message
 import app.photon.data.model.MessageStatus
 import app.photon.data.model.Platform
 import app.photon.ui.RegisterComposeHostActivity
 import app.photon.ui.theme.PhotonTheme
-import com.thelightphone.sdk.ui.LightText
-import com.thelightphone.sdk.ui.LightTextVariant
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.flowOf
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.RuleChain
@@ -40,12 +31,6 @@ class ChatScreenTest {
 
     @get:Rule val rules: RuleChain = RuleChain.outerRule(RegisterComposeHostActivity()).around(rule)
 
-    private val full = ChatCapabilities(
-        reply = true, media = true, audio = true, reactions = true,
-        delete = true, deleteForEveryone = true, contactEditing = true,
-    )
-    private val textOnly = full.copy(reply = false, media = false, audio = false, reactions = false, delete = false, deleteForEveryone = false)
-
     private fun message(id: String, fromMe: Boolean = false) = Message(
         id = id, conversationJid = JID, senderJid = if (fromMe) "me" else JID, timestamp = 1_700_000_000,
         contentType = "text", textBody = "body $id", mediaUrl = null, mediaMime = null, mediaSize = null,
@@ -53,50 +38,10 @@ class ChatScreenTest {
         status = if (fromMe) MessageStatus.SENT else MessageStatus.UNREAD,
     )
 
-    private class FakeBackend(
-        override val platform: Platform,
-        override val capabilities: ChatCapabilities,
-        private val phone: String?,
-        private val header: String? = null,
-    ) : ChatBackend {
-        val messages = MutableStateFlow<List<Message>>(emptyList())
-        val marked = mutableListOf<List<String>>()
-        val opened = mutableListOf<Pair<String, Boolean>>()
-
-        override val conversations = MutableStateFlow<List<Conversation>?>(
-            listOf(Conversation(JID, "Mum", isGroup = false, null, 0, 0, false, null, 0)),
-        )
-
-        override fun conversation(jid: String) = conversations.value?.firstOrNull { it.jid == jid }
-        override fun messages(jid: String): Flow<List<Message>> = messages
-        override fun participantNames(jid: String): Flow<Map<String, String>> = flowOf(emptyMap())
-        override suspend fun sendText(jid: String, text: String, replyToId: String?) {}
-        override suspend fun sendMedia(jid: String, path: String, mime: String, replyToId: String?) {}
-        override suspend fun react(jid: String, messageId: String, senderJid: String, emoji: String) {}
-        override suspend fun retry(messageId: String) {}
-        override suspend fun delete(jid: String, messageId: String, forEveryone: Boolean) {}
-
-        override suspend fun markRead(jid: String, incomingIds: List<String>) {
-            marked += incomingIds
-        }
-
-        override suspend fun downloadMedia(messageId: String): String = throw ChatBackendException("none")
-
-        override suspend fun onOpen(jid: String, isGroup: Boolean) {
-            opened += jid to isGroup
-        }
-
-        @Composable
-        override fun Header(jid: String, isGroup: Boolean, title: String, participantNames: Map<String, String>) {
-            header?.let { LightText(it, variant = LightTextVariant.Detail) }
-        }
-
-        override fun contactPhone(jid: String) = phone
-    }
-
     private val contacts = mutableListOf<Pair<String, String>>()
 
-    private fun show(backend: FakeBackend) {
+    private fun show(backend: FakeChatBackend) {
+        backend.conversations.value = listOf(FakeChatBackend.conversation(JID, "Mum"))
         rule.setContent {
             PhotonTheme {
                 ChatScreen(backend, JID, onContact = { phone, name -> contacts += phone to name }, onBack = {})
@@ -108,21 +53,21 @@ class ChatScreenTest {
 
     @Test
     fun aTextOnlyPlatformOffersNeitherAttachNorVoiceNotes() {
-        show(FakeBackend(Platform.SMS, textOnly, phone = JID))
+        show(FakeChatBackend(Platform.SMS, FakeChatBackend.TEXT_ONLY, phone = JID))
         rule.onAllNodesWithContentDescription("Attach").assertCountEquals(0)
         rule.onAllNodesWithContentDescription("Voice note").assertCountEquals(0)
     }
 
     @Test
     fun aFullPlatformOffersBoth() {
-        show(FakeBackend(Platform.WHATSAPP, full, phone = JID))
+        show(FakeChatBackend(Platform.WHATSAPP, FakeChatBackend.FULL, phone = JID))
         rule.onAllNodesWithContentDescription("Attach").assertCountEquals(1)
         rule.onAllNodesWithContentDescription("Voice note").assertCountEquals(1)
     }
 
     @Test
     fun theTitleOpensTheContactEditorWithTheChatsNumber() {
-        val backend = FakeBackend(Platform.SIGNAL, full, phone = "+447700900123")
+        val backend = FakeChatBackend(Platform.SIGNAL, FakeChatBackend.FULL, phone = "+447700900123")
         show(backend)
         rule.onNodeWithText("Mum").performClick()
         assertEquals(listOf("+447700900123" to "Mum"), contacts)
@@ -131,13 +76,13 @@ class ChatScreenTest {
 
     @Test
     fun theHeaderHookShowsUnderTheTitle() {
-        show(FakeBackend(Platform.SIGNAL, full, phone = null, header = "Safety number changed: Mum"))
+        show(FakeChatBackend(Platform.SIGNAL, FakeChatBackend.FULL, phone = null, header = "Safety number changed: Mum"))
         rule.onNodeWithText("Safety number changed: Mum").performClick()
     }
 
     @Test
     fun marksReadOncePerNewestIncomingMessage() {
-        val backend = FakeBackend(Platform.SMS, textOnly, phone = JID)
+        val backend = FakeChatBackend(Platform.SMS, FakeChatBackend.TEXT_ONLY, phone = JID)
         show(backend)
         backend.messages.value = listOf(message("2"), message("1"))
         rule.waitForIdle()
