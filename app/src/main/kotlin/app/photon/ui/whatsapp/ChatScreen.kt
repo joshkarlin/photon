@@ -73,11 +73,13 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
         onMediaTap = { msg -> viewingMedia = msg },
         onMessagesLoaded = { messages ->
             // messages arrive newest-first; only mark read when a new
-            // incoming message appears.
-            val newestIncomingId = messages.firstOrNull { !it.isFromMe }?.id
+            // incoming message appears. Call rows have Photon-made ids that
+            // WhatsApp can't take a read receipt for.
+            val incoming = messages.filter { !it.isFromMe && it.contentType != "call" }
+            val newestIncomingId = incoming.firstOrNull()?.id
             if (newestIncomingId != null && newestIncomingId != lastMarkedReadId) {
                 lastMarkedReadId = newestIncomingId
-                val unreadIds = messages.filter { !it.isFromMe }.take(20).map { it.id }
+                val unreadIds = incoming.take(20).map { it.id }
                 scope.launch { try { repo.markRead(jid, unreadIds) } catch (_: Exception) {} }
             }
         },

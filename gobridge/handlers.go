@@ -124,8 +124,9 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 		})
 	case *events.PushName:
 		b.handlePushName(v)
-	case *events.CallOffer:
-		b.handleCallOffer(v)
+	case *events.CallOffer, *events.CallOfferNotice, *events.CallPreAccept, *events.CallAccept,
+		*events.CallTerminate, *events.CallReject, *events.UnknownCallEvent:
+		b.handleCallEvent(v)
 	case *events.GroupInfo:
 		b.handleGroupInfo(v)
 	case *events.Mute:
@@ -482,7 +483,7 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 			}
 
 			wm := histMsg.GetMessage()
-			if wm == nil || wm.GetKey() == nil || wm.GetMessage() == nil {
+			if wm == nil || wm.GetKey() == nil {
 				skippedNil++
 				continue
 			}
@@ -491,6 +492,23 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 			// Skip messages older than retention window
 			if cutoffTS > 0 && ts < cutoffTS {
 				skippedOld++
+				continue
+			}
+
+			if wm.GetMessage() == nil {
+				// Missed calls are content-less stubs; other stubs (group
+				// changes, security notices) aren't shown.
+				sender := jid
+				if p := firstNonEmpty(wm.GetParticipant(), wm.GetKey().GetParticipant()); isGroup && p != "" {
+					sender = b.canonicalSenderString(p)
+				}
+				if row, ok := historyCallRow(wm, jid, sender); ok {
+					pending = append(pending, row)
+					totalMsgs++
+					convMsgCount++
+				} else {
+					skippedNil++
+				}
 				continue
 			}
 
@@ -859,14 +877,6 @@ func (b *Bridge) BackfillParticipantNames() {
 	for _, g := range groups {
 		b.ResolveGroupParticipants(g)
 	}
-}
-
-func (b *Bridge) handleCallOffer(evt *events.CallOffer) {
-	b.BroadcastEvent("call_offer", CallOfferEvent{
-		FromJID: evt.CallCreator.String(),
-		CallID:  evt.CallID,
-		IsVideo: false, // CallOffer doesn't expose IsVideo directly
-	})
 }
 
 func (b *Bridge) handleGroupInfo(evt *events.GroupInfo) {

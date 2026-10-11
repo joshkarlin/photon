@@ -165,10 +165,31 @@ type HistorySyncProgressEvent struct {
 	MessagesTotal      int `json:"messages_total"`
 }
 
-type CallOfferEvent struct {
-	FromJID string `json:"from_jid"`
-	CallID  string `json:"call_id"`
-	IsVideo bool   `json:"is_video"`
+// CallIncomingEvent: a call is ringing on the user's other devices.
+type CallIncomingEvent struct {
+	ConversationJID string `json:"conversation_jid"`
+	CallerName      string `json:"caller_name"`
+	IsVideo         bool   `json:"is_video"`
+	CallID          string `json:"call_id"`
+	IsGroup         bool   `json:"is_group"`
+}
+
+// CallEndedEvent: a ringing call stopped without being missed — answered
+// elsewhere, or declined by the user on another device.
+type CallEndedEvent struct {
+	ConversationJID string `json:"conversation_jid"`
+	CallID          string `json:"call_id"`
+	Answered        bool   `json:"answered"`
+}
+
+// CallMissedEvent: a call ended unanswered; a "Missed … call" row was added
+// to the chat and counted as unread.
+type CallMissedEvent struct {
+	ConversationJID string `json:"conversation_jid"`
+	CallerName      string `json:"caller_name"`
+	IsVideo         bool   `json:"is_video"`
+	IsGroup         bool   `json:"is_group"`
+	CallID          string `json:"call_id"`
 }
 
 type ErrorResponse struct {

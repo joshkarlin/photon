@@ -15,6 +15,7 @@ import app.photon.PhotonApp
 import app.photon.data.db.PhotonDatabase
 import app.photon.data.model.boolean
 import app.photon.data.model.int
+import app.photon.data.model.Platform
 import app.photon.data.model.isPseudoWhatsAppJid
 import app.photon.data.model.string
 import app.photon.data.repository.ChatRepository
@@ -182,7 +183,7 @@ class PhotonService : Service() {
                         ?: convJid.substringBefore("@")
 
                     NotificationHelper.showMessageNotification(
-                        this@PhotonService, name, evt.string("text_body"), app.photon.data.model.Platform.WHATSAPP, convJid,
+                        this@PhotonService, name, evt.string("text_body"), Platform.WHATSAPP, convJid,
                     )
                 }
                 "read_self" -> {
@@ -202,9 +203,31 @@ class PhotonService : Service() {
                         NotificationHelper.cancelForConversation(this@PhotonService, convJid)
                     }
                 }
+                // Calls ring regardless of mute, as WhatsApp itself does.
+                "call_incoming" -> {
+                    val convJid = evt.string("conversation_jid") ?: return@collect
+                    NotificationHelper.showIncomingCall(
+                        this@PhotonService, callerName(evt, convJid), Platform.WHATSAPP, convJid,
+                        isVideo = evt.boolean("is_video") == true,
+                    )
+                }
+                "call_ended" -> {
+                    val convJid = evt.string("conversation_jid") ?: return@collect
+                    NotificationHelper.cancelIncomingCall(this@PhotonService, convJid)
+                }
+                "call_missed" -> {
+                    val convJid = evt.string("conversation_jid") ?: return@collect
+                    NotificationHelper.showMissedCall(
+                        this@PhotonService, callerName(evt, convJid), Platform.WHATSAPP, convJid,
+                        isVideo = evt.boolean("is_video") == true,
+                    )
+                }
             }
         }
     }
+
+    private fun callerName(evt: app.photon.data.model.WsEvent, convJid: String): String =
+        evt.string("caller_name")?.takeIf { it.isNotBlank() } ?: convJid.substringBefore("@")
 
     /**
      * Outgoing media staged by MessageInput (voice notes, picked files) lands

@@ -172,6 +172,37 @@ func (b *Bridge) SendersForMessages(ids []string) map[string]string {
 	return out
 }
 
+// WithoutCallRows drops call rows from a list of message IDs. Their IDs are
+// Photon's own ("call_<id>"), not message IDs WhatsApp could take a read
+// receipt for.
+func (b *Bridge) WithoutCallRows(ids []string) []string {
+	if len(ids) == 0 {
+		return ids
+	}
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	calls := map[string]bool{}
+	rows, err := b.msgDB.Query(`SELECT id FROM messages WHERE content_type = 'call' AND id IN (`+sqlInList(len(ids))+`)`, args...)
+	if err == nil {
+		for rows.Next() {
+			var id string
+			if rows.Scan(&id) == nil {
+				calls[id] = true
+			}
+		}
+		rows.Close()
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !calls[id] && !strings.HasPrefix(id, "call_") {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // ResetUnread sets unread count to 0 for a conversation.
 func (b *Bridge) ResetUnread(jid string) {
 	_, err := b.msgDB.Exec(`UPDATE conversations SET unread_count = 0 WHERE jid = ?`, jid)

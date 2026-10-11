@@ -240,7 +240,11 @@ func (b *Bridge) handleMarkRead(ctx context.Context, raw json.RawMessage) (json.
 	// the newest few): a later revoke of an older message must not think it
 	// was still unread.
 	b.MarkChatReadUpTo(jid, math.MaxInt64)
-	err := b.MarkRead(ctx, jid, p.MessageIDs)
+	ids := b.WithoutCallRows(p.MessageIDs)
+	if len(ids) == 0 {
+		return mustMarshal(struct{}{}), nil
+	}
+	err := b.MarkRead(ctx, jid, ids)
 	return mustMarshal(struct{}{}), err
 }
 
