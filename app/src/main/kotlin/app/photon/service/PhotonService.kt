@@ -43,6 +43,7 @@ class PhotonService : Service() {
 
         signal.start()
         whatsapp.start()
+        sms.start()
 
         // Reflect connection state in the (hidden by default) service notification.
         scope.launch {
@@ -74,6 +75,7 @@ class PhotonService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         Sessions.clear()
+        sms.stop()
         signal.stop()
         // Stopping waits for the bridge to exit; keep that off the main thread.
         val whatsapp = whatsapp
