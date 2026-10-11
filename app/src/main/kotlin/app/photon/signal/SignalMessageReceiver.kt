@@ -9,6 +9,8 @@ import org.whispersystems.signalservice.api.keys.KeysApi
 import org.whispersystems.signalservice.api.push.ServiceIdType
 import org.whispersystems.signalservice.internal.push.PushServiceSocket
 import app.photon.signal.db.SignalMessageDatabase
+import app.photon.signal.receiver.AndroidSignalNotifier
+import app.photon.signal.receiver.SignalNotifier
 import app.photon.signal.store.PhotonProtocolStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -87,6 +89,7 @@ class SignalMessageReceiver(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val config = SignalConfig.createConfiguration()
     private val contactResolver = AndroidContactResolver(context)
+    private val notifier: SignalNotifier = AndroidSignalNotifier(context)
     private val sessionLock = SignalConfig.newSessionLock()
     private val senderKeySessionBuilder = SignalGroupSessionBuilder(
         sessionLock,
@@ -1079,9 +1082,7 @@ class SignalMessageReceiver(
         val notifBody = if (isGroup && !senderName.isNullOrBlank()) {
             "$senderName: $preview"
         } else preview
-        app.photon.service.NotificationHelper.showMessageNotification(
-            context, notifTitle, notifBody, app.photon.data.model.Platform.SIGNAL, conversationJid,
-        )
+        notifier.showMessage(notifTitle, notifBody, conversationJid)
     }
 
     // ── Calls ──
@@ -1189,18 +1190,16 @@ class SignalMessageReceiver(
         )
         Log.i(TAG, "Call ${id.takeLast(12)}: ${current?.outcome ?: "new"} -> $outcome ($signal)")
 
-        val helper = app.photon.service.NotificationHelper
-        val platform = app.photon.data.model.Platform.SIGNAL
         when (outcome) {
             CallOutcome.RINGING ->
-                helper.showIncomingCall(context, callerName(conversationJid), platform, conversationJid, state.isVideo)
+                notifier.showIncomingCall(callerName(conversationJid), conversationJid, state.isVideo)
             CallOutcome.MISSED ->
-                helper.showMissedCall(context, callerName(conversationJid), platform, conversationJid, state.isVideo)
+                notifier.showMissedCall(callerName(conversationJid), conversationJid, state.isVideo)
             CallOutcome.ANSWERED, CallOutcome.DECLINED -> {
-                helper.cancelIncomingCall(context, conversationJid)
+                notifier.cancelIncomingCall(conversationJid)
                 // A call shown as missed turned out to be answered elsewhere.
                 if (change.wasUnread && change.unreadCount == 0) {
-                    helper.cancelForConversation(context, conversationJid)
+                    notifier.cancelConversation(conversationJid)
                 }
             }
         }
@@ -1233,13 +1232,12 @@ class SignalMessageReceiver(
                 return
             }
         val row = messageDb.getMessage(id) ?: return
-        val helper = app.photon.service.NotificationHelper
         when (event.event) {
             SyncMessage.CallEvent.Event.DELETE -> {
                 val change = messageDb.deleteCallRow(id) ?: return
-                helper.cancelIncomingCall(context, change.conversationJid)
+                notifier.cancelIncomingCall(change.conversationJid)
                 if (change.wasUnread && change.unreadCount == 0) {
-                    helper.cancelForConversation(context, change.conversationJid)
+                    notifier.cancelConversation(change.conversationJid)
                 }
             }
             SyncMessage.CallEvent.Event.ACCEPTED ->
@@ -1263,7 +1261,7 @@ class SignalMessageReceiver(
         }
         val upTo = (event.timestamp ?: System.currentTimeMillis()) / 1000
         messageDb.markCallRowsRead(conversationJid, upTo).forEach { jid ->
-            app.photon.service.NotificationHelper.cancelForConversation(context, jid)
+            notifier.cancelConversation(jid)
         }
     }
 
@@ -1293,9 +1291,7 @@ class SignalMessageReceiver(
         )
         if (!inserted) return
         val body = if (!senderName.isNullOrBlank()) "$senderName started a group call" else SignalCalls.GROUP_CALL_TEXT
-        app.photon.service.NotificationHelper.showMessageNotification(
-            context, groupTitle(groupJid), body, app.photon.data.model.Platform.SIGNAL, groupJid,
-        )
+        notifier.showMessage(groupTitle(groupJid), body, groupJid)
     }
 
     private fun groupTitle(groupJid: String): String =
@@ -1317,7 +1313,7 @@ class SignalMessageReceiver(
     private fun applyRemoteDelete(targetPrefix: String) {
         val cleared = messageDb.markDeletedByPrefix(targetPrefix)
         cleared.forEach { jid ->
-            app.photon.service.NotificationHelper.cancelForConversation(context, jid)
+            notifier.cancelConversation(jid)
         }
     }
 
@@ -1401,7 +1397,7 @@ class SignalMessageReceiver(
                         Log.d(TAG, "Stored sync sent message into group ${convJid.take(12)}…")
                     }
                     messageDb.markConversationRead(convJid)
-                    app.photon.service.NotificationHelper.cancelForConversation(context, convJid)
+                    notifier.cancelConversation(convJid)
                     return
                 }
                 Log.w(TAG, "Sync sent has an invalid groupV2 master key; falling through")
@@ -1480,7 +1476,7 @@ class SignalMessageReceiver(
             // the corresponding sync.read, so clear any stale local incoming
             // unread state as a conservative fallback.
             messageDb.markConversationRead(destinationAci)
-            app.photon.service.NotificationHelper.cancelForConversation(context, destinationAci)
+            notifier.cancelConversation(destinationAci)
             Log.d(TAG, "Stored sync sent message to $destinationAci")
         }
 
@@ -1500,7 +1496,7 @@ class SignalMessageReceiver(
                 // Only conversations this read actually emptied: newer unread
                 // messages keep their notification.
                 result.clearedConversations.forEach { conversationJid ->
-                    app.photon.service.NotificationHelper.cancelForConversation(context, conversationJid)
+                    notifier.cancelConversation(conversationJid)
                 }
             }
         }
