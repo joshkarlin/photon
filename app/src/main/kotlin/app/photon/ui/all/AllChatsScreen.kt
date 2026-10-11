@@ -55,6 +55,7 @@ fun AllChatsScreen(
         onTitleClick = onSwitch,
         onSettings = onSettings,
         conversations = allChats?.map { it.conversation },
+        platformOf = { platformMap[it.jid] ?: Platform.SMS },
         onChat = { jid ->
             val platform = platformMap[jid] ?: Platform.WHATSAPP
             onChat(platform, jid)

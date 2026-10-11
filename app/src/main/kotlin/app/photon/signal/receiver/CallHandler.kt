@@ -7,11 +7,11 @@ import app.photon.signal.CallState
 import app.photon.signal.SignalCalls
 import app.photon.signal.SignalCredentials
 import app.photon.signal.SignalMessageReceiver
+import app.photon.signal.SignalNames
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.db.deleteCallRow
 import app.photon.signal.db.findCallRowId
 import app.photon.signal.db.getCallRowsWithText
-import app.photon.signal.db.getConversation
 import app.photon.signal.db.getMessage
 import app.photon.signal.db.insertIncomingMessage
 import app.photon.signal.db.markCallRowsRead
@@ -32,7 +32,7 @@ internal class CallHandler(
     private val credentials: SignalCredentials,
     private val messageDb: SignalMessageDatabase,
     private val contactNames: ContactNames,
-    private val groupMetadata: GroupMetadata,
+    private val names: SignalNames,
     private val notifier: SignalNotifier,
     // Runs a task after a delay (a coroutine on the receiver's scope).
     private val schedule: (delayMs: Long, task: () -> Unit) -> Unit,
@@ -132,7 +132,7 @@ internal class CallHandler(
         if (existing == null) {
             // First sight of this caller may be the call itself.
             peerE164?.let { messageDb.updateContactPhone(peerAci, it) }
-            messageDb.upsertConversation(jid = peerAci, name = contactNames.displayNameFor(peerAci, peerE164), isGroup = false)
+            messageDb.upsertConversation(jid = peerAci, name = null, isGroup = false)
             contactNames.maybeFetchProfile(peerAci)
         }
         updateCallRow(id, peerAci, existing?.textBody, signal, offerIsVideo, timestampMs / 1000)
@@ -206,9 +206,9 @@ internal class CallHandler(
 
         when (outcome) {
             CallOutcome.RINGING ->
-                notifier.showIncomingCall(callerName(conversationJid), conversationJid, state.isVideo)
+                notifier.showIncomingCall(names.person(conversationJid), conversationJid, state.isVideo)
             CallOutcome.MISSED ->
-                notifier.showMissedCall(callerName(conversationJid), conversationJid, state.isVideo)
+                notifier.showMissedCall(names.person(conversationJid), conversationJid, state.isVideo)
             CallOutcome.ANSWERED, CallOutcome.DECLINED -> {
                 notifier.cancelIncomingCall(conversationJid)
                 // A call shown as missed turned out to be answered elsewhere.
@@ -219,11 +219,6 @@ internal class CallHandler(
         }
         return outcome
     }
-
-    private fun callerName(conversationJid: String): String =
-        messageDb.getConversation(conversationJid)?.name?.takeIf { it.isNotBlank() }
-            ?: contactNames.displayNameFor(conversationJid, null)
-            ?: conversationJid.take(8)
 
     /**
      * Another device's view of a call: answered, declined or deleted there.
@@ -289,13 +284,10 @@ internal class CallHandler(
     fun recordGroupCall(
         groupJid: String,
         senderAci: String,
-        senderName: String?,
         eraId: String?,
         timestampMs: Long,
     ) {
-        if (!senderName.isNullOrBlank()) {
-            messageDb.upsertParticipant(groupJid, senderAci, senderName, "member")
-        }
+        messageDb.upsertParticipant(groupJid, senderAci)
         val id = SignalCalls.groupRowId(groupJid, eraId?.takeIf { it.isNotBlank() } ?: timestampMs.toString())
         val inserted = messageDb.insertIncomingMessage(
             id = id,
@@ -307,7 +299,10 @@ internal class CallHandler(
             dedupePrefix = null,
         )
         if (!inserted) return
-        val body = if (!senderName.isNullOrBlank()) "$senderName started a group call" else SignalCalls.GROUP_CALL_TEXT
-        notifier.showMessage(groupMetadata.groupTitle(groupJid), body, groupJid)
+        notifier.showMessage(
+            names.title(groupJid, isGroup = true),
+            "${names.person(senderAci)} started a group call",
+            groupJid,
+        )
     }
 }

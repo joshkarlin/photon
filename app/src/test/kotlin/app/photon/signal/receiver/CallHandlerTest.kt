@@ -4,6 +4,8 @@ import app.photon.signal.SignalCalls
 import app.photon.signal.db.getConversation
 import app.photon.signal.db.getMessage
 import app.photon.signal.db.upsertCallRow
+import app.photon.signal.db.updateContactPhone
+import app.photon.signal.db.updateContactProfileName
 import app.photon.signal.db.upsertConversation
 import okio.ByteString.Companion.toByteString
 import org.junit.After
@@ -43,7 +45,7 @@ class CallHandlerTest {
     fun setUp() {
         fx = ReceiverFixture(local)
         calls = CallHandler(
-            fx.credentials, fx.db, fx.contactNames, fx.groupMetadata, fx.notifier,
+            fx.credentials, fx.db, fx.contactNames, fx.names, fx.notifier,
             schedule = { delayMs, task -> scheduled += delayMs to task },
             clock = { now },
         )
@@ -84,6 +86,21 @@ class CallHandlerTest {
         assertEquals("Missed voice call", row(42)?.textBody)
         assertEquals(1, unread())
         assertEquals(listOf("ringing:$peer", "missed:$peer"), fx.notifier.events)
+    }
+
+    /** A ringing call names the caller as the chat does: LP3 contact first. */
+    @Test
+    fun callNotificationsNameTheCallerByThePolicy() {
+        fx.db.updateContactPhone(peer, "+447700900123")
+        fx.db.updateContactProfileName(peer, "Jane")
+        fx.addressBook["+447700900123"] = "Mum"
+
+        offer(42)
+        now += SignalCalls.RING_TIMEOUT_MS
+        runScheduled()
+
+        assertEquals(listOf("Mum", "Mum"), fx.notifier.callers)
+        assertEquals(null, fx.db.getConversation(peer)?.name)
     }
 
     /** The timer is counted from the server's receipt, not the caller's clock or our delivery. */

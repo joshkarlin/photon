@@ -6,7 +6,6 @@ import app.photon.signal.db.findMessageByPrefix
 import app.photon.signal.db.getContact
 import app.photon.signal.db.getGroupMeta
 import app.photon.signal.db.getParticipants
-import app.photon.signal.db.memberDisplayName
 import app.photon.signal.db.updateGroupMeta
 import app.photon.signal.db.upsertConversation
 import app.photon.signal.db.upsertParticipant
@@ -66,9 +65,6 @@ internal class LibraryTransport(
     private val credentials: SignalCredentials,
     private val messageDb: SignalMessageDatabase,
     private val identityStore: PhotonIdentityKeyStore,
-    // Phone → local address-book name, so member names written by the
-    // group-send bootstrap follow the same policy as the receiver's.
-    private val contactResolver: ((String) -> String?)?,
     private val config: () -> SignalServiceConfiguration,
     // The library sender, over the receiver's sockets when it has them.
     private val sender: () -> SignalServiceMessageSender,
@@ -277,10 +273,7 @@ internal class LibraryTransport(
             }
             messageDb.updateGroupMeta(conversationJid, recipient.meta.masterKey, group.revision)
             for (memberAci in groupManager.memberAcis(group)) {
-                val aciString = memberAci.toString()
-                messageDb.upsertParticipant(
-                    conversationJid, aciString, messageDb.memberDisplayName(aciString, contactResolver), "member",
-                )
+                messageDb.upsertParticipant(conversationJid, memberAci.toString())
             }
             groupManager.memberAcis(group).filter { it != myAci }
         }

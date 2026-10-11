@@ -85,17 +85,11 @@ class MessageLayoutsTest {
     }
 
     @Test
-    fun groupSenderFallsBackToTheNumber() {
-        assertEquals("You", senderLabel(message(fromMe = true), "Me"))
-        assertEquals("Alice", senderLabel(message(), "Alice"))
-        assertEquals("447700900123", senderLabel(message(sender = "447700900123@s.whatsapp.net"), null))
-    }
-
-    @Test
     fun quoteLabelsNameTheSenderUnlessTheTitleAlreadyDoes() {
         assertEquals("↳ Alice: hi", quoteLabel(message(), "Alice"))
         assertEquals("↳ You: hi", quoteLabel(message(fromMe = true), "Me"))
-        assertEquals("↳ hi", quoteLabel(message(), "Alice", nameOtherSender = false))
-        assertEquals("↳ You: hi", quoteLabel(message(fromMe = true), null, nameOtherSender = false))
+        // A DM passes no name: the title already says who it is.
+        assertEquals("↳ hi", quoteLabel(message(), null))
+        assertEquals("↳ You: hi", quoteLabel(message(fromMe = true), null))
     }
 }

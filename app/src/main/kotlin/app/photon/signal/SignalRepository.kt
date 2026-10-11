@@ -3,16 +3,17 @@ package app.photon.signal
 import android.util.Log
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
+import app.photon.data.names.LocalContacts
 import app.photon.data.repository.conversationsFlow
 import app.photon.data.repository.messagesFlow
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.db.findMessageByPrefix
 import app.photon.signal.db.getContact
-import app.photon.signal.db.getConversation
-import app.photon.signal.db.getConversations
+import app.photon.signal.db.getConversationWithContact
+import app.photon.signal.db.getConversationsWithContacts
+import app.photon.signal.db.getGroupPeople
 import app.photon.signal.db.getMessage
 import app.photon.signal.db.getMessages
-import app.photon.signal.db.getParticipants
 import app.photon.signal.db.getReactions
 import app.photon.signal.db.getUnsyncedIncomingReads
 import app.photon.signal.db.markConversationSeen
@@ -21,21 +22,39 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.withContext
 
+/**
+ * Signal chats and messages. Names are resolved as they're read
+ * ([SignalNames]), so they follow both the stored sources and the LP3
+ * address book.
+ *
+ * @param selfAci the account's own ACI, whose DM is "Note to Self"
+ */
 class SignalRepository(
     private val db: SignalMessageDatabase,
     var sender: SignalMessageSender? = null,
     scope: CoroutineScope,
+    localContacts: LocalContacts,
+    selfAci: () -> String?,
 ) {
     companion object {
         private const val TAG = "SignalRepository"
     }
 
     private val unsyncableReads = UnsyncableReads()
+    private val names = SignalNames(db, localContacts::nameFor, selfAci)
+
+    // A write to the database, or an LP3 contact saved or edited.
+    private val nameChanges: Flow<Unit> = merge(db.changes, localContacts.changes)
 
     val conversations: StateFlow<List<Conversation>?> =
-        conversationsFlow(scope, "SignalRepository", db.changes) { db.getConversations() }
+        conversationsFlow(scope, TAG, nameChanges) {
+            db.getConversationsWithContacts().map { (conversation, contact) -> names.resolve(conversation, contact) }
+        }
 
     fun messages(conversationJid: String, limit: Int = 50): Flow<List<Message>> =
         messagesFlow(
@@ -45,14 +64,24 @@ class SignalRepository(
             lookupReply = { db.findMessageByPrefix(it) },
         )
 
-    fun getConversation(jid: String): Conversation? = db.getConversation(jid)
+    /** The conversation, its name resolved. */
+    fun getConversation(jid: String): Conversation? =
+        db.getConversationWithContact(jid)?.let { (conversation, contact) -> names.resolve(conversation, contact) }
 
     fun getContactPhone(aci: String): String? = db.getContact(aci)?.phone
 
-    fun getParticipantNames(conversationJid: String): Map<String, String> =
-        db.getParticipants(conversationJid).associate {
-            it.jid to (it.displayName ?: it.jid.take(8))
-        }
+    /**
+     * A group's sender names by ACI, re-resolved whenever a source changes
+     * (LocalContacts' changes emit at once, so this reads on subscription too).
+     */
+    fun participantNames(conversationJid: String): Flow<Map<String, String>> =
+        nameChanges
+            .map {
+                withContext(Dispatchers.IO) {
+                    db.getGroupPeople(conversationJid).associate { (id, contact) -> id to names.person(id, contact) }
+                }
+            }
+            .distinctUntilChanged()
 
     fun getMessage(id: String): Message? = db.getMessage(id)
 

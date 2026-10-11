@@ -81,7 +81,7 @@ class SignalMessageSenderTest {
         db = SignalMessageDatabase(context)
         protocolDb = SignalProtocolDatabase(context)
         val credentials = SignalCredentials(protocolDb).apply { aciString = me }
-        sender = SignalMessageSender(credentials, PhotonProtocolStore(protocolDb), db, null, transport)
+        sender = SignalMessageSender(credentials, PhotonProtocolStore(protocolDb), db, transport)
         db.upsertConversation(jid = alice, name = "Alice", isGroup = false)
         db.upsertConversation(jid = group, name = "Group", isGroup = true)
         db.updateGroupMeta(group, masterKey, 4)

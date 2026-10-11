@@ -9,22 +9,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import app.photon.data.model.Message
+import app.photon.data.model.Platform
+import app.photon.data.names.DisplayNames
 import app.photon.data.model.string
 import app.photon.service.PhotonService
 import app.photon.ui.shared.ChatScreenContent
 import app.photon.ui.shared.VisibleConversationEffect
 import app.photon.ui.shared.components.MediaViewer
 import kotlinx.coroutines.launch
-
-private fun formatJidAsPhone(jid: String): String {
-    val number = jid.substringBefore("@")
-    val server = jid.substringAfter("@", "")
-    return when {
-        server == "s.whatsapp.net" && number.length >= 5 && number.all { it.isDigit() } -> "+$number"
-        server == "lid" -> "Contact"
-        else -> number
-    }
-}
 
 /**
  * The mark-read request for a chat's messages (newest first): the newest
@@ -97,12 +89,14 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
         }
     }
 
-    val title = conversation?.name?.takeIf { it.isNotBlank() } ?: formatJidAsPhone(jid)
+    val title = DisplayNames.title(jid, conversation?.name, isGroup, Platform.WHATSAPP)
 
     VisibleConversationEffect(jid)
 
     ChatScreenContent(
         title = title,
+        platform = Platform.WHATSAPP,
+        conversationKey = jid,
         messagesFlow = repo.messages(jid),
         isGroup = isGroup,
         participantNames = participantNames,
@@ -126,13 +120,8 @@ fun ChatScreen(jid: String, onContact: (phone: String, name: String) -> Unit, on
         },
         onTitleClick = if (!isGroup) {
             {
-                // For WhatsApp DMs the phone-shaped JIDs (`12345@s.whatsapp.net`)
-                // give us a number directly. LID JIDs don't have a phone in
-                // hand here so we hide the affordance.
-                val phone = jid.substringBefore("@").takeIf {
-                    jid.endsWith("@s.whatsapp.net") && it.length >= 5 && it.all(Char::isDigit)
-                }?.let { "+$it" }
-                if (phone != null) onContact(phone, title)
+                // Phone JIDs carry the number; an @lid DM has none to save.
+                DisplayNames.phoneOf(jid, Platform.WHATSAPP)?.let { phone -> onContact(phone, title) }
             }
         } else null,
     )

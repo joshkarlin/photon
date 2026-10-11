@@ -15,6 +15,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
+import app.photon.data.model.Platform
 import app.photon.data.model.int
 import app.photon.service.PhotonService
 import app.photon.ui.shared.ChatListContent
@@ -35,6 +36,7 @@ fun ChatListScreen(onChat: (String) -> Unit, onSwitch: () -> Unit, onSettings: (
         onTitleClick = onSwitch,
         onSettings = onSettings,
         conversations = conversations,
+        platformOf = { Platform.WHATSAPP },
         onChat = onChat,
         emptyContent = { WhatsAppSyncStatus() },
     )

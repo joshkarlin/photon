@@ -1,7 +1,6 @@
 package app.photon.signal.receiver
 
 import android.util.Log
-import app.photon.signal.AndroidContactResolver
 import app.photon.signal.EarlyReadCache
 import app.photon.signal.SignalCredentials
 import app.photon.signal.SignalGroupV2Manager
@@ -9,7 +8,6 @@ import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.applySignalVerificationSync
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.db.findMessageByPrefix
-import app.photon.signal.db.getContact
 import app.photon.signal.db.insertMessage
 import app.photon.signal.db.markConversationRead
 import app.photon.signal.db.markIncomingReadByPrefix
@@ -34,7 +32,6 @@ internal class SyncMessageHandler(
     private val credentials: SignalCredentials,
     private val identityStore: PhotonIdentityKeyStore,
     private val messageDb: SignalMessageDatabase,
-    private val contactResolver: AndroidContactResolver,
     private val contactNames: ContactNames,
     private val groupMetadata: GroupMetadata,
     private val calls: CallHandler,
@@ -163,24 +160,10 @@ internal class SyncMessageHandler(
                     messageDb.updateContactProfileKey(destinationAci, syncProfileKey)
                 }
 
-                // Resolve conversation name. Order: Android local contacts
-                // → Signal profile name → phone number. Do NOT use primary's
-                // address-book name (we ingest only phone numbers from
-                // SyncMessage.contacts, not names).
-                val phone = sent.destinationE164
-                val storedProfileName = messageDb.getContact(destinationAci)
-                    ?.profileName?.takeIf { it.isNotBlank() }
-                val convName = when {
-                    destinationAci == myAci -> "Note to Self"
-                    phone != null -> contactResolver.resolve(phone) ?: storedProfileName ?: phone
-                    else -> storedProfileName
-                }
-
-                messageDb.upsertConversation(
-                    jid = destinationAci,
-                    name = convName,
-                    isGroup = false,
-                )
+                // The title is resolved when read (SignalNames), from the
+                // ACI's contact row: the phone contact sync mapped to it
+                // works even when the transcript carries no E.164.
+                messageDb.upsertConversation(jid = destinationAci, name = null, isGroup = false)
                 if (destinationAci != myAci) contactNames.maybeFetchProfile(destinationAci)
                 messageDb.insertMessage(
                     id = messageId,

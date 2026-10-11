@@ -17,6 +17,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.unit.dp
+import app.photon.data.model.Platform
+import app.photon.data.names.DisplayNames
 import app.photon.signal.store.ContactIdentity
 import app.photon.signal.store.IdentityVerification
 import app.photon.signal.store.PhotonIdentityKeyStore
@@ -47,7 +49,7 @@ internal fun SignalIdentityNotice(store: PhotonIdentityKeyStore, contacts: Map<S
             horizontalArrangement = Arrangement.spacedBy(1f.gridUnitsAsDp()),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            val name = contacts[first.address] ?: "Contact"
+            val name = contacts[first.address] ?: DisplayNames.placeholder(Platform.SIGNAL)
             LightText(
                 text = if (changed.size == 1) "Safety number changed: $name"
                     else "Safety numbers changed: ${changed.size} contacts",
@@ -65,7 +67,7 @@ internal fun SignalIdentityNotice(store: PhotonIdentityKeyStore, contacts: Map<S
     }
 
     reviewing?.let { identity ->
-        val name = contacts[identity.address] ?: "This contact"
+        val name = contacts[identity.address] ?: DisplayNames.placeholder(Platform.SIGNAL)
         AlertDialog(
             onDismissRequest = { reviewing = null },
             containerColor = LightThemeTokens.colors.background,

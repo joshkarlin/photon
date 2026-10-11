@@ -1,6 +1,5 @@
 package app.photon.signal.receiver
 
-import app.photon.signal.AndroidContactResolver
 import app.photon.signal.db.getConversation
 import app.photon.signal.db.insertIncomingMessage
 import app.photon.signal.db.updateContactPhone
@@ -58,7 +57,7 @@ class PniMergeTest {
     fun anActualMergeAsksForRingingRowsToBeRewatched() {
         var merges = 0
         val names = ContactNames(
-            fx.db, Any(), AndroidContactResolver(fx.context), fx.notifier,
+            fx.db, Any(), fx.notifier,
             profileFetcher = { null }, onMerged = { merges++ },
         )
         fx.db.updateContactPhone(aci, phone)

@@ -2,11 +2,9 @@ package app.photon.signal.receiver
 
 import android.content.Context
 import android.util.Log
-import app.photon.signal.AndroidContactResolver
 import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.db.SignalMessageDatabase
-import app.photon.signal.db.updateContactPhone
-import app.photon.signal.db.upsertConversation
+import app.photon.signal.db.updateContactFromSync
 import java.io.File
 import org.whispersystems.signalservice.api.SignalServiceMessageReceiver
 import org.whispersystems.signalservice.api.crypto.AttachmentCipherInputStream
@@ -21,21 +19,22 @@ private const val TAG = SignalMessageReceiver.TAG
 // than any plausible contact book).
 private const val MAX_CONTACTS_BLOB_BYTES: Long = 50L * 1024 * 1024
 
-/** sync.contacts: the primary's contact book, ingested as ACI <-> phone mappings. */
+/**
+ * sync.contacts: the primary's contact book, ingested as each ACI's phone
+ * number and address-book name (name sources for SignalNames).
+ */
 internal class ContactsSync(
     private val context: Context,
     private val messageDb: SignalMessageDatabase,
-    private val contactResolver: AndroidContactResolver,
     private val pushSocket: () -> PushServiceSocket?,
     // Runs after the contact book is ingested: new phone mappings can merge
     // PNI-keyed conversations.
     private val onSynced: () -> Unit,
 ) {
     /**
-     * Downloads, decrypts, and parses a sync.contacts attachment.
-     * Each DeviceContact in the stream gets its name + phone stored as a
-     * contact record, and any conversation with that ACI gets its display
-     * name updated to the primary device's local contact name.
+     * Downloads, decrypts, and parses a sync.contacts attachment. Each
+     * DeviceContact in the stream gets its name and phone stored on its
+     * contact record; no conversation is created or renamed.
      */
     fun processContactsBlob(blob: AttachmentPointer) {
         val push = pushSocket()
@@ -106,30 +105,16 @@ internal class ContactsSync(
         }
     }
 
-    private fun ingestDeviceContact(
+    /**
+     * Store one synced contact: the ACI <-> phone mapping (which also lets the
+     * LP3 address book name them) and the name the primary's address book
+     * gives them. The LP3 contact still wins when there is one; this name
+     * ranks above their Signal profile name.
+     */
+    internal fun ingestDeviceContact(
         contact: org.whispersystems.signalservice.api.messages.multidevice.DeviceContact,
     ) {
         val aci = contact.aci.orElse(null)?.toString() ?: return
-        val phone = contact.e164.orElse(null)
-
-        // We intentionally do NOT ingest the name from the primary's address
-        // book. The user wants this device's local contacts to be the source
-        // of truth — names get resolved via AndroidContactResolver at the
-        // point of writing the conversation row. We only persist the
-        // ACI<->phone mapping here so that resolution can happen on
-        // incoming messages even before the contact has messaged us.
-        if (phone != null) {
-            messageDb.updateContactPhone(aci, phone)
-            // Pre-resolve a name from local contacts and upsert the
-            // conversation row. If there's no local match the conversation
-            // stays nameless (UI will show the phone number).
-            val androidName = contactResolver.resolve(phone)
-            if (androidName != null) {
-                messageDb.upsertConversation(jid = aci, name = androidName, isGroup = false)
-                Log.d(TAG, "Synced contact $aci: phone=$phone, local name=$androidName")
-            } else {
-                Log.d(TAG, "Synced contact $aci: phone=$phone (no local name)")
-            }
-        }
+        messageDb.updateContactFromSync(aci, phone = contact.e164.orElse(null), name = contact.name.orElse(null))
     }
 }

@@ -5,6 +5,9 @@ import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.ComponentActivity
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -33,6 +36,7 @@ import androidx.compose.ui.test.swipeRight
 import app.photon.data.ComposeStyle
 import app.photon.data.KeyboardStyle
 import app.photon.data.ScrollDial
+import app.photon.data.model.Platform
 import app.photon.ui.RegisterComposeHostActivity
 import app.photon.ui.preview.PreviewSamples
 import app.photon.ui.theme.PhotonTheme
@@ -69,11 +73,13 @@ class ChatThreadInputTest {
         keyboard: KeyboardStyle = KeyboardStyle.SYSTEM,
         canSendMedia: Boolean = true,
         onBack: () -> Unit = {},
+        conversationKey: () -> String? = { null },
     ) {
         rule.setContent {
             PhotonTheme {
                 ChatThread(
                     title = PreviewSamples.LONG_DM_TITLE,
+                    platform = Platform.WHATSAPP,
                     messages = PreviewSamples.dmMessages,
                     isGroup = false,
                     participantNames = emptyMap(),
@@ -91,6 +97,7 @@ class ChatThreadInputTest {
                     headerContent = null,
                     composeStyle = style,
                     keyboardStyle = keyboard,
+                    conversationKey = conversationKey(),
                 )
             }
         }
@@ -149,6 +156,18 @@ class ChatThreadInputTest {
         getBoundsInRoot().let { Rect(it.left.value, it.top.value, it.right.value, it.bottom.value) }
 
     // ─── Inline + system keyboard ───────────────────────────────
+
+    /** A notification can swap the chat shown in place: its draft mustn't follow. */
+    @Test
+    fun eachConversationKeepsItsOwnDraft() {
+        var key by mutableStateOf("alice@s.whatsapp.net")
+        showDm(conversationKey = { key })
+        field().performTextInput("For Alice")
+        assertEquals("For Alice", fieldText())
+
+        rule.runOnIdle { key = "bob@s.whatsapp.net" }
+        assertEquals("", fieldText())
+    }
 
     @Test
     fun inlineBarHasNoKeyboardToggle() {

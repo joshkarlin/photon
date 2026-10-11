@@ -25,26 +25,6 @@ class SignalMessageDatabaseTest {
     }
 
     /**
-     * A contacts/profile re-resolution pass must NEVER wipe a group's title.
-     * Groups have no phone/profile row, so the resolver returns null — the old
-     * code wrote that null over the title, which then rendered as a base64 JID.
-     */
-    @Test
-    fun reresolveConversationNames_preservesGroupTitle_andUpdatesDms() {
-        db.upsertConversation(jid = "groupB64Id", name = "Frothers Utd", isGroup = true)
-        db.upsertConversation(jid = "aci-dm", name = "+15550001111", isGroup = false)
-        db.updateContactPhone("aci-dm", "+15550001111")
-
-        val changed = db.reresolveConversationNames { phone ->
-            if (phone == "+15550001111") "Alice" else null
-        }
-
-        assertEquals("Frothers Utd", db.getConversation("groupB64Id")?.name) // group untouched
-        assertEquals("Alice", db.getConversation("aci-dm")?.name)            // DM upgraded
-        assertEquals(1, changed)
-    }
-
-    /**
      * Reconnect-time GroupV2 refresh must also pick up named groups with an
      * empty participants table, because those member ACIs are the session-ping
      * targets for group-only contacts.
@@ -58,7 +38,7 @@ class SignalMessageDatabaseTest {
         db.updateGroupMeta("meta-no-participants", mk, 1)
         db.upsertConversation(jid = "meta-ready", name = "Ready", isGroup = true)
         db.updateGroupMeta("meta-ready", mk, 1)
-        db.upsertParticipant("meta-ready", "meta-member", "Member", "member")
+        db.upsertParticipant("meta-ready", "meta-member")
         db.upsertConversation(jid = "meta-keyless", name = null, isGroup = true)
 
         val refreshable = db.getGroupsNeedingMetadataRefresh()
@@ -261,38 +241,13 @@ class SignalMessageDatabaseTest {
         )
         db.upsertConversation(jid = "ping-empty-dm", name = "No Messages", isGroup = false)
         db.upsertConversation(jid = groupJid, name = "Group", isGroup = true)
-        db.upsertParticipant(groupJid, groupMemberA, "Member A", "member")
-        db.upsertParticipant(groupJid, groupMemberB, null, "member")
+        db.upsertParticipant(groupJid, groupMemberA)
+        db.upsertParticipant(groupJid, groupMemberB)
 
         val targets = db.getSessionPingTargetAcis()
             .filter { it.startsWith("ping-") }
             .toSet()
 
         assertEquals(setOf(dmAci, groupMemberA, groupMemberB), targets)
-    }
-
-    /**
-     * Group member names follow the documented policy: this device's local
-     * contacts win over the Signal profile name, which wins over the phone.
-     * (The old order put the profile name first, so a saved contact name was
-     * overridden by whatever the member called themselves on Signal.)
-     */
-    @Test
-    fun memberDisplayName_prefersLocalContactThenProfileThenPhone() {
-        val saved = "member-saved"
-        val profileOnly = "member-profile"
-        val phoneOnly = "member-phone"
-        db.updateContactPhone(saved, "+15550003333")
-        db.updateContactProfileName(saved, "Signal Profile Name")
-        db.updateContactPhone(profileOnly, "+15550004444")
-        db.updateContactProfileName(profileOnly, "Profile Only")
-        db.updateContactPhone(phoneOnly, "+15550005555")
-        val resolver = { phone: String -> if (phone == "+15550003333") "Saved Contact" else null }
-
-        assertEquals("Saved Contact", db.memberDisplayName(saved, resolver))
-        assertEquals("Profile Only", db.memberDisplayName(profileOnly, resolver))
-        assertEquals("+15550005555", db.memberDisplayName(phoneOnly, resolver))
-        assertEquals("Signal Profile Name", db.memberDisplayName(saved))
-        assertEquals("member-u", db.memberDisplayName("member-unknown"))
     }
 }

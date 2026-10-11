@@ -20,6 +20,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import app.photon.data.names.DisplayNames
+import app.photon.data.names.LocalContacts
 import app.photon.ui.shared.components.LightInputField
 import app.photon.ui.shared.components.backButton
 import app.photon.ui.theme.PhotonGrid
@@ -53,7 +55,8 @@ fun ContactScreen(
 
     var existingLookupUri by remember { mutableStateOf<Uri?>(null) }
     var existingName by remember { mutableStateOf<String?>(null) }
-    var nameInput by remember { mutableStateOf(if (displayName.isNotBlank() && displayName != phone) displayName else "") }
+    // Only a real name: a number or "Signal contact" isn't one to save.
+    var nameInput by remember { mutableStateOf(DisplayNames.contactPrefill(displayName)) }
     var saving by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
 
@@ -104,11 +107,9 @@ fun ContactScreen(
                 }
             }
             if (ok) {
-                // Invalidate cached name lookups so the chat list
-                // and titles pick up the new contact immediately
-                // instead of after the next reconnect / refresh.
-                app.photon.service.PhotonService._signalReceiver?.refreshContactNames()
-                app.photon.service.PhotonService._smsRepository?.refreshContactNames()
+                // Every platform's names re-resolve now, rather than when
+                // the provider's change notification arrives.
+                LocalContacts.get(context).invalidate()
             }
             saving = false
             status = if (ok) "Saved." else "Save failed — check permissions."
@@ -131,7 +132,7 @@ fun ContactScreen(
         ) {
             // Phone number (read-only display).
             LightText(
-                text = phone,
+                text = DisplayNames.number(phone),
                 variant = LightTextVariant.Heading,
                 modifier = Modifier.padding(top = 1f.gridUnitsAsDp()),
             )

@@ -3,6 +3,7 @@ package app.photon.ui.sms
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import app.photon.data.model.Platform
 import app.photon.service.PhotonService
 import app.photon.ui.shared.ChatListContent
 
@@ -16,6 +17,7 @@ fun SmsChatListScreen(onChat: (String) -> Unit, onSwitch: () -> Unit, onSettings
         onTitleClick = onSwitch,
         onSettings = onSettings,
         conversations = conversations,
+        platformOf = { Platform.SMS },
         onChat = onChat,
     )
 }

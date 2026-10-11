@@ -19,6 +19,7 @@ import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import app.photon.data.model.Conversation
+import app.photon.data.model.Platform
 import app.photon.service.NotificationHelper
 import app.photon.ui.shared.components.backButton
 import app.photon.ui.shared.components.settingsButton
@@ -34,11 +35,14 @@ import com.thelightphone.sdk.ui.gridUnitsAsDp
 /**
  * Shared chat list screen structure used by WhatsApp, Signal, SMS, and All Chats.
  * Handles the top bar, loading state, empty state, and conversation list.
+ *
+ * @param platformOf which platform a listed conversation belongs to
  */
 @Composable
 fun ChatListContent(
     title: String,
     conversations: List<Conversation>?,
+    platformOf: (Conversation) -> Platform,
     onChat: (String) -> Unit,
     onBack: (() -> Unit)? = null,
     emptyMessage: String = "No messages",
@@ -88,6 +92,7 @@ fun ChatListContent(
     ChatListLayout(
         title = title,
         conversations = conversations,
+        platformOf = platformOf,
         onChat = onChat,
         listState = listState,
         onBack = onBack,
@@ -104,6 +109,7 @@ fun ChatListContent(
 internal fun ChatListLayout(
     title: String,
     conversations: List<Conversation>?,
+    platformOf: (Conversation) -> Platform,
     onChat: (String) -> Unit,
     listState: LazyListState = rememberLazyListState(),
     onBack: (() -> Unit)? = null,
@@ -162,6 +168,7 @@ internal fun ChatListLayout(
                     items(conversations, key = { it.jid }) { conv ->
                         ConversationRow(
                             conv = conv,
+                            platform = platformOf(conv),
                             onClick = { onChat(conv.jid) },
                             icon = icon?.invoke(conv),
                         )

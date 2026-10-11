@@ -120,10 +120,7 @@ internal class DataMessageHandler(
         // record it like a message so the chat shows it. Group-call update
         // messages have no body, so this must run before the empty check.
         data.groupCallUpdate?.let { update ->
-            if (isGroup) {
-                val name = contactNames.displayNameFor(senderAci, senderE164)
-                calls.recordGroupCall(conversationJid, senderAci, name, update.eraId, timestamp)
-            }
+            if (isGroup) calls.recordGroupCall(conversationJid, senderAci, update.eraId, timestamp)
             return
         }
 
@@ -143,18 +140,13 @@ internal class DataMessageHandler(
             else -> "sticker"
         }
 
-        val senderName = contactNames.displayNameFor(senderAci, senderE164)
-
         if (isGroup) {
             // Master key + conversation row already seeded above (before
-            // the body check). Here we only do the per-message work:
-            // record the sender as a known participant so per-message
-            // sender labels render in group transcripts.
-            if (!senderName.isNullOrBlank()) {
-                messageDb.upsertParticipant(conversationJid, senderAci, senderName, "member")
-            }
+            // the body check). Here we only record the sender as a member.
+            messageDb.upsertParticipant(conversationJid, senderAci)
         } else {
-            messageDb.upsertConversation(jid = conversationJid, name = senderName, isGroup = false)
+            // Names are resolved when read (SignalNames), not stored.
+            messageDb.upsertConversation(jid = conversationJid, name = null, isGroup = false)
         }
 
         // A read sync from another device may have beaten this message here
@@ -197,6 +189,6 @@ internal class DataMessageHandler(
             return
         }
 
-        messageNotifications.showMessage(conversationJid, isGroup, senderAci, senderName, body, contentType)
+        messageNotifications.showMessage(conversationJid, isGroup, senderAci, body, contentType)
     }
 }

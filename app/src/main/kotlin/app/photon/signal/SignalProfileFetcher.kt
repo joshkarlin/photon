@@ -22,6 +22,19 @@ import org.whispersystems.signalservice.api.websocket.SignalWebSocket
 import org.whispersystems.signalservice.internal.configuration.SignalServiceConfiguration
 
 /**
+ * Record a profile fetch's result. Only a name is stored: a failed fetch, or
+ * one that returned no name (a stale profile key gets the profile without
+ * it), keeps the name already known, and the fetch is retried later (the
+ * profile sweep, or the contact's next message). Writing null here used to
+ * blank the name, so the chat fell back to a number.
+ */
+internal fun SignalMessageDatabase.storeFetchedProfileName(aci: String, name: String?): Boolean {
+    val fetched = name?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+    updateContactProfileName(aci, fetched)
+    return true
+}
+
+/**
  * Fetches and decrypts Signal profile names using the authenticated websocket.
  *
  * Signal profile names are returned by the server as base64-encoded ciphertext
@@ -46,7 +59,7 @@ class SignalProfileFetcher(
 
     private val inFlight = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
-    fun fetchAsync(aci: String, profileKeyBytes: ByteArray, onResult: (String?) -> Unit) {
+    fun fetchAsync(aci: String, profileKeyBytes: ByteArray) {
         if (!inFlight.add(aci)) return
         scope.launch(Dispatchers.IO) {
             val name = try {
@@ -58,11 +71,10 @@ class SignalProfileFetcher(
                 inFlight.remove(aci)
             }
             try {
-                messageDb.updateContactProfileName(aci, name)
+                messageDb.storeFetchedProfileName(aci, name)
             } catch (e: Throwable) {
                 Log.w(TAG, "DB write failed for $aci profile: ${e.message}", e)
             }
-            try { onResult(name) } catch (_: Throwable) {}
         }
     }
 

@@ -50,6 +50,7 @@ class SignalServiceIdMergeTest {
         db.upsertConversation(jid = pni, name = phone, isGroup = false)
         db.updateContactPhone(pni, phone)
         db.updateContactProfileKey(pni, ByteArray(32) { 7 })
+        db.updateContactFromSync(pni, phone, "Mother")
         receive(pni, pni, t + 1_000)
         db.markConversationSeen(pni) // seen in Photon, read sync impossible
         receive(pni, pni, t + 2_000)
@@ -63,7 +64,7 @@ class SignalServiceIdMergeTest {
         db.upsertReaction("${aci}_${t}", pni, "❤️", 1)
         db.upsertCallRow("call_${pni}_9", pni, pni, (t + 500) / 1000, "Missed voice call", unread = true)
         db.upsertConversation(jid = "group", name = "Group", isGroup = true)
-        db.upsertParticipant("group", pni, phone, "member")
+        db.upsertParticipant("group", pni)
     }
 
     @Test
@@ -100,6 +101,7 @@ class SignalServiceIdMergeTest {
 
         assertEquals(phone, db.getContact(aci)?.phone)
         assertContentEquals(ByteArray(32) { 7 }, db.getContact(aci)?.profileKey)
+        assertEquals("Mother", db.getContact(aci)?.name)
         // The PNI's contact row stays as an alias; nothing else is left to merge.
         assertEquals(phone, db.getContact(pni)?.phone)
         assertFalse(db.mergeServiceId(pni, aci))

@@ -1,26 +1,62 @@
 package app.photon.signal.db
 
 import app.photon.data.model.Participant
-import app.photon.signal.ConversationNaming
 import app.photon.signal.db.SignalMessageDatabase.Contact
 import org.signal.core.models.ServiceId
 
-// Contacts (phone, profile key and name per service id) and group participants.
+// Contacts (phone, names and profile key per service id) and group members.
 
-fun SignalMessageDatabase.upsertParticipant(conversationJid: String, jid: String, displayName: String?, role: String = "member") {
-    // Preserve any previously known display_name when the caller passes
-    // null/blank — repeated upserts with sparse data shouldn't clobber.
+/**
+ * Record [jid] as a member of a group. Only membership: their name is
+ * resolved from the contacts table when read (SignalNames), so
+ * participants.display_name is no longer written.
+ */
+fun SignalMessageDatabase.upsertParticipant(conversationJid: String, jid: String, role: String = "member") {
     writableDatabase.execSQL(
         """
-        INSERT INTO participants (conversation_jid, jid, display_name, role)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(conversation_jid, jid) DO UPDATE SET
-            display_name = COALESCE(NULLIF(excluded.display_name, ''), participants.display_name),
-            role = excluded.role
+        INSERT INTO participants (conversation_jid, jid, role) VALUES (?, ?, ?)
+        ON CONFLICT(conversation_jid, jid) DO UPDATE SET role = excluded.role
         """,
-        arrayOf<Any?>(conversationJid, jid, displayName, role),
+        arrayOf<Any?>(conversationJid, jid, role),
     )
     notifyChanged()
+}
+
+/**
+ * The people of a group, with their name sources: its members, plus anyone
+ * who has written in it without being stored as one.
+ */
+fun SignalMessageDatabase.getGroupPeople(conversationJid: String): List<Pair<String, Contact?>> =
+    readableDatabase.rawQuery(
+        """
+        SELECT p.jid, ct.jid, ct.name, ct.phone_number, ct.profile_name FROM (
+            SELECT jid FROM participants WHERE conversation_jid = ?
+            UNION
+            SELECT sender_jid AS jid FROM messages WHERE conversation_jid = ? AND is_from_me = 0
+        ) p LEFT JOIN contacts ct ON ct.jid = p.jid
+        """,
+        arrayOf(conversationJid, conversationJid),
+    ).use { c ->
+        buildList {
+            while (c.moveToNext()) add(c.getString(0) to c.nameSources(1))
+        }
+    }
+
+/**
+ * The name sources of a contacts row read from [first] on (jid, name,
+ * phone_number, profile_name), or null when the LEFT JOIN found none.
+ */
+internal fun android.database.Cursor.nameSources(first: Int): Contact? {
+    if (isNull(first)) return null
+    fun str(i: Int) = if (isNull(i)) null else getString(i)
+    return Contact(
+        jid = getString(first),
+        name = str(first + 1),
+        phone = str(first + 2),
+        profileKey = null,
+        profileName = str(first + 3),
+        profileFetchedAt = 0,
+    )
 }
 
 fun SignalMessageDatabase.getParticipants(conversationJid: String): List<Participant> {
@@ -54,6 +90,25 @@ fun SignalMessageDatabase.updateContactPhone(jid: String, phone: String) {
     notifyChanged()
 }
 
+/**
+ * A contact as the primary's contact sync describes it. The sync carries the
+ * whole current entry, so its address-book [name] replaces the stored one
+ * (null: no longer named there). A missing [phone] keeps the stored one,
+ * which an envelope may have supplied.
+ */
+fun SignalMessageDatabase.updateContactFromSync(jid: String, phone: String?, name: String?) {
+    writableDatabase.execSQL(
+        """
+        INSERT INTO contacts (jid, name, phone_number, updated_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(jid) DO UPDATE SET
+            name = excluded.name,
+            phone_number = COALESCE(excluded.phone_number, contacts.phone_number)
+        """,
+        arrayOf<Any?>(jid, name?.trim()?.takeIf { it.isNotEmpty() }, phone, System.currentTimeMillis()),
+    )
+    notifyChanged()
+}
+
 fun SignalMessageDatabase.updateContactProfileKey(jid: String, profileKey: ByteArray) {
     writableDatabase.execSQL(
         """
@@ -64,7 +119,7 @@ fun SignalMessageDatabase.updateContactProfileKey(jid: String, profileKey: ByteA
     )
 }
 
-fun SignalMessageDatabase.updateContactProfileName(jid: String, profileName: String?) {
+fun SignalMessageDatabase.updateContactProfileName(jid: String, profileName: String) {
     writableDatabase.execSQL(
         """
         INSERT INTO contacts (jid, profile_name, profile_fetched_at, updated_at) VALUES (?, ?, ?, ?)
@@ -112,21 +167,6 @@ fun SignalMessageDatabase.getAciForPhone(phone: String): String? {
         }
         null
     }
-}
-
-/**
- * Display-name policy for a group member, shared by receiver and
- * sender so the participants table stays consistent. Same order as
- * conversation titles: local contact (when the caller supplies a phone
- * resolver) → Signal profile name → bare phone → ACI prefix.
- */
-fun SignalMessageDatabase.memberDisplayName(aci: String, contactResolver: ((String) -> String?)? = null): String {
-    val contact = getContact(aci)
-    return ConversationNaming.resolveFromContact(
-        phone = contact?.phone,
-        profileName = contact?.profileName,
-        resolveByPhone = { phone -> contactResolver?.invoke(phone) },
-    ) ?: aci.take(8)
 }
 
 /**

@@ -13,6 +13,8 @@ import app.photon.MainActivity
 import app.photon.R
 import app.photon.PhotonApp
 import app.photon.data.db.PhotonDatabase
+import app.photon.data.names.DisplayNames
+import app.photon.data.names.LocalContacts
 import app.photon.data.model.boolean
 import app.photon.data.model.int
 import app.photon.data.model.Platform
@@ -60,7 +62,7 @@ class PhotonService : Service() {
         goBridge = GoBridge(this)
         bridgeClient = BridgeClient(goBridge)
         val database = PhotonDatabase(this)
-        chatRepository = ChatRepository(database, bridgeClient, scope)
+        chatRepository = ChatRepository(database, bridgeClient, scope, LocalContacts.get(this))
 
         // Expose as singletons for UI access
         _goBridge = goBridge
@@ -82,9 +84,10 @@ class PhotonService : Service() {
         _signalManager = SignalAccountManager(signalProtocolStore, signalCreds, signalProtocolDb)
         val signalMessageDb = SignalMessageDatabase(this)
         _signalMessageDb = signalMessageDb
-        val signalContacts = app.photon.signal.AndroidContactResolver(this)
-        _signalSender = SignalMessageSender(signalCreds, signalProtocolStore, signalMessageDb, signalContacts::resolve)
-        _signalRepository = SignalRepository(signalMessageDb, _signalSender, scope)
+        _signalSender = SignalMessageSender(signalCreds, signalProtocolStore, signalMessageDb)
+        _signalRepository = SignalRepository(
+            signalMessageDb, _signalSender, scope, LocalContacts.get(this),
+        ) { signalCreds.aciString }
         _signalReceiver = SignalMessageReceiver(this, signalCreds, signalProtocolStore, signalMessageDb)
 
         // Start Signal message receiver if already paired
@@ -228,15 +231,13 @@ class PhotonService : Service() {
                 // Pseudo-chats (status broadcasts etc.) shouldn't ring.
                 if (isPseudoWhatsAppJid(convJid)) return
 
-                val conversation = _chatRepository?.getConversation(convJid)
+                val repo = _chatRepository ?: return
+                val conversation = repo.storedConversation(convJid)
                 if (conversation?.isMuted == true) return
 
-                val name = evt.string("sender_name")?.takeIf { it.isNotBlank() }
-                    ?: conversation?.name
-                    ?: convJid.substringBefore("@")
-
+                val text = repo.names.messageNotification(evt, conversation)
                 NotificationHelper.showMessageNotification(
-                    this@PhotonService, name, evt.string("text_body"), Platform.WHATSAPP, convJid,
+                    this@PhotonService, text.title, text.body, Platform.WHATSAPP, convJid,
                 )
             }
             "read_self" -> {
@@ -278,8 +279,10 @@ class PhotonService : Service() {
         }
     }
 
-    private fun callerName(evt: BridgeEvent, convJid: String): String =
-        evt.string("caller_name")?.takeIf { it.isNotBlank() } ?: convJid.substringBefore("@")
+    private fun callerName(evt: BridgeEvent, convJid: String): String {
+        val repo = _chatRepository ?: return DisplayNames.placeholder(Platform.WHATSAPP)
+        return repo.names.callerTitle(evt, repo.storedConversation(convJid))
+    }
 
     /**
      * Outgoing media staged by MessageInput (voice notes, picked files) lands

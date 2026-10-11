@@ -11,7 +11,8 @@ import app.photon.service.NotificationHelper
  * the handlers can be tested without Android's notification manager.
  */
 internal interface SignalNotifier {
-    fun showMessage(title: String, body: String?, conversationJid: String)
+    /** [update]: corrects the showing notification without alerting again (see NotificationHelper). */
+    fun showMessage(title: String, body: String?, conversationJid: String, update: Boolean = false)
 
     /** Whether the conversation's message notification is still showing (not dismissed). */
     fun isShowingMessage(conversationJid: String): Boolean
@@ -26,8 +27,8 @@ internal interface SignalNotifier {
 }
 
 internal class AndroidSignalNotifier(private val context: Context) : SignalNotifier {
-    override fun showMessage(title: String, body: String?, conversationJid: String) =
-        NotificationHelper.showMessageNotification(context, title, body, Platform.SIGNAL, conversationJid)
+    override fun showMessage(title: String, body: String?, conversationJid: String, update: Boolean) =
+        NotificationHelper.showMessageNotification(context, title, body, Platform.SIGNAL, conversationJid, update)
 
     // NotificationHelper tags notifications with the conversation jid and
     // gives message notifications the message category.
