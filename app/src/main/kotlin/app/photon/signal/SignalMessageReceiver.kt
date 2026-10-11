@@ -191,6 +191,23 @@ class SignalMessageReceiver(
         closeSockets(authWs, unauthWs)
     }
 
+    /**
+     * Forget per-account session state once the device is unlinked (Signal
+     * reset), so a re-pair starts clean: ask the primary for contacts again,
+     * re-ping every contact for the new device id, and drop held envelopes,
+     * early reads and the group credential cache.
+     */
+    fun resetAccountState() {
+        stop()
+        contactsSyncRequested = false
+        activeContactsPinged = false
+        earlyReads.clear()
+        envelopeRetries.clearAll()
+        context.getSharedPreferences("signal_ping_state", android.content.Context.MODE_PRIVATE)
+            .edit().clear().apply()
+        SignalGroupV2Manager.clearCredentialCache()
+    }
+
     private fun isCurrent(gen: Long): Boolean = running && generation == gen
 
     /** Publish a connection state, unless this loop has been superseded. */

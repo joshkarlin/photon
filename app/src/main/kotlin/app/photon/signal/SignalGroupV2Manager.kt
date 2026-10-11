@@ -52,6 +52,9 @@ class SignalGroupV2Manager(
         // and credentials stay valid for a 7-day window, so an instance-level
         // cache would refetch on each reconnect for nothing.
         private val credentialsByDay = ConcurrentHashMap<Long, AuthCredentialWithPniResponse>()
+
+        /** Credentials belong to the linked account; drop them when it's unlinked. */
+        fun clearCredentialCache() = credentialsByDay.clear()
     }
 
     private val clientZk: ClientZkOperations = ClientZkOperations.create(config)

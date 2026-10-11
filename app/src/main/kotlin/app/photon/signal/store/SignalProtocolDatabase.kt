@@ -6,8 +6,12 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 
 class SignalProtocolDatabase(context: Context) : SQLiteOpenHelper(
-    context, "signal_protocol.db", null, 2,
+    context, DATABASE_NAME, null, 2,
 ) {
+    companion object {
+        const val DATABASE_NAME = "signal_protocol.db"
+    }
+
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""
             CREATE TABLE IF NOT EXISTS identities (
@@ -100,6 +104,19 @@ class SignalProtocolDatabase(context: Context) : SQLiteOpenHelper(
 
     fun getStateInt(key: String): Int? {
         return getState(key)?.let { String(it).toIntOrNull() }
+    }
+
+    /**
+     * Close the helper and delete the database files (Signal reset). Holding
+     * the helper's monitor — the one getWritableDatabase/getReadableDatabase
+     * take — stops a concurrent reader reopening the old file between the
+     * close and the delete. The next access creates a fresh, empty database.
+     */
+    fun closeAndDelete(context: Context) {
+        synchronized(this) {
+            close()
+            context.deleteDatabase(DATABASE_NAME)
+        }
     }
 
     fun deleteAll() {

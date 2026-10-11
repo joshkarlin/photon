@@ -1407,6 +1407,20 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         return doomed.size
     }
 
+    /**
+     * Close the helper and delete the database files (Signal reset). Holding
+     * the helper's monitor — the one getWritableDatabase/getReadableDatabase
+     * take — stops a concurrent reader reopening the old file between the
+     * close and the delete. The next access creates a fresh, empty database.
+     */
+    fun closeAndDelete(context: Context) {
+        synchronized(this) {
+            close()
+            context.deleteDatabase(DATABASE_NAME)
+        }
+        notifyChanged()
+    }
+
     fun getReactions(messageIds: List<String>): Map<String, List<Reaction>> {
         if (messageIds.isEmpty()) return emptyMap()
         // Reactions are stored under the suffix-less "{author}_{timestampMs}"

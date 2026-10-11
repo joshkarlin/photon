@@ -64,11 +64,13 @@ class PhotonService : Service() {
         AndroidRecordFix.apply()
         SignalConfig.init(this)
         val signalProtocolDb = SignalProtocolDatabase(this)
+        _signalProtocolDb = signalProtocolDb
         val signalProtocolStore = PhotonProtocolStore(signalProtocolDb)
         val signalCreds = SignalCredentials(signalProtocolDb)
         _signalCredentials = signalCreds
         _signalManager = SignalAccountManager(signalProtocolStore, signalCreds, signalProtocolDb)
         val signalMessageDb = SignalMessageDatabase(this)
+        _signalMessageDb = signalMessageDb
         val signalContacts = app.photon.signal.AndroidContactResolver(this)
         _signalSender = SignalMessageSender(signalCreds, signalProtocolStore, signalMessageDb, signalContacts::resolve)
         _signalRepository = SignalRepository(signalMessageDb, _signalSender, scope)
@@ -170,6 +172,8 @@ class PhotonService : Service() {
         _signalRepository = null
         _signalReceiver = null
         _signalSender = null
+        _signalMessageDb = null
+        _signalProtocolDb = null
     }
 
     private suspend fun listenForWhatsAppMessages() {
@@ -298,6 +302,9 @@ class PhotonService : Service() {
             private set
         var _signalSender: SignalMessageSender? = null
             private set
+        // Held only so resetSignal can close them before deleting their files.
+        private var _signalProtocolDb: SignalProtocolDatabase? = null
+        private var _signalMessageDb: SignalMessageDatabase? = null
         /** Lifecycle: set by the receiver when the auth WS comes up; cleared on stop. */
         @Volatile var _signalGroupManager: app.photon.signal.SignalGroupV2Manager? = null
         var _goBridge: GoBridge? = null
@@ -354,13 +361,20 @@ class PhotonService : Service() {
          * Unlink from the Signal account and wipe all Signal state. logout()
          * calls DELETE /v1/devices/{id} so the primary cleanly forgets us —
          * must run off the main thread.
+         *
+         * The components stay alive and re-pairable: the sender is only
+         * invalidated (shutting down its executor broke sends after a
+         * re-pair), and the database helpers are closed before their files
+         * are deleted, so the next access recreates empty databases instead
+         * of writing through a handle to the deleted file.
          */
         fun resetSignal(context: android.content.Context) {
-            _signalReceiver?.stop()
-            _signalSender?.shutdown()
+            _signalReceiver?.resetAccountState()
+            _signalSender?.invalidate()
             _signalManager?.logout()
-            val dbDir = context.getDatabasePath("signal_protocol.db").parentFile
-            dbDir?.listFiles()?.filter { it.name.startsWith("signal_") }?.forEach { it.delete() }
+            _signalMessageDb?.closeAndDelete(context)
+            _signalProtocolDb?.closeAndDelete(context)
+            java.io.File(context.filesDir, "signal_media").deleteRecursively()
         }
 
         val wsClient: WsClient get() = _wsClient!!
