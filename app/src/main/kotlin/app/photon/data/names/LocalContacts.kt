@@ -1,7 +1,9 @@
 package app.photon.data.names
 
+import android.Manifest
 import android.content.ContentResolver
 import android.content.Context
+import android.content.pm.PackageManager
 import android.database.ContentObserver
 import android.net.Uri
 import android.os.Handler
@@ -25,14 +27,21 @@ import kotlinx.coroutines.flow.update
  * clears the cache and bumps [version], and the WhatsApp, Signal and SMS name
  * flows re-resolve on it.
  *
+ * Without READ_CONTACTS nothing resolves (and nothing is cached); once it's
+ * granted, the next lookup starts observing and re-resolves every name.
+ *
  * @param lookup the provider query; replaced in tests
  */
 class LocalContacts(
     context: Context,
     lookup: ((String) -> String?)? = null,
 ) {
-    private val resolver: ContentResolver = context.applicationContext.contentResolver
-    private val lookup: (String) -> String? = lookup ?: { phone -> phoneLookup(resolver, phone) }
+    private val appContext = context.applicationContext
+    private val resolver: ContentResolver = appContext.contentResolver
+    private val lookup: (String) -> String? = lookup ?: { phone ->
+        if (!canRead()) throw SecurityException("READ_CONTACTS not granted")
+        phoneLookup(resolver, phone)
+    }
 
     /** A cached lookup; [name] null is a cached miss. */
     private class Cached(val name: String?)
@@ -63,6 +72,7 @@ class LocalContacts(
     }
 
     @Volatile private var observing = false
+    @Volatile private var wasDenied = false
 
     init {
         startObserving()
@@ -96,16 +106,25 @@ class LocalContacts(
         _version.update { it + 1 }
     }
 
+    private fun canRead(): Boolean =
+        appContext.checkSelfPermission(Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
+
     @Synchronized
     private fun startObserving() {
         if (observing) return
         try {
+            // Registering for a provider the app can't read throws.
+            if (!canRead()) throw SecurityException("READ_CONTACTS not granted")
             resolver.registerContentObserver(ContactsContract.Contacts.CONTENT_URI, true, observer)
             resolver.registerContentObserver(ContactsContract.Data.CONTENT_URI, true, observer)
             observing = true
         } catch (_: SecurityException) {
-            // READ_CONTACTS not granted yet; retried on the next lookup.
+            // Not granted yet; retried on the next lookup.
+            wasDenied = true
+            return
         }
+        // Just granted: names resolved without the address book re-resolve.
+        if (wasDenied) invalidate()
     }
 
     companion object {

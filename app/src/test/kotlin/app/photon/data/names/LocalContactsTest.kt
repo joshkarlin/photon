@@ -1,5 +1,7 @@
 package app.photon.data.names
 
+import android.Manifest
+import android.app.Application
 import android.content.ContentProvider
 import android.content.ContentValues
 import android.content.Context
@@ -10,6 +12,7 @@ import android.os.Looper
 import android.provider.ContactsContract
 import androidx.test.core.app.ApplicationProvider
 import java.time.Duration
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -27,10 +30,19 @@ class LocalContactsTest {
     private val context = ApplicationProvider.getApplicationContext<Context>()
     private val book = mutableMapOf("+447700900123" to "Mum")
     private var lookups = 0
-    private val contacts = LocalContacts(context) { phone ->
-        lookups++
-        book[phone]
+    private lateinit var contacts: LocalContacts
+
+    @Before
+    fun setUp() {
+        grantReadContacts()
+        contacts = LocalContacts(context) { phone ->
+            lookups++
+            book[phone]
+        }
     }
+
+    private fun grantReadContacts() =
+        shadowOf(context as Application).grantPermissions(Manifest.permission.READ_CONTACTS)
 
     private fun waitOutDebounce() =
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(LocalContacts.CHANGE_DEBOUNCE_MS + 100))
@@ -89,6 +101,21 @@ class LocalContactsTest {
         assertNull(guarded.nameFor("+447700900123"))
         granted = true
         assertEquals("Mum", guarded.nameFor("+447700900123"))
+    }
+
+    /** Contacts permission granted after start: the next lookup resolves, and everything re-resolves. */
+    @Test
+    fun withoutReadContactsNothingResolvesUntilItIsGranted() {
+        Robolectric.buildContentProvider(FakeContactsProvider::class.java).create(ContactsContract.AUTHORITY)
+        shadowOf(context as Application).denyPermissions(Manifest.permission.READ_CONTACTS)
+        val real = LocalContacts(context)
+        assertNull(real.nameFor("+447700900123"))
+        assertEquals(0L, real.version.value)
+
+        grantReadContacts()
+
+        assertEquals("Mum", real.nameFor("+447700900123"))
+        assertEquals(1L, real.version.value)
     }
 
     @Test
