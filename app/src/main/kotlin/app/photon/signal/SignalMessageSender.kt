@@ -794,21 +794,24 @@ class SignalMessageSender(
      * consistent across devices, mirroring what official clients send.
      *
      * Each entry is (authorAci, sentTimestampMs) of an incoming message —
-     * the pair other devices use to locate it. Returns false on failure so
-     * the caller can leave the messages marked unsynced and retry later.
+     * the pair other devices use to locate it (see [planReadSync]). Returns
+     * true only when a non-empty payload went out, so the caller marks
+     * exactly those rows synced; anything else stays pending for a retry.
      *
      * Note: this is the self-sync only. Official clients also send a READ
      * receipt to the message author, but that's gated on the user's
      * read-receipts privacy setting, which Photon doesn't know — so we
      * deliberately don't.
      */
-    fun sendReadSync(reads: List<Pair<String, Long>>): Boolean {
-        val readMessages = reads.mapNotNull { (aci, timestampMs) ->
-            ServiceId.ACI.parseOrNull(aci)?.let { ReadMessage(it, timestampMs) }
-        }
-        if (readMessages.isEmpty()) return true
+    fun sendReadSync(reads: List<Pair<ServiceId.ACI, Long>>): Boolean {
+        if (reads.isEmpty()) return false
+        val readMessages = reads.map { (aci, timestampMs) -> ReadMessage(aci, timestampMs) }
         return try {
-            getOrCreateSender().sendSyncMessage(SignalServiceSyncMessage.forRead(readMessages))
+            val result = getOrCreateSender().sendSyncMessage(SignalServiceSyncMessage.forRead(readMessages))
+            if (!result.isSuccess) {
+                Log.w(TAG, "Read sync not delivered (${readMessages.size} message(s))")
+                return false
+            }
             Log.i(TAG, "Sent read sync for ${readMessages.size} message(s)")
             true
         } catch (e: Exception) {

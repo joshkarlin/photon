@@ -20,8 +20,23 @@ import kotlinx.coroutines.flow.SharedFlow
 import org.signal.core.models.ServiceId
 
 class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
-    context, "signal_messages.db", null, 3,
+    context, DATABASE_NAME, null, 4,
 ) {
+    companion object {
+        const val DATABASE_NAME = "signal_messages.db"
+
+        // Incoming-row `status` is read state, not delivery state:
+        //  - STATUS_UNREAD: not yet seen anywhere; counted in unread_count.
+        //  - STATUS_SEEN: viewed in Photon (unread_count already cleared) but
+        //    the read sync to the user's other devices hasn't gone out yet.
+        //  - STATUS_READ: read and synced, or read on another device.
+        // Remote-deleted rows are 'deleted' and never counted.
+        const val STATUS_UNREAD = "received"
+        const val STATUS_SEEN = "seen"
+        const val STATUS_READ = "read"
+        const val STATUS_DELETED = "deleted"
+    }
+
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""
             CREATE TABLE IF NOT EXISTS conversations (
@@ -123,6 +138,42 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                 }
             }
         }
+        if (oldVersion < 4) {
+            markLocallySeenRows(db)
+        }
+    }
+
+    /**
+     * v4 split "seen in Photon" from "read-synced". Before, opening a chat
+     * only zeroed unread_count and rows stayed 'received' until the read sync
+     * succeeded, so a later primary read sync decremented the count that
+     * belonged to newer messages. Each conversation's newest unread_count
+     * 'received' rows are still unread; anything older was already seen.
+     */
+    private fun markLocallySeenRows(db: SQLiteDatabase) {
+        val unreadByConversation = mutableMapOf<String, Int>()
+        db.rawQuery(
+            "SELECT DISTINCT m.conversation_jid, COALESCE(c.unread_count, 0) FROM messages m " +
+                "LEFT JOIN conversations c ON c.jid = m.conversation_jid " +
+                "WHERE m.is_from_me = 0 AND m.status = ?",
+            arrayOf(STATUS_UNREAD),
+        ).use { c ->
+            while (c.moveToNext()) unreadByConversation[c.getString(0)] = c.getInt(1)
+        }
+        for ((jid, unread) in unreadByConversation) {
+            db.execSQL(
+                """
+                UPDATE messages SET status = ?
+                 WHERE id IN (
+                    SELECT id FROM messages
+                     WHERE conversation_jid = ? AND is_from_me = 0 AND status = ?
+                     ORDER BY timestamp DESC, rowid DESC
+                     LIMIT -1 OFFSET ?
+                 )
+                """.trimIndent(),
+                arrayOf<Any?>(STATUS_SEEN, jid, STATUS_UNREAD, unread.coerceAtLeast(0)),
+            )
+        }
     }
 
     // ── Change notifications ──
@@ -202,6 +253,39 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     /**
+     * The user opened the conversation in Photon: clear its unread count and
+     * move unread incoming rows to 'seen' (viewed here, read sync pending).
+     * One transaction,
+     * so a message inserted concurrently is either counted and marked seen,
+     * or arrives afterwards and stays unread.
+     */
+    fun markConversationSeen(jid: String) {
+        val db = writableDatabase
+        var changed = 0
+        db.beginTransaction()
+        try {
+            changed += db.update(
+                "messages",
+                ContentValues().apply { put("status", STATUS_SEEN) },
+                "conversation_jid = ? AND is_from_me = 0 AND status = ?",
+                arrayOf(jid, STATUS_UNREAD),
+            )
+            changed += db.update(
+                "conversations",
+                ContentValues().apply { put("unread_count", 0) },
+                "jid = ? AND unread_count != 0",
+                arrayOf(jid),
+            )
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        // Only emit when something changed: this runs on every chat-screen
+        // load, and an unconditional emission just causes a requery.
+        if (changed > 0) notifyChanged()
+    }
+
+    /**
      * Mark all incoming messages in a conversation read and clear its unread
      * count. A primary-device sent transcript is evidence that the user has
      * seen that conversation, even when the corresponding sync.read arrives
@@ -229,9 +313,9 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                   FROM messages
                  WHERE conversation_jid = ?
                    AND is_from_me = 0
-                   AND status != 'read'
+                   AND status IN (?, ?)
                 """.trimIndent(),
-                arrayOf(jid),
+                arrayOf(jid, STATUS_UNREAD, STATUS_SEEN),
             ).use { cursor ->
                 if (cursor.moveToFirst()) incomingChanged = cursor.getInt(0)
             }
@@ -239,12 +323,12 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                 db.execSQL(
                     """
                     UPDATE messages
-                       SET status = 'read'
+                       SET status = ?
                      WHERE conversation_jid = ?
                        AND is_from_me = 0
-                       AND status != 'read'
+                       AND status IN (?, ?)
                     """.trimIndent(),
-                    arrayOf(jid),
+                    arrayOf(STATUS_READ, jid, STATUS_UNREAD, STATUS_SEEN),
                 )
             }
             db.execSQL(
@@ -327,6 +411,88 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         notifyChanged()
     }
 
+    /**
+     * Store an incoming message and count it unread in one transaction.
+     * Separate statements let a concurrent "chat opened" reset land between
+     * the insert and the increment, leaving a stale unread badge on a
+     * message the user was already looking at.
+     *
+     * Dedupes on [dedupePrefix] (the stable "{author}_{timestampMs}" key —
+     * redeliveries mint a new random suffix) and on the exact id. Pass a
+     * null prefix for ids that aren't message keys (call rows). [alreadyRead]
+     * stores the row read without touching unread_count (a read sync for it
+     * arrived first). Returns false, changing nothing, for a duplicate.
+     */
+    fun insertIncomingMessage(
+        id: String,
+        conversationJid: String,
+        senderJid: String,
+        timestamp: Long,
+        contentType: String,
+        textBody: String?,
+        mediaMime: String? = null,
+        mediaSize: Long? = null,
+        replyToId: String? = null,
+        rawProto: ByteArray? = null,
+        dedupePrefix: String? = MessageKeys.prefixOf(id),
+        alreadyRead: Boolean = false,
+    ): Boolean {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            if (rowExists(db, id) || (dedupePrefix != null && prefixExists(db, dedupePrefix))) {
+                return false
+            }
+            db.insertOrThrow(
+                "messages", null,
+                ContentValues().apply {
+                    put("id", id)
+                    put("conversation_jid", conversationJid)
+                    put("sender_jid", senderJid)
+                    put("timestamp", timestamp)
+                    put("content_type", contentType)
+                    put("text_body", textBody)
+                    put("media_mime", mediaMime)
+                    if (mediaSize != null) put("media_size", mediaSize)
+                    put("reply_to_id", replyToId)
+                    put("is_from_me", 0)
+                    put("status", if (alreadyRead) STATUS_READ else STATUS_UNREAD)
+                    if (rawProto != null) put("raw_proto", rawProto)
+                },
+            )
+            setLastMessageIfNewer(db, conversationJid, id, timestamp)
+            if (!alreadyRead) {
+                db.execSQL(
+                    "UPDATE conversations SET unread_count = unread_count + 1 WHERE jid = ?",
+                    arrayOf(conversationJid),
+                )
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        notifyChanged()
+        return true
+    }
+
+    private fun rowExists(db: SQLiteDatabase, id: String): Boolean =
+        db.rawQuery("SELECT 1 FROM messages WHERE id = ?", arrayOf(id)).use { it.moveToFirst() }
+
+    private fun prefixExists(db: SQLiteDatabase, prefix: String): Boolean =
+        db.rawQuery(
+            "SELECT 1 FROM messages WHERE id >= ? AND id < ? LIMIT 1",
+            arrayOf("${prefix}_", "${prefix}_\uFFFF"),
+        ).use { it.moveToFirst() }
+
+    /** A late or redelivered message must not move the conversation back in time. */
+    private fun setLastMessageIfNewer(db: SQLiteDatabase, jid: String, messageId: String, timestamp: Long) {
+        db.execSQL(
+            "UPDATE conversations SET last_message_id = ?, last_timestamp = ?, updated_at = ? " +
+                "WHERE jid = ? AND last_timestamp <= ?",
+            arrayOf<Any?>(messageId, timestamp, System.currentTimeMillis(), jid, timestamp),
+        )
+    }
+
     fun getMessageRawProto(id: String): ByteArray? {
         readableDatabase.rawQuery(
             "SELECT raw_proto FROM messages WHERE id = ?", arrayOf(id),
@@ -337,15 +503,15 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     /**
-     * Incoming messages whose read state hasn't been synced to our other
-     * devices yet. The status column doubles as the tracker: incoming rows
-     * insert as "received" and flip to "read" once a SyncMessage.read
-     * covering them has gone out, so each message is synced at most once.
+     * Incoming messages the user has seen in Photon whose read state hasn't
+     * been synced to our other devices yet. The status column doubles as the
+     * tracker: rows move "seen" → "read" once a SyncMessage.read covering
+     * them has gone out, so each message is synced at most once.
      */
     fun getUnsyncedIncomingReads(jid: String): List<String> {
         readableDatabase.rawQuery(
-            "SELECT id FROM messages WHERE conversation_jid = ? AND is_from_me = 0 AND status != 'read'",
-            arrayOf(jid),
+            "SELECT id FROM messages WHERE conversation_jid = ? AND is_from_me = 0 AND status = ?",
+            arrayOf(jid, STATUS_SEEN),
         ).use { c ->
             val ids = mutableListOf<String>()
             while (c.moveToNext()) ids.add(c.getString(0))
@@ -353,12 +519,13 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    /** Mark seen rows read-synced. Rows deleted meanwhile keep their 'deleted' status. */
     fun markMessagesRead(ids: List<String>) {
         if (ids.isEmpty()) return
         val placeholders = ids.joinToString(",") { "?" }
         writableDatabase.execSQL(
-            "UPDATE messages SET status = 'read' WHERE id IN ($placeholders)",
-            ids.toTypedArray(),
+            "UPDATE messages SET status = ? WHERE status = ? AND id IN ($placeholders)",
+            arrayOf<Any?>(STATUS_READ, STATUS_SEEN, *ids.toTypedArray()),
         )
         // No notifyChanged(): incoming status isn't rendered anywhere, and
         // this runs from the chat-open markRead path — a change emission
@@ -388,6 +555,26 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         )
         writableDatabase.execSQL("DELETE FROM reactions WHERE message_id = ?", arrayOf(prefix))
         notifyChanged()
+    }
+
+    /**
+     * Subtract per-conversation counts from unread_count (never below zero).
+     * Returns the conversations whose count reached zero, so callers can
+     * clear their notifications. Must run inside the caller's transaction.
+     */
+    private fun decrementUnread(db: SQLiteDatabase, counts: Map<String, Int>): List<String> {
+        val cleared = mutableListOf<String>()
+        for ((jid, count) in counts) {
+            if (count <= 0) continue
+            db.execSQL(
+                "UPDATE conversations SET unread_count = MAX(0, unread_count - ?) WHERE jid = ?",
+                arrayOf<Any?>(count, jid),
+            )
+            db.rawQuery("SELECT unread_count FROM conversations WHERE jid = ?", arrayOf(jid)).use { c ->
+                if (!c.moveToFirst() || c.getInt(0) == 0) cleared.add(jid)
+            }
+        }
+        return cleared
     }
 
     /**
@@ -873,60 +1060,68 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     /**
+     * Outcome of applying one read-sync entry. [matched] is false when no
+     * incoming row with that key exists yet (the read raced ahead of its
+     * message). [clearedConversations] lists conversations whose unread count
+     * this read brought to zero, i.e. whose notifications can go.
+     */
+    data class ReadSyncResult(val matched: Boolean, val clearedConversations: List<String>)
+
+    /**
      * Apply a read sync from another linked device to the matching incoming
      * message. SyncMessage.read carries the author + timestamp, while local
-     * message ids add a random suffix. Return the affected conversation JIDs
-     * so the caller can clear only the relevant notifications.
+     * message ids add a random suffix.
+     *
+     * Only rows that were actually unread decrement unread_count. Rows the
+     * user already saw in Photon ('seen') just become 'read': their unread
+     * was cleared when the chat was opened, so subtracting them again would
+     * eat the count (and cancel the notification) of newer messages.
      */
-    fun markIncomingReadByPrefix(prefix: String): List<String> {
+    fun markIncomingReadByPrefix(prefix: String): ReadSyncResult {
         val lowerBound = "${prefix}_"
         val upperBound = "${prefix}_\uFFFF"
-        val affected = linkedMapOf<String, Int>()
+        val unreadByConversation = linkedMapOf<String, Int>()
+        var matched = false
+        var changed = 0
+        val cleared: List<String>
         val db = writableDatabase
 
         db.beginTransaction()
         try {
             db.rawQuery(
                 """
-                SELECT conversation_jid, COUNT(*)
+                SELECT conversation_jid, status
                   FROM messages
                  WHERE id >= ? AND id < ?
                    AND is_from_me = 0
-                   AND status != 'read'
-                 GROUP BY conversation_jid
                 """,
                 arrayOf(lowerBound, upperBound),
             ).use { cursor ->
                 while (cursor.moveToNext()) {
-                    affected[cursor.getString(0)] = cursor.getInt(1)
+                    matched = true
+                    if (cursor.getString(1) == STATUS_UNREAD) {
+                        val jid = cursor.getString(0)
+                        unreadByConversation[jid] = (unreadByConversation[jid] ?: 0) + 1
+                    }
                 }
             }
 
-            if (affected.isNotEmpty()) {
-                db.execSQL(
-                    """
-                    UPDATE messages
-                       SET status = 'read'
-                     WHERE id >= ? AND id < ?
-                       AND is_from_me = 0
-                       AND status != 'read'
-                    """,
-                    arrayOf(lowerBound, upperBound),
+            if (matched) {
+                changed = db.update(
+                    "messages",
+                    ContentValues().apply { put("status", STATUS_READ) },
+                    "id >= ? AND id < ? AND is_from_me = 0 AND status IN (?, ?)",
+                    arrayOf(lowerBound, upperBound, STATUS_UNREAD, STATUS_SEEN),
                 )
-                for ((jid, count) in affected) {
-                    db.execSQL(
-                        "UPDATE conversations SET unread_count = MAX(0, unread_count - ?) WHERE jid = ?",
-                        arrayOf<Any?>(count, jid),
-                    )
-                }
             }
+            cleared = decrementUnread(db, unreadByConversation)
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
         }
 
-        if (affected.isNotEmpty()) notifyChanged()
-        return affected.keys.toList()
+        if (changed > 0) notifyChanged()
+        return ReadSyncResult(matched, cleared)
     }
 
     fun getReactions(messageIds: List<String>): Map<String, List<Reaction>> {

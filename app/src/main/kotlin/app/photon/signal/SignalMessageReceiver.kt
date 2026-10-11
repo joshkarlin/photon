@@ -92,6 +92,9 @@ class SignalMessageReceiver(
     @Volatile private var activeContactsPinged = false
     @Volatile private var activeContactsPingInFlight = false
 
+    // Read syncs that arrived before their message (see EarlyReadCache).
+    private val earlyReads = EarlyReadCache()
+
     fun start() {
         if (running) return
         running = true
@@ -843,15 +846,15 @@ class SignalMessageReceiver(
             messageDb.upsertConversation(jid = conversationJid, name = senderName, isGroup = false)
         }
 
-        // Drop redeliveries: if we already stored this (author, timestamp),
-        // skip the insert and all of its side effects (unread bump, notify) so
-        // a resent message doesn't appear N times or inflate the unread count.
-        if (messageDb.findMessageByPrefix(messagePrefix) != null) {
-            Log.d(TAG, "Skipping duplicate incoming message $messagePrefix")
-            return
-        }
+        // A read sync from another device may have beaten this message here
+        // (e.g. it was resent after a decrypt failure). Then it's already
+        // read: store it without counting it unread or notifying.
+        val readElsewhere = earlyReads.consume(messagePrefix)
 
-        messageDb.insertMessage(
+        // Redeliveries are dropped inside the insert (same author+timestamp
+        // prefix), skipping every side effect below so a resent message
+        // doesn't appear N times, inflate the unread count, or re-notify.
+        val inserted = messageDb.insertIncomingMessage(
             id = messageId,
             conversationJid = conversationJid,
             senderJid = senderAci,
@@ -861,20 +864,26 @@ class SignalMessageReceiver(
             mediaMime = attachment?.contentType,
             mediaSize = attachment?.size?.toLong(),
             replyToId = replyPrefix(data.quote),
-            isFromMe = false,
-            status = "received",
             // Serialized pointer so the blob can be fetched on demand later
             // (tap-to-view); images/videos aren't auto-downloaded.
             rawProto = attachment?.encode(),
+            dedupePrefix = messagePrefix,
+            alreadyRead = readElsewhere,
         )
-
-        messageDb.updateConversationLastMessage(conversationJid, messageId, timestamp / 1000)
-        messageDb.incrementUnread(conversationJid)
+        if (!inserted) {
+            Log.d(TAG, "Skipping duplicate incoming message $messagePrefix")
+            return
+        }
 
         // Voice notes auto-download (small, and the UI autoplays them on
         // open) — mirrors the WhatsApp bridge's auto-download policy.
         if (attachment != null && contentType == "audio") {
             scope.launch { downloadAttachment(messageId) }
+        }
+
+        if (readElsewhere) {
+            Log.i(TAG, "Stored message $messagePrefix as read (read sync arrived first)")
+            return
         }
 
         // Show notification — for groups, title is the group name (with the
@@ -1073,12 +1082,17 @@ class SignalMessageReceiver(
         val reads = sync.read
         if (!reads.isNullOrEmpty()) {
             for (read in reads) {
-                val senderAci = read.senderAci
-                if (senderAci != null) {
-                    val conversations = messageDb.markIncomingReadByPrefix("${senderAci}_${read.timestamp}")
-                    conversations.forEach { conversationJid ->
-                        app.photon.service.NotificationHelper.cancelForConversation(context, conversationJid)
-                    }
+                val senderAci = serviceIdString(read.senderAci, read.senderAciBinary) ?: continue
+                val timestamp = read.timestamp ?: continue
+                val prefix = "${senderAci}_$timestamp"
+                val result = messageDb.markIncomingReadByPrefix(prefix)
+                // The read beat its message here; remember it so the message
+                // lands already read instead of unread with a notification.
+                if (!result.matched) earlyReads.remember(prefix)
+                // Only conversations this read actually emptied: newer unread
+                // messages keep their notification.
+                result.clearedConversations.forEach { conversationJid ->
+                    app.photon.service.NotificationHelper.cancelForConversation(context, conversationJid)
                 }
             }
         }

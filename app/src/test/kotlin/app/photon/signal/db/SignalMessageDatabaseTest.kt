@@ -163,9 +163,11 @@ class SignalMessageDatabaseTest {
         db.incrementUnread(aci)
         db.incrementUnread(aci)
 
-        val affected = db.markIncomingReadByPrefix("${aci}_1700")
+        val result = db.markIncomingReadByPrefix("${aci}_1700")
 
-        assertEquals(listOf(aci), affected)
+        assertEquals(true, result.matched)
+        // The newer message is still unread, so its notification stays.
+        assertEquals(emptyList(), result.clearedConversations)
         assertEquals("read", db.getMessage("${aci}_1700_abc")?.status)
         assertEquals("received", db.getMessage("${aci}_1800_def")?.status)
         assertEquals(1, db.getConversation(aci)?.unreadCount)
@@ -190,8 +192,8 @@ class SignalMessageDatabaseTest {
         val first = db.markIncomingReadByPrefix("${author}_1700")
         val duplicate = db.markIncomingReadByPrefix("${author}_1700")
 
-        assertEquals(listOf(group), first)
-        assertEquals(emptyList(), duplicate)
+        assertEquals(SignalMessageDatabase.ReadSyncResult(true, emptyList()), first)
+        assertEquals(SignalMessageDatabase.ReadSyncResult(true, emptyList()), duplicate)
         assertEquals("read", db.getMessage("${author}_1700_abc")?.status)
         assertEquals("received", db.getMessage("${author}_1800_def")?.status)
         assertEquals(1, db.getConversation(group)?.unreadCount)
@@ -207,9 +209,11 @@ class SignalMessageDatabaseTest {
             isFromMe = true, status = "sent",
         )
 
-        val affected = db.markIncomingReadByPrefix("${aci}_1700")
+        val result = db.markIncomingReadByPrefix("${aci}_1700")
 
-        assertEquals(emptyList(), affected)
+        // An outgoing row with the same key isn't the incoming message the
+        // read refers to, so the read is still unmatched.
+        assertEquals(SignalMessageDatabase.ReadSyncResult(false, emptyList()), result)
         assertEquals("sent", db.getMessage("${aci}_1700_abc")?.status)
     }
 
