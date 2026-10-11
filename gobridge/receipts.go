@@ -15,7 +15,7 @@ func (b *Bridge) handleReceipt(evt *events.Receipt) {
 	for i, id := range evt.MessageIDs {
 		ids[i] = string(id)
 	}
-	b.applyReceipt(chatJID, ids, evt.Type, evt.IsFromMe)
+	b.applyReceipt(chatJID, ids, evt.Type, evt.IsFromMe, evt.Timestamp.Unix())
 }
 
 // receiptEffect classifies a receipt. ownRead means the user read incoming
@@ -39,13 +39,25 @@ func receiptEffect(t types.ReceiptType, isFromMe bool) (ownRead bool, outgoingSt
 	return false, ""
 }
 
-func (b *Bridge) applyReceipt(chatJID string, ids []string, t types.ReceiptType, isFromMe bool) {
+// applyReceipt applies a receipt for ids in chatJID, sent at ts. The user's
+// own read marks the chat read through the newest of those messages — not
+// the whole chat, which can hold newer ones they haven't seen. When none of
+// them is stored (dropped, pruned, or not received yet), the receipt's time
+// bounds the read instead.
+func (b *Bridge) applyReceipt(chatJID string, ids []string, t types.ReceiptType, isFromMe bool, ts int64) {
 	ownRead, status := receiptEffect(t, isFromMe)
 	switch {
 	case ownRead:
-		b.MarkIncomingRead(chatJID, ids)
+		jid, remaining, ok := b.MarkReadThrough(ids)
+		if !ok {
+			jid, remaining = chatJID, b.MarkChatReadUpTo(chatJID, ts)
+		}
+		if remaining > 0 {
+			b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: jid})
+			return
+		}
 		b.BroadcastEvent("read_self", ReadSelfEvent{
-			ConversationJID: chatJID,
+			ConversationJID: jid,
 			MessageIDs:      ids,
 		})
 	case status != "":

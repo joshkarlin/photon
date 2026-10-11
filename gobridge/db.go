@@ -77,6 +77,7 @@ func (b *Bridge) InitMessageDB(ctx context.Context) error {
 // made. Append only: a released step never changes or moves.
 var migrations = []func(b *Bridge, ctx context.Context, tx *sql.Tx) error{
 	(*Bridge).migrateMutedUntil,
+	(*Bridge).migrateIncomingReadState,
 }
 
 // migrateMessageDB runs the migrations this database hasn't had yet.
@@ -120,6 +121,25 @@ func (b *Bridge) migrateMutedUntil(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	return b.backfillMutedUntil(ctx, tx)
+}
+
+// migrateIncomingReadState makes each chat's incoming rows agree with its
+// unread count. Builds before per-row read state cleared only the count, so
+// every message they stored kept status "sent", which now means unread. A
+// revoke of one of those long-read messages then took it out of the count,
+// clearing the badge of a newer message that really was unread. The newest
+// unread_count incoming rows of each chat stay unread; older ones become read.
+func (b *Bridge) migrateIncomingReadState(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE messages SET status = 'read' WHERE _rowid_ IN (
+			SELECT m.rid FROM (
+				SELECT _rowid_ AS rid, conversation_jid,
+					ROW_NUMBER() OVER (PARTITION BY conversation_jid ORDER BY timestamp DESC, _rowid_ DESC) AS n
+				FROM messages WHERE is_from_me = 0 AND status NOT IN ('read', 'deleted')
+			) m LEFT JOIN conversations c ON c.jid = m.conversation_jid
+			WHERE m.n > COALESCE(c.unread_count, 0)
+		)`)
+	return err
 }
 
 // addColumnIfMissing adds a column unless the table already has it.

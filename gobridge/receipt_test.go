@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
 	"go.mau.fi/whatsmeow/types"
@@ -53,7 +55,7 @@ func TestApplyReceipt_contactReadKeepsUnread(t *testing.T) {
 	seedChat(t, b, jid)
 
 	// The contact read our outgoing message — our own unread must survive.
-	b.applyReceipt(jid, []string{"out1", "in1"}, types.ReceiptTypeRead, false)
+	b.applyReceipt(jid, []string{"out1", "in1"}, types.ReceiptTypeRead, false, 3)
 
 	if got := unreadCount(t, b, jid); got != 1 {
 		t.Errorf("unread = %d, want 1 (a contact's read receipt must not clear our badge)", got)
@@ -79,7 +81,7 @@ func TestApplyReceipt_ownReadClearsUnread(t *testing.T) {
 			const jid = "447@s.whatsapp.net"
 			seedChat(t, b, jid)
 
-			b.applyReceipt(jid, []string{"in1"}, tc.typ, true)
+			b.applyReceipt(jid, []string{"in1"}, tc.typ, true, 3)
 
 			if got := unreadCount(t, b, jid); got != 0 {
 				t.Errorf("unread = %d, want 0", got)
@@ -178,5 +180,130 @@ func TestApplyChatReadState(t *testing.T) {
 	b.applyChatReadState(jid, false, 0)
 	if got := unreadCount(t, b, jid); got != 2 {
 		t.Errorf("unread after second mark-unread = %d, want 2", got)
+	}
+}
+
+// threeUnread seeds a DM with three unread incoming messages: m1 and m2 in
+// the same second, then m3.
+func threeUnread(t *testing.T, b *Bridge, jid string) {
+	t.Helper()
+	b.UpsertConversation(jid, "Alice", false, "m3", 20)
+	if err := b.InsertMessages([]*MessageRow{
+		{ID: "m1", ConversationJID: jid, SenderJID: jid, Timestamp: 10, ContentType: "text", Status: "sent"},
+		{ID: "m2", ConversationJID: jid, SenderJID: jid, Timestamp: 10, ContentType: "text", Status: "sent"},
+		{ID: "m3", ConversationJID: jid, SenderJID: jid, Timestamp: 20, ContentType: "text", Status: "sent"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		b.IncrementUnread(jid)
+	}
+}
+
+// Reading on the primary marks only what was read: messages that arrived
+// after it (or later in the same second) keep the chat unread.
+func TestApplyReceipt_ownReadIsBoundedByTheMessagesRead(t *testing.T) {
+	b := newTestBridge(t)
+	sent := captureEvents(b)
+	const jid = "447@s.whatsapp.net"
+	threeUnread(t, b, jid)
+
+	b.applyReceipt(jid, []string{"m1"}, types.ReceiptTypeReadSelf, true, 10)
+	if got := unreadCount(t, b, jid); got != 2 {
+		t.Errorf("unread = %d, want 2", got)
+	}
+	if messageStatus(t, b, "m1") != "read" || messageStatus(t, b, "m2") != "sent" || messageStatus(t, b, "m3") != "sent" {
+		t.Errorf("statuses = %s/%s/%s, want read/sent/sent", messageStatus(t, b, "m1"), messageStatus(t, b, "m2"), messageStatus(t, b, "m3"))
+	}
+	if n := len(sent.ofType("read_self")); n != 0 {
+		t.Errorf("read_self sent while the chat is still unread")
+	}
+	if n := len(sent.ofType("conversation_updated")); n != 1 {
+		t.Errorf("conversation_updated = %d, want 1", n)
+	}
+
+	b.applyReceipt(jid, []string{"m3", "m2"}, types.ReceiptTypeReadSelf, true, 30)
+	if got := unreadCount(t, b, jid); got != 0 {
+		t.Errorf("unread = %d, want 0", got)
+	}
+	if got := sent.ofType("read_self"); len(got) != 1 || got[0]["conversation_jid"] != jid {
+		t.Errorf("read_self = %v", got)
+	}
+}
+
+func TestApplyReceipt_ownReadOfUnstoredMessagesUsesItsTime(t *testing.T) {
+	b := newTestBridge(t)
+	const jid = "447@s.whatsapp.net"
+	threeUnread(t, b, jid)
+
+	// A receipt for messages Photon never stored, sent at 15: m3 (20) is newer.
+	b.applyReceipt(jid, []string{"dropped"}, types.ReceiptTypeReadSelf, true, 15)
+	if got := unreadCount(t, b, jid); got != 1 {
+		t.Errorf("unread = %d, want 1 (m3 arrived after the read)", got)
+	}
+}
+
+// mark_read from the open chat reads through the newest row it listed, not
+// messages that arrived after the list was loaded.
+func TestHandleMarkRead_boundedByTheListedRows(t *testing.T) {
+	b := newClientBridge(t)
+	const jid = "447700900001@s.whatsapp.net"
+	threeUnread(t, b, jid)
+
+	// The UI had m2 as its newest; the receipt itself fails offline.
+	b.handleMarkRead(context.Background(), mustMarshal(MarkReadPayload{JID: jid, MessageIDs: []string{"m2", "m1"}}))
+
+	if got := unreadCount(t, b, jid); got != 1 {
+		t.Errorf("unread = %d, want 1 (m3 was not on screen)", got)
+	}
+	if messageStatus(t, b, "m3") != "sent" {
+		t.Errorf("m3 status = %s, want still unread", messageStatus(t, b, "m3"))
+	}
+}
+
+// Rows from builds before per-row read state are all "sent"; the migration
+// keeps only the newest unread_count of them unread, so a revoke of an old
+// message can't clear the badge of the new one.
+func TestMigrateIncomingReadState(t *testing.T) {
+	b := newTestBridge(t)
+	const jid = "447700900001@s.whatsapp.net"
+	b.UpsertConversation(jid, "Alice", false, "new", 40)
+	b.InsertMessages([]*MessageRow{
+		{ID: "old1", ConversationJID: jid, SenderJID: jid, Timestamp: 10, ContentType: "text", Status: "sent"},
+		{ID: "old2", ConversationJID: jid, SenderJID: jid, Timestamp: 20, ContentType: "text", Status: "sent"},
+		{ID: "gone", ConversationJID: jid, SenderJID: jid, Timestamp: 25, ContentType: "text", Status: "deleted"},
+		{ID: "mine", ConversationJID: jid, SenderJID: "me", Timestamp: 30, ContentType: "text", IsFromMe: true, Status: "sent"},
+		{ID: "new", ConversationJID: jid, SenderJID: jid, Timestamp: 40, ContentType: "text", Status: "sent"},
+		// A chat with no unread count at all.
+		{ID: "other", ConversationJID: "x@s.whatsapp.net", SenderJID: "x@s.whatsapp.net", Timestamp: 5, ContentType: "text", Status: "sent"},
+	})
+	b.UpsertConversation("x@s.whatsapp.net", "X", false, "other", 5)
+	b.IncrementUnread(jid)
+	rerunMigrationsFrom(t, b, 1)
+
+	want := map[string]string{"old1": "read", "old2": "read", "gone": "deleted", "mine": "sent", "new": "sent", "other": "read"}
+	for id, status := range want {
+		if got := messageStatus(t, b, id); got != status {
+			t.Errorf("%s status = %q, want %q", id, got, status)
+		}
+	}
+
+	b.dataDir = t.TempDir()
+	alice := types.NewJID("447700900001", types.DefaultUserServer)
+	b.handleMessage(revokeEvent(alice, alice, "r1", "old1", 50))
+	if got := unreadCount(t, b, jid); got != 1 {
+		t.Errorf("unread after revoking an old message = %d, want 1", got)
+	}
+}
+
+// rerunMigrationsFrom winds the schema version back so migrations after
+// `done` run again on InitMessageDB, as on an install upgrading from there.
+func rerunMigrationsFrom(t *testing.T, b *Bridge, done int) {
+	t.Helper()
+	if _, err := b.msgDB.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, done)); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.InitMessageDB(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }

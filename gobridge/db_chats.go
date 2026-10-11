@@ -1,5 +1,10 @@
 package main
 
+import (
+	"database/sql"
+	"math"
+)
+
 // UpsertConversation creates or updates a conversation record.
 func (b *Bridge) UpsertConversation(jid, name string, isGroup bool, lastMsgID string, lastTS int64) {
 	if err := b.upsertConversation(b.msgDB, jid, name, isGroup, lastMsgID, lastTS); err != nil {
@@ -39,30 +44,55 @@ func (b *Bridge) IncrementUnread(jid string) {
 	}
 }
 
-// ResetUnread sets unread count to 0 for a conversation.
-func (b *Bridge) ResetUnread(jid string) {
-	_, err := b.msgDB.Exec(`UPDATE conversations SET unread_count = 0 WHERE jid = ?`, jid)
-	if err != nil {
-		b.log.Errorf("Failed to reset unread for %s: %v", jid, err)
-	}
+// MarkChatReadUpTo marks the chat's incoming messages up to ts read; see
+// markReadThrough. Returns the remaining unread count.
+func (b *Bridge) MarkChatReadUpTo(jid string, ts int64) (remaining int) {
+	return b.markReadThrough(jid, ts, math.MaxInt64)
 }
 
-// MarkChatReadUpTo marks the chat's incoming messages up to ts read and
-// lowers the unread count to the messages that arrived after ts (never raising
-// it — the count can include messages pruned or never stored). Returns the
-// remaining unread count.
-func (b *Bridge) MarkChatReadUpTo(jid string, ts int64) (remaining int) {
-	if _, err := b.msgDB.Exec(`UPDATE messages SET status = 'read'
-		WHERE conversation_jid = ? AND is_from_me = 0 AND status NOT IN ('read', 'deleted') AND timestamp <= ?`, jid, ts); err != nil {
+// MarkReadThrough marks read the newest stored of the given messages and
+// everything before it in its chat. ok is false when none of them is stored.
+func (b *Bridge) MarkReadThrough(ids []string) (jid string, remaining int, ok bool) {
+	if len(ids) == 0 {
+		return "", 0, false
+	}
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	var ts, rowid int64
+	err := b.msgDB.QueryRow(`SELECT conversation_jid, timestamp, _rowid_ FROM messages
+		WHERE id IN (`+sqlInList(len(ids))+`) ORDER BY timestamp DESC, _rowid_ DESC LIMIT 1`, args...).Scan(&jid, &ts, &rowid)
+	if err != nil {
+		return "", 0, false
+	}
+	return jid, b.markReadThrough(jid, ts, rowid), true
+}
+
+// markReadThrough marks the chat's incoming messages read up to a point in
+// it — by timestamp, then insertion, the order the chat lists them in — and
+// lowers the unread count to the unread messages left after that point. It
+// never raises the count, which can include messages pruned or never stored.
+// Messages that arrived after the point the user read to stay unread. Returns
+// the remaining unread count.
+func (b *Bridge) markReadThrough(jid string, ts, rowid int64) (remaining int) {
+	err := b.inTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`UPDATE messages SET status = 'read'
+			WHERE conversation_jid = ? AND is_from_me = 0 AND status NOT IN ('read', 'deleted')
+			AND (timestamp < ? OR (timestamp = ? AND _rowid_ <= ?))`, jid, ts, ts, rowid); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE conversations SET unread_count = MIN(unread_count, (
+				SELECT COUNT(*) FROM messages
+				WHERE conversation_jid = ? AND is_from_me = 0 AND status NOT IN ('read', 'deleted')
+			)) WHERE jid = ?`, jid, jid); err != nil {
+			return err
+		}
+		return tx.QueryRow(`SELECT COALESCE((SELECT unread_count FROM conversations WHERE jid = ?), 0)`, jid).Scan(&remaining)
+	})
+	if err != nil {
 		b.log.Errorf("Failed to mark %s read: %v", jid, err)
 	}
-	if _, err := b.msgDB.Exec(`UPDATE conversations SET unread_count = MIN(unread_count, (
-			SELECT COUNT(*) FROM messages
-			WHERE conversation_jid = ? AND is_from_me = 0 AND status NOT IN ('read', 'deleted') AND timestamp > ?
-		)) WHERE jid = ?`, jid, ts, jid); err != nil {
-		b.log.Errorf("Failed to recount unread for %s: %v", jid, err)
-	}
-	b.msgDB.QueryRow(`SELECT unread_count FROM conversations WHERE jid = ?`, jid).Scan(&remaining)
 	return remaining
 }
 
@@ -95,22 +125,6 @@ func updateMute(ex execer, jid string, mutedUntil int64) error {
 		ON CONFLICT(jid) DO UPDATE SET is_muted = excluded.is_muted, muted_until = excluded.muted_until
 	`, jid, m, mutedUntil)
 	return err
-}
-
-// MarkIncomingRead records that the user read a conversation on another
-// device: the listed incoming rows become "read" and the unread badge clears.
-func (b *Bridge) MarkIncomingRead(jid string, ids []string) {
-	if len(ids) > 0 {
-		args := make([]interface{}, 0, len(ids)+1)
-		args = append(args, jid)
-		for _, id := range ids {
-			args = append(args, id)
-		}
-		if _, err := b.msgDB.Exec(`UPDATE messages SET status = 'read' WHERE conversation_jid = ? AND is_from_me = 0 AND status <> 'deleted' AND id IN (`+sqlInList(len(ids))+`)`, args...); err != nil {
-			b.log.Errorf("Failed to mark messages read in %s: %v", jid, err)
-		}
-	}
-	b.ResetUnread(jid)
 }
 
 // UpsertParticipant inserts or updates a group participant.
