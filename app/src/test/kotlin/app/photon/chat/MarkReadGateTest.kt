@@ -11,11 +11,15 @@ import kotlin.test.assertEquals
 /** The one mark-read policy every platform's chat follows. */
 class MarkReadGateTest {
 
-    private fun msg(id: String, fromMe: Boolean = false) = Message(
+    private fun msg(id: String, fromMe: Boolean = false, read: Boolean = false) = Message(
         id = id, conversationJid = "c", senderJid = "s", timestamp = 0, contentType = "text",
         textBody = null, mediaUrl = null, mediaMime = null, mediaSize = null, thumbnailPath = null,
         stickerPackId = null, replyToId = null, editVersion = 0, isFromMe = fromMe,
-        status = if (fromMe) MessageStatus.SENT else MessageStatus.UNREAD,
+        status = when {
+            fromMe -> MessageStatus.SENT
+            read -> MessageStatus.READ
+            else -> MessageStatus.UNREAD
+        },
     )
 
     /** Each request, and how it ends: completing [result] with false fails it. */
@@ -81,5 +85,34 @@ class MarkReadGateTest {
         gate.onMessages(listOf(msg("mine", fromMe = true)))
         gate.retry()
         assertEquals(emptyList(), requests.asked)
+    }
+
+    @Test
+    fun aLateMessageBelowTheNewestIsMarkedToo() {
+        requests.result.complete(true)
+        gate.onMessages(listOf(msg("m2"), msg("m1")))
+        // Marked read; then one sent while its sender was offline sorts below.
+        gate.onMessages(listOf(msg("m2", read = true), msg("m1", read = true)))
+        gate.onMessages(listOf(msg("m2", read = true), msg("late"), msg("m1", read = true)))
+        assertEquals(listOf(listOf("m2", "m1"), listOf("m2", "late", "m1")), requests.asked)
+    }
+
+    @Test
+    fun aMessageStillUnreadAfterMarkingIsNotAskedAgain() {
+        // An SMS dated ahead of the phone's clock stays unread after its chat is marked.
+        requests.result.complete(true)
+        gate.onMessages(listOf(msg("future"), msg("m1")))
+        gate.onMessages(listOf(msg("future"), msg("m1", read = true)))
+        gate.retry()
+        assertEquals(1, requests.asked.size)
+    }
+
+    @Test
+    fun aFailureAsksAgainForWhatArrivedMeanwhile() {
+        gate.onMessages(listOf(msg("m1")))
+        gate.onMessages(listOf(msg("m2"), msg("m1")))
+        requests.result.complete(false)
+        // m2 arrived while m1's request was out: it gets one of its own.
+        assertEquals(listOf(listOf("m1"), listOf("m2", "m1")), requests.asked)
     }
 }
