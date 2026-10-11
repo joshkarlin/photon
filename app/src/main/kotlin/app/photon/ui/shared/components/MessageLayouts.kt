@@ -116,20 +116,25 @@ private fun formatReactions(msg: Message): String =
 
 /**
  * One-line "↳ who: preview" label for a quoted/replied-to message. Shared by
- * the per-message reply quote lines and the reply chip above the input bar.
+ * the per-message reply quote lines, the reply chip above the input and the
+ * full-screen editor.
  *
  * @param quotedSenderName human-readable name for the quoted sender (ignored
  *   for self-messages, which always show "You")
  * @param jidFallbackChars how many leading JID characters to show when no
  *   name is known
+ * @param nameOtherSender false leaves out who sent a message that isn't
+ *   yours ("↳ preview"), for a DM where the title already says it
  */
 fun quoteLabel(
     quoted: Message,
     quotedSenderName: String?,
     jidFallbackChars: Int = 8,
+    nameOtherSender: Boolean = true,
 ): String {
     val who = when {
         quoted.isFromMe -> "You"
+        !nameOtherSender -> null
         !quotedSenderName.isNullOrBlank() -> quotedSenderName
         else -> quoted.senderJid.substringBefore("@").take(jidFallbackChars)
     }
@@ -137,7 +142,7 @@ fun quoteLabel(
         !quoted.textBody.isNullOrBlank() -> quoted.textBody.replace('\n', ' ')
         else -> "[ ${quoted.contentType} ]"
     }.take(60)
-    return "↳ $who: $preview"
+    return if (who == null) "↳ $preview" else "↳ $who: $preview"
 }
 
 /**

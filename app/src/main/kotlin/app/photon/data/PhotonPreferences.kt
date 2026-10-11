@@ -48,6 +48,25 @@ enum class ScrollDial(val label: String, val listItems: Int, val chatLines: Floa
     }
 }
 
+/**
+ * How messages are written in a chat. [INLINE] keeps a text field under the
+ * thread; [FULL_SCREEN] follows LightOS Messages: the thread has a bottom bar
+ * (attach, voice note, compose) and compose opens a full-screen editor with
+ * the LP3 keyboard.
+ */
+enum class ComposeStyle(val label: String) {
+    INLINE("INLINE"),
+    FULL_SCREEN("FULL SCREEN");
+
+    fun next(): ComposeStyle = entries[(ordinal + 1) % entries.size]
+
+    companion object {
+        val DEFAULT = INLINE
+
+        fun resolve(stored: String?): ComposeStyle = entries.firstOrNull { it.name == stored } ?: DEFAULT
+    }
+}
+
 class PhotonPreferences(private val context: Context) {
 
     private val maxMessagesKey = intPreferencesKey("max_messages")
@@ -55,6 +74,7 @@ class PhotonPreferences(private val context: Context) {
     private val showThumbnailsKey = booleanPreferencesKey("show_thumbnails")
     private val notificationsKey = booleanPreferencesKey("notifications_enabled")
     private val scrollDialKey = stringPreferencesKey("scroll_dial")
+    private val composeStyleKey = stringPreferencesKey("compose_style")
     // Superseded by scroll_dial; read for migration, removed on the next write.
     private val legacyChatScrollSpeedKey = stringPreferencesKey("chat_scroll_speed")
     private val legacyMenuScrollSpeedKey = stringPreferencesKey("menu_scroll_speed")
@@ -66,6 +86,7 @@ class PhotonPreferences(private val context: Context) {
     val scrollDial: Flow<ScrollDial> = context.dataStore.data.map {
         ScrollDial.resolve(it[scrollDialKey], it[legacyChatScrollSpeedKey], it[legacyMenuScrollSpeedKey])
     }
+    val composeStyle: Flow<ComposeStyle> = context.dataStore.data.map { ComposeStyle.resolve(it[composeStyleKey]) }
 
     suspend fun setMaxMessages(value: Int) {
         context.dataStore.edit { it[maxMessagesKey] = value }
@@ -89,6 +110,10 @@ class PhotonPreferences(private val context: Context) {
             it.remove(legacyChatScrollSpeedKey)
             it.remove(legacyMenuScrollSpeedKey)
         }
+    }
+
+    suspend fun setComposeStyle(value: ComposeStyle) {
+        context.dataStore.edit { it[composeStyleKey] = value.name }
     }
 
     fun getNotificationsEnabledSync(): Boolean {

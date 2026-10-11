@@ -3,17 +3,21 @@ package app.photon.ui.preview
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.tooling.preview.Preview
 import app.photon.R
+import app.photon.data.ComposeStyle
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
 import app.photon.data.model.Platform
 import app.photon.data.model.Reaction
 import app.photon.ui.shared.ChatListLayout
 import app.photon.ui.shared.ChatThread
+import app.photon.ui.shared.components.ComposeEditor
+import app.photon.ui.shared.components.quoteLabel
 import app.photon.ui.theme.PhotonTheme
 import com.thelightphone.sdk.ui.LightThemeTokens
 
@@ -160,6 +164,7 @@ internal fun ChatThreadSample(
     messages: List<Message>,
     isGroup: Boolean,
     participantNames: Map<String, String> = emptyMap(),
+    composeStyle: ComposeStyle = ComposeStyle.INLINE,
 ) {
     ChatThread(
         title = title,
@@ -178,12 +183,26 @@ internal fun ChatThreadSample(
         onTitleClick = {},
         supportsReply = true,
         headerContent = null,
+        composeStyle = composeStyle,
     )
 }
 
 @Composable
-internal fun DmThreadSample() {
-    ChatThreadSample(PreviewSamples.LONG_DM_TITLE, PreviewSamples.dmMessages, isGroup = false)
+internal fun DmThreadSample(composeStyle: ComposeStyle = ComposeStyle.INLINE) {
+    ChatThreadSample(PreviewSamples.LONG_DM_TITLE, PreviewSamples.dmMessages, isGroup = false, composeStyle = composeStyle)
+}
+
+/** FULL SCREEN compose, replying to a message, with a draft under way. */
+@Composable
+internal fun ComposeEditorSample() {
+    val quoted = PreviewSamples.dmMessages.first { it.id == "d8" }
+    ComposeEditor(
+        title = PreviewSamples.LONG_DM_TITLE,
+        draft = rememberTextFieldState("No problem, see you soon"),
+        replyLabel = quoteLabel(quoted, quotedSenderName = null, nameOtherSender = false),
+        onSend = {},
+        onBack = {},
+    )
 }
 
 @Composable
@@ -209,6 +228,14 @@ private fun EmptyChatListPreview() = PhotonPreview {
 @Preview(name = "DM", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
 @Composable
 private fun DmChatPreview() = PhotonPreview { DmThreadSample() }
+
+@Preview(name = "DM – full-screen compose", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
+@Composable
+private fun DmFullScreenPreview() = PhotonPreview { DmThreadSample(ComposeStyle.FULL_SCREEN) }
+
+@Preview(name = "Compose (full screen)", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
+@Composable
+private fun ComposeEditorPreview() = PhotonPreview { ComposeEditorSample() }
 
 @Preview(name = "Group", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
 @Composable
