@@ -37,6 +37,7 @@ import org.whispersystems.signalservice.api.push.SignalServiceAddress
 import org.whispersystems.signalservice.api.util.AttachmentPointerUtil
 import org.whispersystems.signalservice.api.websocket.SignalWebSocket
 import org.whispersystems.signalservice.internal.push.AttachmentPointer
+import org.whispersystems.signalservice.internal.push.Content
 import org.whispersystems.signalservice.internal.push.DataMessage
 import org.whispersystems.signalservice.internal.push.Envelope
 import org.whispersystems.signalservice.internal.push.SyncMessage
@@ -94,6 +95,8 @@ class SignalMessageReceiver(
 
     // Read syncs that arrived before their message (see EarlyReadCache).
     private val earlyReads = EarlyReadCache()
+    // Envelopes left un-acked after a local processing failure.
+    private val envelopeRetries = EnvelopeRetryTracker<DecryptedEnvelope>()
 
     fun start() {
         if (running) return
@@ -506,89 +509,108 @@ class SignalMessageReceiver(
         }
     }
 
+    /** A decrypted envelope, held across redeliveries if processing fails. */
+    private class DecryptedEnvelope(val content: Content, val metadata: EnvelopeMetadata)
+
+    /**
+     * Decrypt, store, then ack. The ack tells the server to delete the
+     * envelope, so it only goes out once the content is safely processed, or
+     * when retrying can't help (decrypt failures, duplicates). If local
+     * processing throws, the envelope is left un-acked for the server to
+     * redeliver, with the decrypted payload held for that redelivery (see
+     * [EnvelopeRetryTracker]); a poison envelope is acked after 3 failures.
+     * Reprocessing is safe: inserts dedupe on the (author, timestamp) key.
+     */
     private fun processEnvelope(
         envelopeResponse: EnvelopeResponse,
         cipher: SignalServiceCipher,
         ws: SignalWebSocket.AuthenticatedWebSocket,
     ) {
-        try {
-            val envelope = envelopeResponse.envelope
-            val serverTimestamp = envelopeResponse.serverDeliveredTimestamp
-
-            val result = cipher.decrypt(envelope, serverTimestamp)
-            if (result == null) {
-                // Contentless envelope — the server's own delivery receipt.
-                // There's nothing to decrypt; the envelope itself is the
-                // signal that our message (sent at clientTimestamp) reached
-                // the recipient's server queue. Without this branch, the
-                // unguarded result.content NPE'd and delivery ticks from the
-                // server were lost.
-                val myAci = credentials.aciString
-                val ts = envelope.clientTimestamp
-                if (envelope.type == org.whispersystems.signalservice.internal.push.Envelope.Type.SERVER_DELIVERY_RECEIPT &&
-                    myAci != null && ts != null
-                ) {
-                    messageDb.updateStatusByIdPrefix("${myAci}_$ts", "delivered")
+        val envelope = envelopeResponse.envelope
+        val retryKey = envelopeRetryKey(envelope)
+        var decrypted: DecryptedEnvelope? = envelopeRetries.pending(retryKey)
+        val ack = try {
+            if (decrypted == null) {
+                val result = cipher.decrypt(envelope, envelopeResponse.serverDeliveredTimestamp)
+                if (result == null) {
+                    processContentlessEnvelope(envelope)
                 } else {
-                    Log.d(TAG, "Contentless envelope (type=${envelope.type}); acking")
+                    decrypted = DecryptedEnvelope(result.content, result.metadata)
                 }
-                ws.sendAck(envelopeResponse)
-                return
+            } else {
+                Log.i(TAG, "Reprocessing held envelope ${retryKey.take(12)}… (decrypted on an earlier delivery)")
             }
-            val content = result.content
-            val metadata = result.metadata
-
-            Log.i(TAG, "Decrypted envelope from ${metadata.sourceServiceId}, " +
-                "hasData=${content.dataMessage != null}, " +
-                "hasSync=${content.syncMessage != null}, " +
-                "hasReceipt=${content.receiptMessage != null}, " +
-                "hasTyping=${content.typingMessage != null}, " +
-                "hasSenderKeyDistribution=${content.senderKeyDistributionMessage != null}")
-
-            content.senderKeyDistributionMessage?.let {
-                processSenderKeyDistribution(it.toByteArray(), metadata)
-            }
-
-            when {
-                content.dataMessage != null -> processDataMessage(content.dataMessage!!, metadata)
-                content.syncMessage != null -> processSyncMessage(content.syncMessage!!, metadata)
-                content.receiptMessage != null -> processReceipt(content.receiptMessage!!, metadata)
-                content.typingMessage != null -> {} // ignore
-                content.senderKeyDistributionMessage != null -> {} // already stored above
-                else -> Log.d(TAG, "Unhandled content type")
-            }
-
-            ws.sendAck(envelopeResponse)
+            decrypted?.let { processContent(it.content, it.metadata) }
+            envelopeRetries.clear(retryKey)
+            true
         } catch (e: org.signal.libsignal.metadata.SelfSendException) {
             Log.d(TAG, "Self-send exception (normal for sync), acking")
-            ws.sendAck(envelopeResponse)
+            true
         } catch (e: ProtocolDuplicateMessageException) {
             Log.d(TAG, "Duplicate message, acking")
-            ws.sendAck(envelopeResponse)
+            true
         } catch (e: ProtocolException) {
-            val env = envelopeResponse.envelope
             Log.w(
                 TAG,
-                "Protocol decrypt failed (type=${env.type}, sender=${e.sender}, " +
-                    "senderDevice=${e.senderDevice}, clientTs=${env.clientTimestamp}): " +
+                "Protocol decrypt failed (type=${envelope.type}, sender=${e.sender}, " +
+                    "senderDevice=${e.senderDevice}, clientTs=${envelope.clientTimestamp}): " +
                     "${e.javaClass.simpleName}: ${e.message}",
             )
             maybeSendRetryReceipt(e, envelopeResponse)
-            ws.sendAck(envelopeResponse)
+            true
         } catch (e: org.signal.libsignal.protocol.DuplicateMessageException) {
             Log.d(TAG, "Duplicate message, acking")
-            ws.sendAck(envelopeResponse)
+            true
         } catch (e: Exception) {
-            val env = envelopeResponse.envelope
-            Log.e(
-                TAG,
-                "Failed to process envelope (type=${env.type}, sourceServiceId=${env.sourceServiceId}, " +
-                    "sourceDevice=${env.sourceDeviceId}, clientTs=${env.clientTimestamp}, " +
-                    "serverTs=${env.serverTimestamp}, urgent=${env.urgent}): " +
-                    "${e.javaClass.name}: ${e.message}",
-                e,
-            )
-            try { ws.sendAck(envelopeResponse) } catch (_: Exception) {}
+            val giveUp = envelopeRetries.recordFailure(retryKey, decrypted)
+            val description = "envelope (type=${envelope.type}, sourceServiceId=${envelope.sourceServiceId}, " +
+                "sourceDevice=${envelope.sourceDeviceId}, clientTs=${envelope.clientTimestamp}, " +
+                "serverTs=${envelope.serverTimestamp}, urgent=${envelope.urgent}): " +
+                "${e.javaClass.name}: ${e.message}"
+            if (giveUp) {
+                Log.e(TAG, "Giving up on $description — acking after repeated failures", e)
+            } else {
+                Log.w(TAG, "Failed to process $description — leaving un-acked for redelivery", e)
+            }
+            giveUp
+        }
+        if (ack) ws.sendAck(envelopeResponse)
+    }
+
+    /**
+     * Contentless envelope — the server's own delivery receipt. There's
+     * nothing to decrypt; the envelope itself is the signal that our message
+     * (sent at clientTimestamp) reached the recipient's server queue.
+     */
+    private fun processContentlessEnvelope(envelope: Envelope) {
+        val myAci = credentials.aciString
+        val ts = envelope.clientTimestamp
+        if (envelope.type == Envelope.Type.SERVER_DELIVERY_RECEIPT && myAci != null && ts != null) {
+            messageDb.updateStatusByIdPrefix("${myAci}_$ts", "delivered")
+        } else {
+            Log.d(TAG, "Contentless envelope (type=${envelope.type}); acking")
+        }
+    }
+
+    private fun processContent(content: Content, metadata: EnvelopeMetadata) {
+        Log.i(TAG, "Decrypted envelope from ${metadata.sourceServiceId}, " +
+            "hasData=${content.dataMessage != null}, " +
+            "hasSync=${content.syncMessage != null}, " +
+            "hasReceipt=${content.receiptMessage != null}, " +
+            "hasTyping=${content.typingMessage != null}, " +
+            "hasSenderKeyDistribution=${content.senderKeyDistributionMessage != null}")
+
+        content.senderKeyDistributionMessage?.let {
+            processSenderKeyDistribution(it.toByteArray(), metadata)
+        }
+
+        when {
+            content.dataMessage != null -> processDataMessage(content.dataMessage!!, metadata)
+            content.syncMessage != null -> processSyncMessage(content.syncMessage!!, metadata)
+            content.receiptMessage != null -> processReceipt(content.receiptMessage!!, metadata)
+            content.typingMessage != null -> {} // ignore
+            content.senderKeyDistributionMessage != null -> {} // already stored above
+            else -> Log.d(TAG, "Unhandled content type")
         }
     }
 
