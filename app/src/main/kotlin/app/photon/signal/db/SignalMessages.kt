@@ -170,13 +170,13 @@ fun SignalMessageDatabase.getMessages(conversationJid: String, limit: Int = 50):
         // (storage is in seconds; the wire timestamp is sub-second).
         "SELECT * FROM messages WHERE conversation_jid = ? ORDER BY timestamp DESC, _rowid_ DESC LIMIT ?",
         arrayOf(conversationJid, limit.toString()),
-    ).use { it.toMessages() }
+    ).use { it.toMessages(::signalStatus) }
 }
 
 fun SignalMessageDatabase.getMessage(id: String): Message? {
     return readableDatabase.rawQuery(
         "SELECT * FROM messages WHERE id = ?", arrayOf(id),
-    ).use { if (it.moveToFirst()) it.toMessage() else null }
+    ).use { if (it.moveToFirst()) it.toMessage(::signalStatus) else null }
 }
 
 /**
@@ -191,7 +191,7 @@ fun SignalMessageDatabase.findMessageByPrefix(prefix: String): Message? {
     return readableDatabase.rawQuery(
         "SELECT * FROM messages WHERE id >= ? AND id < ? LIMIT 1",
         arrayOf("${prefix}_", "${prefix}_\uFFFF"),
-    ).use { if (it.moveToFirst()) it.toMessage() else null }
+    ).use { if (it.moveToFirst()) it.toMessage(::signalStatus) else null }
 }
 
 /**

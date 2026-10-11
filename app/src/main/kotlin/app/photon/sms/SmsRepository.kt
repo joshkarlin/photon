@@ -11,6 +11,7 @@ import android.telephony.SmsManager
 import android.util.Log
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
+import app.photon.data.model.MessageStatus
 import app.photon.data.model.Platform
 import app.photon.data.names.DisplayNames
 import app.photon.data.names.LocalContacts
@@ -219,12 +220,14 @@ class SmsRepository(
             "${Telephony.Sms.DATE} DESC",
         ) ?: return emptyList()
 
+        val lastRead = lastReadMillis(normalized)
         cursor.use { c ->
             val iId = c.getColumnIndexOrThrow(Telephony.Sms._ID)
             val iAddr = c.getColumnIndexOrThrow(Telephony.Sms.ADDRESS)
             val iBody = c.getColumnIndexOrThrow(Telephony.Sms.BODY)
             val iDate = c.getColumnIndexOrThrow(Telephony.Sms.DATE)
             val iType = c.getColumnIndexOrThrow(Telephony.Sms.TYPE)
+            val iRead = c.getColumnIndexOrThrow(Telephony.Sms.READ)
 
             while (c.moveToNext()) {
                 val rawAddress = c.getString(iAddr) ?: continue
@@ -239,15 +242,7 @@ class SmsRepository(
                 // Previously only SENT counted as `isFromMe`, so a queued
                 // or failed message showed up as if the OTHER party sent it.
                 val isFromMe = type != Telephony.Sms.MESSAGE_TYPE_INBOX
-                val status = when (type) {
-                    Telephony.Sms.MESSAGE_TYPE_INBOX -> "received"
-                    Telephony.Sms.MESSAGE_TYPE_SENT -> "sent"
-                    Telephony.Sms.MESSAGE_TYPE_FAILED -> "failed"
-                    Telephony.Sms.MESSAGE_TYPE_OUTBOX,
-                    Telephony.Sms.MESSAGE_TYPE_QUEUED,
-                    Telephony.Sms.MESSAGE_TYPE_DRAFT -> "sending"
-                    else -> "sent"
-                }
+                val status = smsStatus(type, read = c.getInt(iRead) == 1, isNewerThanLastRead = date > lastRead)
 
                 messages.add(Message(
                     id = id,
@@ -294,4 +289,20 @@ class SmsRepository(
             address.trim()
         }
     }
+}
+
+/**
+ * An SMS row's [MessageStatus]. Anything not in the inbox is your own:
+ * sent, failed, or still in the outbox or queue. A received message is
+ * unread until it's marked read in the provider or the chat was opened in
+ * Photon after it arrived, as the chat list counts it.
+ */
+internal fun smsStatus(type: Int, read: Boolean, isNewerThanLastRead: Boolean): MessageStatus = when (type) {
+    Telephony.Sms.MESSAGE_TYPE_INBOX ->
+        if (!read && isNewerThanLastRead) MessageStatus.UNREAD else MessageStatus.READ
+    Telephony.Sms.MESSAGE_TYPE_FAILED -> MessageStatus.FAILED
+    Telephony.Sms.MESSAGE_TYPE_OUTBOX,
+    Telephony.Sms.MESSAGE_TYPE_QUEUED,
+    Telephony.Sms.MESSAGE_TYPE_DRAFT -> MessageStatus.SENDING
+    else -> MessageStatus.SENT
 }

@@ -115,7 +115,7 @@ fun SignalMessageDatabase.getCallRowsWithText(texts: Collection<String>): List<M
     return readableDatabase.rawQuery(
         "SELECT * FROM messages WHERE content_type = ? AND text_body IN (${texts.joinToString(",") { "?" }})",
         arrayOf(CONTENT_CALL, *texts.toTypedArray()),
-    ).use { it.toMessages() }
+    ).use { it.toMessages(::signalStatus) }
 }
 
 /**

@@ -18,6 +18,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import app.photon.data.model.Message
+import app.photon.data.model.MessageStatus
 import app.photon.data.names.DisplayNames
 import app.photon.ui.theme.PhotonColors
 import app.photon.ui.theme.PhotonGrid
@@ -202,9 +203,10 @@ fun MessageMeta(
     val reactions = formatReactions(msg)
     val status = if (msg.isFromMe) {
         when (msg.status) {
-            "sending" -> "sending…"
-            "failed" -> "failed · tap to retry"
-            "sent", "delivered", "read" -> msg.status.takeIf { revealed }
+            MessageStatus.SENDING -> "sending…"
+            MessageStatus.FAILED -> "failed · tap to retry"
+            MessageStatus.SENT, MessageStatus.DELIVERED, MessageStatus.READ ->
+                msg.status.name.lowercase().takeIf { revealed }
             else -> null
         }
     } else null
@@ -218,7 +220,7 @@ fun MessageMeta(
             LightText(text = reactions, variant = LightTextVariant.Detail)
         }
         if (status != null) {
-            val failed = msg.status == "failed"
+            val failed = msg.status == MessageStatus.FAILED
             LightText(
                 text = status,
                 variant = LightTextVariant.Detail,

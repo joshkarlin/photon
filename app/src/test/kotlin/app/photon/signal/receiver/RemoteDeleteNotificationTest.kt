@@ -1,6 +1,7 @@
 package app.photon.signal.receiver
 
 import app.photon.data.model.Message
+import app.photon.data.model.MessageStatus
 import app.photon.signal.db.SignalMessageDatabase.RemoteDeleteChange
 import app.photon.signal.db.insertIncomingMessage
 import app.photon.signal.db.updateContactPhone
@@ -56,7 +57,7 @@ class RemoteDeleteNotificationTest {
     private fun message(text: String?) = Message(
         id = "x", conversationJid = alice, senderJid = alice, timestamp = 0, contentType = "text", textBody = text,
         mediaUrl = null, mediaMime = null, mediaSize = null, thumbnailPath = null, stickerPackId = null,
-        replyToId = null, editVersion = 0, isFromMe = false, status = "received",
+        replyToId = null, editVersion = 0, isFromMe = false, status = MessageStatus.UNREAD,
     )
 
     @Test

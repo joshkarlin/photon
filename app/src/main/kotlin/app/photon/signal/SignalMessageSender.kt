@@ -184,7 +184,7 @@ class SignalMessageSender internal constructor(
         val myAci = credentials.aciString
         if (row == null || row.conversationJid != conversationJid ||
             row.contentType == SignalMessageDatabase.CONTENT_CALL ||
-            row.status == "failed" || row.status == "sending" || reaction == null || myAci == null
+            row.status.isUnsent || reaction == null || myAci == null
         ) return false
         val recipient = recipientFor(conversationJid) ?: return false
 

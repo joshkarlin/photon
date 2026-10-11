@@ -5,6 +5,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteException
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
+import app.photon.data.model.MessageStatus
 import app.photon.data.model.Participant
 import app.photon.data.model.Reaction
 import java.io.File
@@ -106,12 +107,12 @@ class PhotonDatabase(context: Context) {
             "SELECT $messageColumns FROM messages WHERE conversation_jid = ? " +
                 "ORDER BY timestamp DESC, _rowid_ DESC LIMIT ?",
             arrayOf(conversationJid, limit.toString()),
-        ).use { it.toMessages() }
+        ).use { it.toMessages(::whatsAppStatus) }
     } ?: emptyList()
 
     fun getMessage(id: String): Message? = query { d ->
         d.rawQuery("SELECT $messageColumns FROM messages WHERE id = ?", arrayOf(id)).use {
-            if (it.moveToFirst()) it.toMessage() else null
+            if (it.moveToFirst()) it.toMessage(::whatsAppStatus) else null
         }
     }
 
@@ -147,4 +148,16 @@ class PhotonDatabase(context: Context) {
             arrayOf(conversationJid),
         ).use { it.toParticipants() }
     } ?: emptyList()
+}
+
+/**
+ * A WhatsApp row's [MessageStatus]. The bridge stores an incoming message as
+ * "sent" until it's read ("read"), and a revoked message, either way, as
+ * "deleted".
+ */
+internal fun whatsAppStatus(stored: String, isFromMe: Boolean): MessageStatus = when {
+    isFromMe -> MessageStatus.outgoing(stored)
+    stored == "read" -> MessageStatus.READ
+    stored == "deleted" -> MessageStatus.DELETED
+    else -> MessageStatus.UNREAD
 }

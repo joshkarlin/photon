@@ -1,5 +1,6 @@
 package app.photon.signal.receiver
 
+import app.photon.data.model.MessageStatus
 import app.photon.signal.SignalCalls
 import app.photon.signal.db.getConversation
 import app.photon.signal.db.getMessage
@@ -170,7 +171,7 @@ class CallHandlerTest {
         calls.expireStaleRinging()
 
         assertEquals("Missed voice call", fx.db.getMessage(old)?.textBody)
-        assertEquals("read", fx.db.getMessage(old)?.status)
+        assertEquals(MessageStatus.READ, fx.db.getMessage(old)?.status)
         assertEquals(0, unread())
         assertEquals(emptyList(), fx.notifier.events)
         assertEquals(emptyList(), scheduled)

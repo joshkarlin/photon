@@ -3,6 +3,7 @@ package app.photon.signal.db
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import app.photon.data.model.MessageStatus
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 
@@ -308,4 +309,17 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
     internal fun unreadCountOf(db: SQLiteDatabase, jid: String): Int =
         db.rawQuery("SELECT unread_count FROM conversations WHERE jid = ?", arrayOf(jid))
             .use { if (it.moveToFirst()) it.getInt(0) else 0 }
+}
+
+/**
+ * A Signal row's [MessageStatus]: incoming rows store their read state (see
+ * [SignalMessageDatabase.STATUS_UNREAD] and the rest), outgoing rows their
+ * delivery state.
+ */
+internal fun signalStatus(stored: String, isFromMe: Boolean): MessageStatus = when {
+    isFromMe -> MessageStatus.outgoing(stored)
+    stored == SignalMessageDatabase.STATUS_SEEN -> MessageStatus.SEEN
+    stored == SignalMessageDatabase.STATUS_READ -> MessageStatus.READ
+    stored == SignalMessageDatabase.STATUS_DELETED -> MessageStatus.DELETED
+    else -> MessageStatus.UNREAD
 }

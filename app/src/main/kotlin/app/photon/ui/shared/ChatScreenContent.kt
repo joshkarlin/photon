@@ -299,8 +299,7 @@ internal fun ChatThread(
         actionsFor?.let { msg ->
             MessageActions(
                 message = msg,
-                canReact = onReact != null && !isCall(msg) &&
-                    msg.status != "failed" && msg.status != "sending",
+                canReact = onReact != null && !isCall(msg) && !msg.status.isUnsent,
                 canDelete = onDelete != null,
                 onPick = { emoji ->
                     onReact?.invoke(msg.id, msg.senderJid, emoji)

@@ -15,7 +15,7 @@ data class Message(
     val replyToId: String?,
     val editVersion: Int,
     val isFromMe: Boolean,
-    val status: String,
+    val status: MessageStatus,
     val reactions: List<Reaction> = emptyList(),
     val replyToPreview: Message? = null,
 )

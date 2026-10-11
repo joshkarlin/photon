@@ -17,6 +17,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import app.photon.data.model.Message
+import app.photon.data.model.MessageStatus
 import com.thelightphone.sdk.ui.LightBarButton
 import com.thelightphone.sdk.ui.LightBottomBar
 import com.thelightphone.sdk.ui.LightIcons
@@ -46,7 +47,7 @@ fun MessageActions(
     // else (incoming, our own failed/sending rows, call entries) is a
     // local-only removal.
     val forEveryone = message.isFromMe && !isCall(message) &&
-        message.status in setOf("sent", "delivered", "read")
+        message.status in setOf(MessageStatus.SENT, MessageStatus.DELIVERED, MessageStatus.READ)
     var confirming by remember { mutableStateOf(false) }
 
     BackHandler(onBack = onDismiss)

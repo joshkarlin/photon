@@ -1,6 +1,7 @@
 package app.photon.signal.db
 
 import androidx.test.core.app.ApplicationProvider
+import app.photon.data.model.MessageStatus
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -105,7 +106,7 @@ class SignalMessageDatabaseTest {
 
         val msg = db.getMessages("aci").first { it.id == fullId }
         assertEquals("", msg.textBody)
-        assertEquals("deleted", msg.status)
+        assertEquals(MessageStatus.DELETED, msg.status)
     }
 
     @Test
@@ -126,8 +127,8 @@ class SignalMessageDatabaseTest {
         assertEquals(true, result.matched)
         // The newer message is still unread, so its notification stays.
         assertEquals(emptyList(), result.clearedConversations)
-        assertEquals("read", db.getMessage("${aci}_1700_abc")?.status)
-        assertEquals("received", db.getMessage("${aci}_1800_def")?.status)
+        assertEquals(MessageStatus.READ, db.getMessage("${aci}_1700_abc")?.status)
+        assertEquals(MessageStatus.UNREAD, db.getMessage("${aci}_1800_def")?.status)
         assertEquals(1, db.getConversation(aci)?.unreadCount)
     }
 
@@ -150,8 +151,8 @@ class SignalMessageDatabaseTest {
 
         assertEquals(SignalMessageDatabase.ReadSyncResult(true, emptyList()), first)
         assertEquals(SignalMessageDatabase.ReadSyncResult(true, emptyList()), duplicate)
-        assertEquals("read", db.getMessage("${author}_1700_abc")?.status)
-        assertEquals("received", db.getMessage("${author}_1800_def")?.status)
+        assertEquals(MessageStatus.READ, db.getMessage("${author}_1700_abc")?.status)
+        assertEquals(MessageStatus.UNREAD, db.getMessage("${author}_1800_def")?.status)
         assertEquals(1, db.getConversation(group)?.unreadCount)
     }
 
@@ -170,7 +171,7 @@ class SignalMessageDatabaseTest {
         // An outgoing row with the same key isn't the incoming message the
         // read refers to, so the read is still unmatched.
         assertEquals(SignalMessageDatabase.ReadSyncResult(false, emptyList()), result)
-        assertEquals("sent", db.getMessage("${aci}_1700_abc")?.status)
+        assertEquals(MessageStatus.SENT, db.getMessage("${aci}_1700_abc")?.status)
     }
 
     @Test
@@ -192,8 +193,8 @@ class SignalMessageDatabaseTest {
 
         assertEquals(1, changed)
         assertEquals(0, duplicate)
-        assertEquals("read", db.getMessage("${aci}_1700_in")?.status)
-        assertEquals("delivered", db.getMessage("${aci}_1800_out")?.status)
+        assertEquals(MessageStatus.READ, db.getMessage("${aci}_1700_in")?.status)
+        assertEquals(MessageStatus.DELIVERED, db.getMessage("${aci}_1800_out")?.status)
         assertEquals(0, db.getConversation(aci)?.unreadCount)
     }
 

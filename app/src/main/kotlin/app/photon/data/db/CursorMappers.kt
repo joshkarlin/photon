@@ -3,6 +3,7 @@ package app.photon.data.db
 import android.database.Cursor
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
+import app.photon.data.model.MessageStatus
 import app.photon.data.model.Participant
 import app.photon.data.model.Reaction
 
@@ -47,13 +48,20 @@ fun isMutedAt(flag: Boolean, mutedUntil: Long?, nowSeconds: Long): Boolean = whe
     else -> mutedUntil > nowSeconds
 }
 
-fun Cursor.toMessages(): List<Message> {
+/**
+ * A stored row's [MessageStatus], from its status column and direction. Each
+ * database passes its own, since the platforms store different strings.
+ */
+typealias StatusMapping = (stored: String, isFromMe: Boolean) -> MessageStatus
+
+fun Cursor.toMessages(status: StatusMapping): List<Message> {
     val list = mutableListOf<Message>()
-    while (moveToNext()) list.add(toMessage())
+    while (moveToNext()) list.add(toMessage(status))
     return list
 }
 
-fun Cursor.toMessage(): Message {
+fun Cursor.toMessage(status: StatusMapping): Message {
+    val isFromMe = getInt(getColumnIndexOrThrow("is_from_me")) == 1
     return Message(
         id = getString(getColumnIndexOrThrow("id")),
         conversationJid = getString(getColumnIndexOrThrow("conversation_jid")),
@@ -68,8 +76,8 @@ fun Cursor.toMessage(): Message {
         stickerPackId = getStringOrNull("sticker_pack_id"),
         replyToId = getStringOrNull("reply_to_id"),
         editVersion = getInt(getColumnIndexOrThrow("edit_version")),
-        isFromMe = getInt(getColumnIndexOrThrow("is_from_me")) == 1,
-        status = getString(getColumnIndexOrThrow("status")),
+        isFromMe = isFromMe,
+        status = status(getString(getColumnIndexOrThrow("status")), isFromMe),
     )
 }
 
