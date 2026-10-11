@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -199,46 +200,37 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 	msgID := evt.Info.ID
 	ts := evt.Info.Timestamp.Unix()
 
-	// Check for reaction
-	if reaction := msg.GetReactionMessage(); reaction != nil {
-		targetID := reaction.GetKey().GetID()
-		emoji := reaction.GetText()
-		b.UpsertReaction(targetID, senderJID, emoji, ts)
+	kind, targetID := classifyMessageEvent(msg)
+	switch kind {
+	case kindReaction:
+		b.UpsertReaction(targetID, senderJID, msg.GetReactionMessage().GetText(), ts)
 		b.BroadcastEvent("message_updated", MessageUpdatedEvent{
 			ConversationJID: chatJID,
 			MessageID:       targetID,
 		})
 		return
-	}
-
-	// "Delete for everyone" (by the sender, or a group admin).
-	if pm := msg.GetProtocolMessage(); pm != nil && pm.GetType() == waE2E.ProtocolMessage_REVOKE && pm.GetKey().GetID() != "" {
-		b.applyRevoke(pm.GetKey().GetID())
+	case kindRevoke:
+		b.applyRevoke(targetID)
+		return
+	case kindEdit:
+		b.applyEdit(chatJID, targetID, msg.GetProtocolMessage().GetEditedMessage())
+		return
+	case kindDrop:
+		b.log.Debugf("Skipping content-free message %s in %s", msgID, chatJID)
 		return
 	}
 
-	// Edits arrive as a MESSAGE_EDIT protocol message (UnwrapRaw strips the
-	// EditedMessage wrapper when there is one, leaving this underneath).
-	if targetID, edited := editTarget(msg); targetID != "" {
-		b.applyEdit(chatJID, targetID, edited)
+	content := contentMessage(msg)
+	row := b.buildMessageRow(content, msgID, chatJID, senderJID, ts, isFromMe, "sent")
+
+	// The phone's copy of a message it had masked from linked devices:
+	// upgrade the placeholder row in place (it was already counted).
+	if evt.UnavailableRequestID != "" && b.ReplaceMessageContent(row) {
+		b.saveInlineThumbnail(msgID, content)
+		b.BroadcastEvent("message_updated", MessageUpdatedEvent{ConversationJID: chatJID, MessageID: msgID})
 		return
 	}
 
-	// Skip empty messages (e.g., sender key distribution in groups)
-	if msg.GetConversation() == "" &&
-		msg.GetExtendedTextMessage() == nil &&
-		msg.GetImageMessage() == nil &&
-		msg.GetVideoMessage() == nil &&
-		msg.GetAudioMessage() == nil &&
-		msg.GetDocumentMessage() == nil &&
-		msg.GetStickerMessage() == nil &&
-		msg.GetLocationMessage() == nil &&
-		msg.GetContactMessage() == nil {
-		b.log.Debugf("Skipping empty message %s in %s (sender key distribution or protocol)", msgID, chatJID)
-		return
-	}
-
-	row := b.buildMessageRow(msg, msgID, chatJID, senderJID, ts, isFromMe, "sent")
 	inserted, err := b.InsertMessage(row)
 	if err != nil {
 		b.log.Errorf("Failed to store message %s in %s: %v", msgID, chatJID, err)
@@ -253,17 +245,23 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 	}
 	contentType, textBody := row.ContentType, row.TextBody.String
 
-	// Extract and save inline thumbnail for media messages
-	if thumb := getInlineThumbnail(msg); thumb != nil && len(thumb) > 0 {
-		thumbPath := b.saveThumbnail(msgID, thumb)
-		if thumbPath != "" {
-			b.UpdateThumbnailPath(msgID, thumbPath)
-		}
-	}
+	b.saveInlineThumbnail(msgID, content)
 
 	// Auto-download small media (stickers, audio)
 	if contentType == "sticker" || contentType == "audio" {
-		go b.autoDownloadMedia(msgID, msg)
+		go b.autoDownloadMedia(msgID, content)
+	}
+
+	if content.GetPlaceholderMessage() != nil && !isFromMe {
+		go b.requestFromPhone(evt.Info)
+	}
+
+	// A call-log entry in the chat. Live calls are tracked from call events,
+	// which own the unread count and notification, so this only shows the
+	// entry.
+	isCallLog := contentType == "call"
+	if isCallLog {
+		b.log.Infof("Call log message %s in %s: %s", msgID, chatJID, textBody)
 	}
 
 	// Update conversation
@@ -307,6 +305,11 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 	// else only fills empty names (handled by UpsertConversation's COALESCE).
 	if nameIsAuthoritative {
 		b.UpdateConversationName(chatJID, name)
+	}
+
+	if isCallLog {
+		b.BroadcastEvent("message_updated", MessageUpdatedEvent{ConversationJID: chatJID, MessageID: msgID})
+		return
 	}
 
 	// Increment unread if not from me
@@ -452,10 +455,16 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 
 		msgs := conv.GetMessages()
 		b.log.Debugf("  Conv %s: %d messages in history", jid, len(msgs))
+		chat, _ := types.ParseJID(rawJID)
 		convMsgCount := 0
 		skippedNil := 0
 		skippedOld := 0
+		skippedEmpty := 0
 		var pending []*MessageRow
+		// Edits and revokes in the payload apply to rows in this batch, so
+		// they run after the insert.
+		var edits []historyEdit
+		var revokes []string
 		// Collect each distinct group sender's best name from history push
 		// names so historical messages render the contact/profile name instead
 		// of a bare number. Upserted once per sender after the loop.
@@ -467,18 +476,7 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 			}
 
 			wm := histMsg.GetMessage()
-			if wm == nil {
-				skippedNil++
-				continue
-			}
-			if wm.GetMessage() == nil {
-				skippedNil++
-				continue
-			}
-
-			msg := wm.GetMessage()
-			info := wm.GetKey()
-			if info == nil {
+			if wm == nil || wm.GetKey() == nil || wm.GetMessage() == nil {
 				skippedNil++
 				continue
 			}
@@ -490,22 +488,27 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 				continue
 			}
 
-			msgID := info.GetID()
-			isFromMe := info.GetFromMe()
-			// ts already declared above for cutoff check
-			// In history sync the group sender lives on WebMessageInfo.Participant,
-			// NOT on the message key — reading only the key left it empty, so
-			// senderJID fell back to the group JID and every historical group
-			// message rendered as the group's number. Prefer the WebMessageInfo
-			// participant, fall back to the key, and canonicalize like live.
-			participant := wm.GetParticipant()
-			if participant == "" {
-				participant = info.GetParticipant()
+			// Parse exactly like a live message: unwrap ephemeral/view-once/
+			// edited wrappers and work out the sender. History stores the
+			// group sender on WebMessageInfo.Participant (not the key), which
+			// ParseWebMessage reads.
+			evt := b.historyEvent(chat, wm)
+			if targetID, edited := historyEditTarget(evt, wm); targetID != "" {
+				edits = append(edits, historyEdit{targetID, edited})
+				continue
 			}
-			senderJID := jid
-			if !isFromMe && participant != "" {
-				senderJID = b.canonicalSenderString(participant)
+			kind, targetID := classifyMessageEvent(evt.Message)
+			switch kind {
+			case kindRevoke:
+				revokes = append(revokes, targetID)
+				continue
+			case kindReaction, kindDrop:
+				skippedEmpty++
+				continue
 			}
+
+			isFromMe := evt.Info.IsFromMe
+			senderJID := b.canonicalSenderJID(evt.Info.Sender)
 
 			// Remember the sender's push name for participant backfill.
 			if isGroup && !isFromMe {
@@ -516,13 +519,21 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 				}
 			}
 
-			pending = append(pending, b.buildMessageRow(msg, msgID, jid, senderJID, ts, isFromMe, "read"))
+			pending = append(pending, b.buildMessageRow(contentMessage(evt.Message), evt.Info.ID, jid, senderJID, ts, isFromMe, "read"))
 			totalMsgs++
 			convMsgCount++
 		}
 		// One transaction per conversation — per-row implicit transactions
 		// mean thousands of WAL commits during initial pairing.
 		b.InsertMessages(pending)
+		for _, e := range edits {
+			if _, text, _ := extractContent(e.edited); text != "" {
+				b.UpdateMessageEdit(e.targetID, b.resolveMentions(e.edited, jid, text))
+			}
+		}
+		for _, id := range revokes {
+			b.RevokeMessage(id)
+		}
 
 		// Backfill group participant names: prefer the address-book contact
 		// name, fall back to the history push name. Done once per distinct
@@ -540,8 +551,8 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 			}
 		}
 
-		if skippedNil > 0 || skippedOld > 0 {
-			b.log.Debugf("  Conv %s: inserted %d, skipped %d nil, %d old", jid, convMsgCount, skippedNil, skippedOld)
+		if skippedNil > 0 || skippedOld > 0 || skippedEmpty > 0 {
+			b.log.Debugf("  Conv %s: inserted %d, skipped %d nil, %d old, %d content-free", jid, convMsgCount, skippedNil, skippedOld, skippedEmpty)
 		}
 
 		// For DMs, resolve contact name from whatsmeow's contact store.
@@ -600,6 +611,52 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 
 	b.BroadcastEvent("history_sync_complete", struct{}{})
 	b.log.Infof("History sync complete: %d conversations, %d messages", totalConvs, totalMsgs)
+}
+
+// historyEdit is an edit found in a history payload.
+type historyEdit struct {
+	targetID string
+	edited   *waE2E.Message
+}
+
+// historyEvent parses a history-sync message into the same event a live one
+// would be. If no sender can be worked out (rare, for groups) the message is
+// kept and attributed to the chat, as before ParseWebMessage was used.
+func (b *Bridge) historyEvent(chat types.JID, wm *waWeb.WebMessageInfo) *events.Message {
+	evt, err := b.client.ParseWebMessage(chat, wm)
+	if err == nil {
+		return evt
+	}
+	b.log.Debugf("History message %s: %v", wm.GetKey().GetID(), err)
+	evt = &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     chat,
+				Sender:   chat,
+				IsFromMe: wm.GetKey().GetFromMe(),
+				IsGroup:  chat.Server == types.GroupServer,
+			},
+			ID:        wm.GetKey().GetID(),
+			PushName:  wm.GetPushName(),
+			Timestamp: time.Unix(int64(wm.GetMessageTimestamp()), 0),
+		},
+		RawMessage:   wm.GetMessage(),
+		SourceWebMsg: wm,
+	}
+	return evt.UnwrapRaw()
+}
+
+// historyEditTarget reports an edit in a history payload. ParseWebMessage
+// already rewrites one into its target's ID and new content; the fallback
+// parse leaves the MESSAGE_EDIT protocol message as a live event would.
+func historyEditTarget(evt *events.Message, wm *waWeb.WebMessageInfo) (targetID string, edited *waE2E.Message) {
+	if evt.Info.ID != wm.GetKey().GetID() {
+		return evt.Info.ID, evt.Message
+	}
+	if kind, id := classifyMessageEvent(evt.Message); kind == kindEdit {
+		return id, evt.Message.GetProtocolMessage().GetEditedMessage()
+	}
+	return "", nil
 }
 
 func (b *Bridge) handlePushName(evt *events.PushName) {
@@ -976,9 +1033,10 @@ func applyMentions(text string, mentionedJIDs []string, nameFor func(types.JID) 
 
 // buildMessageRow assembles the MessageRow fields shared by the live message
 // handler and history sync: content classification, raw proto (kept for
-// later media download), reply context, and media mime type.
+// later media download), reply context, and media mime type. msg is the
+// content message (see contentMessage).
 func (b *Bridge) buildMessageRow(msg *waE2E.Message, id, convJID, senderJID string, ts int64, isFromMe bool, status string) *MessageRow {
-	contentType, textBody := classifyMessage(msg)
+	contentType, textBody, _ := extractContent(msg)
 	textBody = b.resolveMentions(msg, convJID, textBody)
 	rawProto, _ := proto.Marshal(msg)
 
@@ -1007,58 +1065,11 @@ func (b *Bridge) buildMessageRow(msg *waE2E.Message, id, convJID, senderJID stri
 	}
 }
 
-func classifyMessage(msg *waE2E.Message) (contentType string, textBody string) {
-	switch {
-	case msg.GetConversation() != "":
-		return "text", msg.GetConversation()
-	case msg.GetExtendedTextMessage() != nil:
-		return "text", msg.GetExtendedTextMessage().GetText()
-	case msg.GetImageMessage() != nil:
-		return "image", msg.GetImageMessage().GetCaption()
-	case msg.GetVideoMessage() != nil:
-		return "video", msg.GetVideoMessage().GetCaption()
-	case msg.GetAudioMessage() != nil:
-		return "audio", ""
-	case msg.GetDocumentMessage() != nil:
-		return "document", msg.GetDocumentMessage().GetFileName()
-	case msg.GetStickerMessage() != nil:
-		return "sticker", ""
-	case msg.GetLocationMessage() != nil:
-		return "location", fmt.Sprintf("%.6f, %.6f", msg.GetLocationMessage().GetDegreesLatitude(), msg.GetLocationMessage().GetDegreesLongitude())
-	case msg.GetContactMessage() != nil:
-		return "contact", msg.GetContactMessage().GetDisplayName()
-	default:
-		return "text", ""
-	}
-}
-
-func getContextInfo(msg *waE2E.Message) *waE2E.ContextInfo {
-	if ext := msg.GetExtendedTextMessage(); ext != nil {
-		return ext.GetContextInfo()
-	}
-	if img := msg.GetImageMessage(); img != nil {
-		return img.GetContextInfo()
-	}
-	if vid := msg.GetVideoMessage(); vid != nil {
-		return vid.GetContextInfo()
-	}
-	if aud := msg.GetAudioMessage(); aud != nil {
-		return aud.GetContextInfo()
-	}
-	if doc := msg.GetDocumentMessage(); doc != nil {
-		return doc.GetContextInfo()
-	}
-	if stk := msg.GetStickerMessage(); stk != nil {
-		return stk.GetContextInfo()
-	}
-	return nil
-}
-
 func getMediaMime(msg *waE2E.Message) string {
 	if img := msg.GetImageMessage(); img != nil {
 		return img.GetMimetype()
 	}
-	if vid := msg.GetVideoMessage(); vid != nil {
+	if vid := videoOf(msg); vid != nil {
 		return vid.GetMimetype()
 	}
 	if aud := msg.GetAudioMessage(); aud != nil {
@@ -1077,7 +1088,7 @@ func getInlineThumbnail(msg *waE2E.Message) []byte {
 	if img := msg.GetImageMessage(); img != nil {
 		return img.GetJPEGThumbnail()
 	}
-	if vid := msg.GetVideoMessage(); vid != nil {
+	if vid := videoOf(msg); vid != nil {
 		return vid.GetJPEGThumbnail()
 	}
 	if doc := msg.GetDocumentMessage(); doc != nil {
@@ -1086,22 +1097,10 @@ func getInlineThumbnail(msg *waE2E.Message) []byte {
 	return nil
 }
 
-// editTarget returns the ID of the message an edit replaces and the new
-// content, or "" when msg isn't an edit. The new content is the protocol
-// message's EditedMessage — classifying the wrapper itself yields nothing,
-// which used to blank every edited message.
-func editTarget(msg *waE2E.Message) (targetID string, edited *waE2E.Message) {
-	pm := msg.GetProtocolMessage()
-	if pm == nil || pm.GetType() != waE2E.ProtocolMessage_MESSAGE_EDIT {
-		return "", nil
-	}
-	return pm.GetKey().GetID(), pm.GetEditedMessage()
-}
-
 // applyEdit replaces a stored message's text with its edited version. An edit
 // whose new text can't be extracted is ignored rather than blanking the row.
 func (b *Bridge) applyEdit(chatJID, targetID string, edited *waE2E.Message) {
-	_, newText := classifyMessage(edited)
+	_, newText, _ := extractContent(edited)
 	if newText == "" {
 		b.log.Warnf("Ignoring edit of %s in %s: no text in edited content", targetID, chatJID)
 		return
@@ -1131,6 +1130,33 @@ func (b *Bridge) buildTextMessage(text string, replyToID string) *waE2E.Message 
 				StanzaID: proto.String(replyToID),
 			},
 		},
+	}
+}
+
+// videoOf returns a message's video, including a round "video note" (PTV).
+func videoOf(msg *waE2E.Message) *waE2E.VideoMessage {
+	if vid := msg.GetVideoMessage(); vid != nil {
+		return vid
+	}
+	return msg.GetPtvMessage()
+}
+
+// saveInlineThumbnail stores a media message's embedded JPEG preview.
+func (b *Bridge) saveInlineThumbnail(msgID string, msg *waE2E.Message) {
+	if thumb := getInlineThumbnail(msg); len(thumb) > 0 {
+		if thumbPath := b.saveThumbnail(msgID, thumb); thumbPath != "" {
+			b.UpdateThumbnailPath(msgID, thumbPath)
+		}
+	}
+}
+
+// requestFromPhone asks the primary device to resend a message it masked
+// from linked devices (some business messages are). The copy arrives as a
+// normal message event with UnavailableRequestID set.
+func (b *Bridge) requestFromPhone(info types.MessageInfo) {
+	req := b.client.BuildUnavailableMessageRequest(info.Chat, info.Sender, info.ID)
+	if _, err := b.client.SendPeerMessage(context.Background(), req); err != nil {
+		b.log.Warnf("Failed to request %s from phone: %v", info.ID, err)
 	}
 }
 

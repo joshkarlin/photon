@@ -312,6 +312,21 @@ func (b *Bridge) InsertMessage(msg *MessageRow) (inserted bool, err error) {
 	return n > 0, err
 }
 
+// ReplaceMessageContent overwrites a stored message's content with a fuller
+// copy of it (the phone's resend of a placeholder). Returns false when no
+// row matched.
+func (b *Bridge) ReplaceMessageContent(m *MessageRow) bool {
+	res, err := b.msgDB.Exec(`UPDATE messages SET content_type = ?, text_body = ?, media_mime = ?,
+		reply_to_id = ?, raw_proto = ? WHERE id = ? AND status <> 'deleted'`,
+		m.ContentType, m.TextBody, m.MediaMime, m.ReplyToID, m.RawProto, m.ID)
+	if err != nil {
+		b.log.Errorf("Failed to replace content of %s: %v", m.ID, err)
+		return false
+	}
+	n, _ := res.RowsAffected()
+	return n > 0
+}
+
 // InsertMessages inserts a batch of messages in a single transaction. Used by
 // history sync, where one implicit transaction per row would mean thousands
 // of WAL commits during initial pairing. The live path uses InsertMessage.

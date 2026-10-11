@@ -21,8 +21,8 @@ func downloadableMedia(msg *waE2E.Message) whatsmeow.DownloadableMessage {
 	switch {
 	case msg.GetImageMessage() != nil:
 		return msg.GetImageMessage()
-	case msg.GetVideoMessage() != nil:
-		return msg.GetVideoMessage()
+	case videoOf(msg) != nil:
+		return videoOf(msg)
 	case msg.GetAudioMessage() != nil:
 		return msg.GetAudioMessage()
 	case msg.GetDocumentMessage() != nil:
