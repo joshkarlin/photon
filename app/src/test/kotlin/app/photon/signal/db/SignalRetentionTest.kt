@@ -84,6 +84,18 @@ class SignalRetentionTest {
         assertEquals(1, db.getConversation(chat)?.unreadCount)
     }
 
+    /** Seen in Photon but not yet read-synced: kept until the sync can go out. */
+    @Test
+    fun ageLimitKeepsSeenRowsAwaitingReadSync() {
+        val seen = incoming(ageDays = 10, n = 1)
+        db.markConversationSeen(chat)
+
+        assertEquals(0, db.pruneMessages(maxPerConversation = 0, maxAgeDays = 7, nowSeconds = now))
+
+        db.markMessagesRead(listOf(seen))
+        assertEquals(1, db.pruneMessages(maxPerConversation = 0, maxAgeDays = 7, nowSeconds = now))
+    }
+
     /** The cap still bounds unread rows; the badge drops with them. */
     @Test
     fun capPrunesUnreadRowsAndAdjustsCount() {

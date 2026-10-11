@@ -1331,10 +1331,11 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
      *
      * The per-conversation cap applies to every row, so storage stays bounded
      * even for chats that are never opened. The age limit skips rows that are
-     * still unread: a message nobody has seen shouldn't vanish just because
-     * the phone was off for a week (the cap still bounds them). Pruned unread
-     * rows are subtracted from unread_count. Conversation rows are kept —
-     * they carry names, group master keys and members.
+     * still unread — a message nobody has seen shouldn't vanish just because
+     * the phone was off for a week — and seen rows whose read sync hasn't gone
+     * out yet (the cap still bounds both). Pruned unread rows are subtracted
+     * from unread_count. Conversation rows are kept — they carry names, group
+     * master keys and members.
      */
     fun pruneMessages(
         maxPerConversation: Int,
@@ -1350,8 +1351,8 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                 val cutoff = nowSeconds - maxAgeDays * 86_400L
                 db.rawQuery(
                     "SELECT id, conversation_jid FROM messages " +
-                        "WHERE timestamp < ? AND NOT (is_from_me = 0 AND status = ?)",
-                    arrayOf(cutoff.toString(), STATUS_UNREAD),
+                        "WHERE timestamp < ? AND NOT (is_from_me = 0 AND status IN (?, ?))",
+                    arrayOf(cutoff.toString(), STATUS_UNREAD, STATUS_SEEN),
                 ).use { c -> while (c.moveToNext()) doomed[c.getString(0)] = c.getString(1) to false }
             }
             if (maxPerConversation > 0) {

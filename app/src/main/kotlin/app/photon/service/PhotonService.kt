@@ -83,6 +83,26 @@ class PhotonService : Service() {
             _signalReceiver?.start()
         }
 
+        // Signal's ephemeral window: downloaded media TTL plus the message
+        // cap/age from Settings → Chat (WhatsApp's is enforced inside the
+        // bridge). Its own loop, so it runs even if the Go bridge fails to start.
+        scope.launch {
+            val prefs = app.photon.data.PhotonPreferences(this@PhotonService)
+            while (true) {
+                delay(5 * 60_000)
+                try {
+                    _signalReceiver?.pruneMedia()
+                } catch (e: Exception) {
+                    Log.w("PhotonService", "Signal media prune failed: ${e.message}")
+                }
+                try {
+                    _signalReceiver?.pruneMessages(prefs.maxMessages.first(), prefs.maxDays.first())
+                } catch (e: Exception) {
+                    Log.w("PhotonService", "Signal message prune failed: ${e.message}")
+                }
+            }
+        }
+
         // Start Go bridge and connect WebSocket
         scope.launch {
             try {
@@ -99,22 +119,14 @@ class PhotonService : Service() {
                     }
                 }
                 // Ephemeral media sweep (the Go bridge prunes its own dirs;
-                // this covers the Kotlin-owned ones), plus the Signal message
-                // window (WhatsApp's is enforced inside the bridge).
+                // this covers the Kotlin-owned ones).
                 launch {
-                    val prefs = app.photon.data.PhotonPreferences(this@PhotonService)
                     while (true) {
                         delay(5 * 60_000)
                         try {
-                            _signalReceiver?.pruneMedia()
                             pruneStagedSendFiles()
                         } catch (e: Exception) {
                             Log.w("PhotonService", "Media prune failed: ${e.message}")
-                        }
-                        try {
-                            _signalReceiver?.pruneMessages(prefs.maxMessages.first(), prefs.maxDays.first())
-                        } catch (e: Exception) {
-                            Log.w("PhotonService", "Signal message prune failed: ${e.message}")
                         }
                     }
                 }
