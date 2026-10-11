@@ -25,7 +25,8 @@ fun ChatListScreen(
     onChat: (Platform, String) -> Unit,
     onSwitch: () -> Unit,
     onSettings: () -> Unit,
-) = ChatListScreen(filter, Sessions::backend, onChat, onSwitch, onSettings)
+    onNewMessage: (() -> Unit)? = null,
+) = ChatListScreen(filter, Sessions::backend, onChat, onSwitch, onSettings, onNewMessage)
 
 @Composable
 internal fun ChatListScreen(
@@ -34,6 +35,7 @@ internal fun ChatListScreen(
     onChat: (Platform, String) -> Unit,
     onSwitch: () -> Unit,
     onSettings: () -> Unit,
+    onNewMessage: (() -> Unit)? = null,
 ) {
     val platforms = filter?.let(::listOf) ?: Platform.entries
     // A platform whose session isn't running yet lists nothing; its
@@ -50,6 +52,7 @@ internal fun ChatListScreen(
         filter = filter?.label ?: "All Chats",
         onFilter = onSwitch,
         onSettings = onSettings,
+        onNewMessage = onNewMessage,
         conversations = conversations,
         platformOf = { platformOf(it.jid) },
         onChat = { jid -> onChat(platformOf(jid), jid) },

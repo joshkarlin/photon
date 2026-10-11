@@ -74,6 +74,7 @@ fun PhotonNavGraph(
                 onChat = ::openChat,
                 onSwitch = { navController.navigate(Routes.PLATFORMS) },
                 onSettings = { navController.navigate(Routes.SETTINGS) },
+                onNewMessage = { navController.openNewMessage() },
             )
         }
         composable(Routes.PLATFORMS) {

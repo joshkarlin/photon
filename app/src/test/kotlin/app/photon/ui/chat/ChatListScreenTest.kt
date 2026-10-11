@@ -43,15 +43,17 @@ class ChatListScreenTest {
     private val opened = mutableListOf<Pair<Platform, String>>()
     private var switched = 0
     private var settings = 0
+    private var newMessages = 0
     private var filter by mutableStateOf<Platform?>(null)
 
-    private fun show(filter: Platform?) {
+    private fun show(filter: Platform?, withNewMessage: Boolean = false) {
         this.filter = filter
         rule.setContent {
             PhotonTheme {
                 ChatListScreen(
                     this.filter, backends::get,
                     onChat = { p, jid -> opened += p to jid }, onSwitch = { switched++ }, onSettings = { settings++ },
+                    onNewMessage = if (withNewMessage) { { newMessages++ } } else null,
                 )
             }
         }
@@ -74,6 +76,17 @@ class ChatListScreenTest {
             rule.onNodeWithText(label).performClick()
         }
         assertEquals(labels.size, switched, "each filter label opens the platform picker")
+    }
+
+    /** The bar's right-hand slot starts a new message, on every filter. */
+    @Test
+    fun theBottomBarStartsANewMessage() {
+        show(filter = null, withNewMessage = true)
+        rule.onNodeWithContentDescription("New message").performClick()
+        filter = Platform.SMS
+        rule.waitForIdle()
+        rule.onNodeWithContentDescription("New message").performClick()
+        assertEquals(2, newMessages)
     }
 
     /** Settings stays in reach before anything has loaded, and on an empty list. */
