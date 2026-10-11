@@ -36,15 +36,7 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 		jid := b.resolveLIDString(rawJID)
 
 		name := conv.GetName()
-		// Detect groups solely by the JID server (g.us) — the authoritative
-		// signal. The old participant-count heuristic fallback misfired both
-		// ways (an empty participant list misclassified groups as DMs; a DM
-		// payload that happened to carry a participant misclassified it as a
-		// group), and a wrong is_group used to be sticky forever.
-		isGroup := false
-		if parsedConvJID, perr := types.ParseJID(jid); perr == nil {
-			isGroup = parsedConvJID.Server == types.GroupServer
-		}
+		isGroup := isGroupJID(jid)
 
 		msgs := conv.GetMessages()
 		b.log.Debugf("  Conv %s: %d messages in history", jid, len(msgs))
@@ -211,7 +203,7 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 				lastMsgID = r.ID
 			}
 		}
-		b.UpsertConversation(jid, name, isGroup, lastMsgID, lastTS)
+		b.UpsertConversation(jid, name, lastMsgID, lastTS)
 
 		// Broadcast progress
 		b.BroadcastEvent("history_sync_progress", HistorySyncProgressEvent{

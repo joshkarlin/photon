@@ -14,8 +14,8 @@ func TestMergeLIDConversations_concurrentRunsCountOnce(t *testing.T) {
 	lid := types.NewJID("11223344", types.HiddenUserServer)
 	b.client.Store.LIDs.PutLIDMapping(context.Background(), lid, pn)
 
-	b.UpsertConversation(pn.String(), "Alice", false, "p1", 100)
-	b.UpsertConversation(lid.String(), "", false, "l1", 200)
+	b.UpsertConversation(pn.String(), "Alice", "p1", 100)
+	b.UpsertConversation(lid.String(), "", "l1", 200)
 	b.InsertMessages([]*MessageRow{
 		{ID: "p1", ConversationJID: pn.String(), SenderJID: pn.String(), Timestamp: 100, ContentType: "text"},
 		{ID: "l1", ConversationJID: lid.String(), SenderJID: lid.String(), Timestamp: 200, ContentType: "text"},

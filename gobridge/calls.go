@@ -138,11 +138,6 @@ func callText(c *pendingCall, outcome callOutcome) string {
 
 func callRowID(callID string) string { return "call_" + callID }
 
-func isGroupJID(jid string) bool {
-	parsed, err := types.ParseJID(jid)
-	return err == nil && parsed.Server == types.GroupServer
-}
-
 func (b *Bridge) isOwnUser(jid types.JID) bool {
 	if jid.IsEmpty() || b.client.Store.ID == nil {
 		return false
@@ -338,9 +333,9 @@ func (b *Bridge) recordCall(callID string, c *pendingCall, outcome callOutcome) 
 		return false
 	}
 	if inserted {
-		// Creates the chat for a call from a new number. is_group follows the
-		// chat (an ad-hoc group call lives in the caller's DM).
-		b.UpsertConversation(c.chatJID, c.chatName, isGroupJID(c.chatJID), callRowID(callID), c.ts)
+		// Creates the chat for a call from a new number (an ad-hoc group call
+		// lives in the caller's DM).
+		b.UpsertConversation(c.chatJID, c.chatName, callRowID(callID), c.ts)
 	}
 	return inserted
 }

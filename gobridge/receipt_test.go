@@ -39,7 +39,7 @@ func TestReceiptEffect(t *testing.T) {
 // unread badge of 1.
 func seedChat(t *testing.T, b *Bridge, jid string) {
 	t.Helper()
-	b.UpsertConversation(jid, "Alice", false, "in1", 2)
+	b.UpsertConversation(jid, "Alice", "in1", 2)
 	if err := b.InsertMessages([]*MessageRow{
 		{ID: "out1", ConversationJID: jid, SenderJID: "me@s.whatsapp.net", Timestamp: 1, ContentType: "text", IsFromMe: true, Status: "sent"},
 		{ID: "in1", ConversationJID: jid, SenderJID: jid, Timestamp: 2, ContentType: "text", Status: "sent"},
@@ -99,7 +99,7 @@ func TestApplyReceipt_ownReadClearsUnread(t *testing.T) {
 func TestAdvanceOutgoingStatus_neverDowngradesOrResurrects(t *testing.T) {
 	b := newTestBridge(t)
 	const jid = "447@s.whatsapp.net"
-	b.UpsertConversation(jid, "Alice", false, "", 0)
+	b.UpsertConversation(jid, "Alice", "", 0)
 	b.InsertMessages([]*MessageRow{
 		{ID: "r", ConversationJID: jid, SenderJID: "me", Timestamp: 1, ContentType: "text", IsFromMe: true, Status: "read"},
 		{ID: "d", ConversationJID: jid, SenderJID: "me", Timestamp: 2, ContentType: "text", IsFromMe: true, Status: "deleted"},
@@ -141,7 +141,7 @@ func TestApplyChatReadState(t *testing.T) {
 	b := newTestBridge(t)
 	events := captureEvents(b)
 	const jid = "447@s.whatsapp.net"
-	b.UpsertConversation(jid, "Alice", false, "m2", 20)
+	b.UpsertConversation(jid, "Alice", "m2", 20)
 	b.InsertMessages([]*MessageRow{
 		{ID: "m1", ConversationJID: jid, SenderJID: jid, Timestamp: 10, ContentType: "text", Status: "sent"},
 		{ID: "m2", ConversationJID: jid, SenderJID: jid, Timestamp: 20, ContentType: "text", Status: "sent"},
@@ -187,7 +187,7 @@ func TestApplyChatReadState(t *testing.T) {
 // the same second, then m3.
 func threeUnread(t *testing.T, b *Bridge, jid string) {
 	t.Helper()
-	b.UpsertConversation(jid, "Alice", false, "m3", 20)
+	b.UpsertConversation(jid, "Alice", "m3", 20)
 	if err := b.InsertMessages([]*MessageRow{
 		{ID: "m1", ConversationJID: jid, SenderJID: jid, Timestamp: 10, ContentType: "text", Status: "sent"},
 		{ID: "m2", ConversationJID: jid, SenderJID: jid, Timestamp: 10, ContentType: "text", Status: "sent"},
@@ -267,7 +267,7 @@ func TestHandleMarkRead_boundedByTheListedRows(t *testing.T) {
 func TestMigrateIncomingReadState(t *testing.T) {
 	b := newTestBridge(t)
 	const jid = "447700900001@s.whatsapp.net"
-	b.UpsertConversation(jid, "Alice", false, "new", 40)
+	b.UpsertConversation(jid, "Alice", "new", 40)
 	b.InsertMessages([]*MessageRow{
 		{ID: "old1", ConversationJID: jid, SenderJID: jid, Timestamp: 10, ContentType: "text", Status: "sent"},
 		{ID: "old2", ConversationJID: jid, SenderJID: jid, Timestamp: 20, ContentType: "text", Status: "sent"},
@@ -277,7 +277,7 @@ func TestMigrateIncomingReadState(t *testing.T) {
 		// A chat with no unread count at all.
 		{ID: "other", ConversationJID: "x@s.whatsapp.net", SenderJID: "x@s.whatsapp.net", Timestamp: 5, ContentType: "text", Status: "sent"},
 	})
-	b.UpsertConversation("x@s.whatsapp.net", "X", false, "other", 5)
+	b.UpsertConversation("x@s.whatsapp.net", "X", "other", 5)
 	b.IncrementUnread(jid)
 	rerunMigrationsFrom(t, b, 1)
 

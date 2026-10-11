@@ -103,10 +103,10 @@ func (b *Bridge) mergeConversation(from, to string) (bool, error) {
 	defer tx.Rollback()
 
 	var name, lastMsgID string
-	var isGroup, unread int
+	var unread int
 	var lastTS, mutedUntil int64
-	err = tx.QueryRow(`SELECT COALESCE(name, ''), is_group, COALESCE(last_message_id, ''), last_timestamp, unread_count, muted_until
-		FROM conversations WHERE jid = ?`, from).Scan(&name, &isGroup, &lastMsgID, &lastTS, &unread, &mutedUntil)
+	err = tx.QueryRow(`SELECT COALESCE(name, ''), COALESCE(last_message_id, ''), last_timestamp, unread_count, muted_until
+		FROM conversations WHERE jid = ?`, from).Scan(&name, &lastMsgID, &lastTS, &unread, &mutedUntil)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -128,7 +128,7 @@ func (b *Bridge) mergeConversation(from, to string) (bool, error) {
 	if _, err := tx.Exec(`DELETE FROM participants WHERE conversation_jid = ?`, from); err != nil {
 		return false, err
 	}
-	if err := b.upsertConversation(tx, to, name, isGroup == 1, lastMsgID, lastTS); err != nil {
+	if err := b.upsertConversation(tx, to, name, lastMsgID, lastTS); err != nil {
 		return false, err
 	}
 	if _, err := tx.Exec(`UPDATE conversations SET unread_count = unread_count + ?,

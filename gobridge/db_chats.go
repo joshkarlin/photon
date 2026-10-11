@@ -3,37 +3,38 @@ package main
 import (
 	"database/sql"
 	"math"
+
+	"go.mau.fi/whatsmeow/types"
 )
 
-// UpsertConversation creates or updates a conversation record.
-func (b *Bridge) UpsertConversation(jid, name string, isGroup bool, lastMsgID string, lastTS int64) {
-	if err := b.upsertConversation(b.msgDB, jid, name, isGroup, lastMsgID, lastTS); err != nil {
+// UpsertConversation creates or updates a conversation record. A name only
+// fills a missing one (UpdateConversationName overwrites), and the preview
+// moves only forward. is_group always follows the JID's server.
+func (b *Bridge) UpsertConversation(jid, name, lastMsgID string, lastTS int64) {
+	if err := b.upsertConversation(b.msgDB, jid, name, lastMsgID, lastTS); err != nil {
 		b.log.Errorf("Failed to upsert conversation %s: %v", jid, err)
 	}
 }
 
-func (b *Bridge) upsertConversation(ex execer, jid, name string, isGroup bool, lastMsgID string, lastTS int64) error {
-	isGroupInt := 0
-	if isGroup {
-		isGroupInt = 1
-	}
-
+func (b *Bridge) upsertConversation(ex execer, jid, name, lastMsgID string, lastTS int64) error {
 	_, err := ex.Exec(`
 		INSERT INTO conversations (jid, name, is_group, last_message_id, last_timestamp, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(jid) DO UPDATE SET
 			name = COALESCE(NULLIF(excluded.name, ''), conversations.name),
-			-- Only a row carrying a name is an authoritative classification (the
-			-- incoming/history/merge paths). A nameless upsert is just a preview
-			-- bump from the send/confirm path, which must never reclassify — it
-			-- once flipped a group to is_group=0 and switched the chat to DM view.
-			-- RepairConversationMetadata fixes any stale classification by JID.
-			is_group = CASE WHEN NULLIF(excluded.name, '') IS NULL THEN conversations.is_group ELSE excluded.is_group END,
+			is_group = excluded.is_group,
 			last_message_id = CASE WHEN excluded.last_timestamp > conversations.last_timestamp THEN excluded.last_message_id ELSE conversations.last_message_id END,
 			last_timestamp = MAX(excluded.last_timestamp, conversations.last_timestamp),
 			updated_at = excluded.updated_at
-	`, jid, name, isGroupInt, lastMsgID, lastTS, lastTS)
+	`, jid, name, isGroupJID(jid), lastMsgID, lastTS, lastTS)
 	return err
+}
+
+// isGroupJID reports whether a chat is a group, which its JID's server alone
+// decides.
+func isGroupJID(jid string) bool {
+	parsed, err := types.ParseJID(jid)
+	return err == nil && parsed.Server == types.GroupServer
 }
 
 // IncrementUnread increments the unread count for a conversation.
@@ -120,10 +121,10 @@ func updateMute(ex execer, jid string, mutedUntil int64) error {
 		m = 1
 	}
 	_, err := ex.Exec(`
-		INSERT INTO conversations (jid, is_muted, muted_until, updated_at)
-		VALUES (?, ?, ?, 0)
+		INSERT INTO conversations (jid, is_group, is_muted, muted_until, updated_at)
+		VALUES (?, ?, ?, ?, 0)
 		ON CONFLICT(jid) DO UPDATE SET is_muted = excluded.is_muted, muted_until = excluded.muted_until
-	`, jid, m, mutedUntil)
+	`, jid, isGroupJID(jid), m, mutedUntil)
 	return err
 }
 

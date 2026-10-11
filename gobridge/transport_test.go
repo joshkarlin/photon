@@ -188,7 +188,7 @@ func TestRetryMessage_refusesUnstagedPath(t *testing.T) {
 	b := newClientBridge(t)
 	b.dataDir = t.TempDir()
 	const jid = "447700900001@s.whatsapp.net"
-	b.UpsertConversation(jid, "Alice", false, "", 0)
+	b.UpsertConversation(jid, "Alice", "", 0)
 	b.InsertMessage(&MessageRow{
 		ID: "f1", ConversationJID: jid, SenderJID: ownJID.String(), Timestamp: 1, ContentType: "document",
 		MediaURL: nullString("/data/data/app.photon/databases/signal_protocol.db"), IsFromMe: true, Status: "failed",

@@ -69,7 +69,7 @@ func TestApplyRevoke_retriesWhenTheDatabaseIsBusy(t *testing.T) {
 	}
 	sent := captureEvents(b)
 	alice := types.NewJID("447700900001", types.DefaultUserServer)
-	b.UpsertConversation(alice.String(), "Alice", false, "m1", 100)
+	b.UpsertConversation(alice.String(), "Alice", "m1", 100)
 	b.InsertMessage(&MessageRow{ID: "m1", ConversationJID: alice.String(), SenderJID: alice.String(), Timestamp: 100, ContentType: "text", Status: "sent"})
 	b.IncrementUnread(alice.String())
 

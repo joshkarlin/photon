@@ -142,7 +142,7 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 			b.log.Infof("Resolved LID %s to %s", evt.Info.Chat, name)
 		}
 	}
-	b.UpsertConversation(chatJID, name, isGroup, msgID, ts)
+	b.UpsertConversation(chatJID, name, msgID, ts)
 	// Address book names overwrite previously stored push names; everything
 	// else only fills empty names (handled by UpsertConversation's COALESCE).
 	if nameIsAuthoritative {

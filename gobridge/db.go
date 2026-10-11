@@ -166,23 +166,6 @@ func addColumnIfMissing(ctx context.Context, tx *sql.Tx, table, column, def stri
 	return true, nil
 }
 
-// RepairConversationMetadata fixes existing conversation rows whose is_group or
-// preview drifted from the source of truth. Runs on connect; idempotent.
-//   - is_group from the JID server (g.us → group, s.whatsapp.net → DM), undoing
-//     any old misclassification the sticky upsert had made permanent.
-//   - last_timestamp / last_message_id from the newest actual message, undoing
-//     history sync having pinned the preview to an older (or skipped) message.
-func (b *Bridge) RepairConversationMetadata() {
-	b.msgDB.Exec(`UPDATE conversations SET is_group = 1 WHERE jid LIKE '%@g.us' AND is_group <> 1`)
-	b.msgDB.Exec(`UPDATE conversations SET is_group = 0 WHERE jid LIKE '%@s.whatsapp.net' AND is_group <> 0`)
-	b.msgDB.Exec(`
-		UPDATE conversations SET
-			last_timestamp  = (SELECT MAX(timestamp) FROM messages WHERE conversation_jid = conversations.jid),
-			last_message_id = (SELECT id FROM messages WHERE conversation_jid = conversations.jid ORDER BY timestamp DESC, _rowid_ DESC LIMIT 1)
-		WHERE EXISTS (SELECT 1 FROM messages WHERE conversation_jid = conversations.jid)
-	`)
-}
-
 // execer is a *sql.DB or *sql.Tx.
 type execer interface {
 	Exec(query string, args ...interface{}) (sql.Result, error)

@@ -310,12 +310,19 @@ func (b *Bridge) GetMessageRawProto(msgID string) ([]byte, error) {
 	return raw, nil
 }
 
-// DeleteMessageRow removes a message and its reactions from the local DB.
+// DeleteMessageRow removes a message and its reactions from the local DB, and
+// moves its chat's preview back to the newest message left.
 func (b *Bridge) DeleteMessageRow(msgID string) {
+	var jid string
+	b.msgDB.QueryRow(`SELECT conversation_jid FROM messages WHERE id = ?`, msgID).Scan(&jid)
 	if _, err := b.msgDB.Exec(`DELETE FROM messages WHERE id = ?`, msgID); err != nil {
 		b.log.Warnf("Failed to delete message %s: %v", msgID, err)
 	}
 	b.msgDB.Exec(`DELETE FROM reactions WHERE message_id = ?`, msgID)
+	b.msgDB.Exec(`UPDATE conversations SET
+			last_timestamp  = (SELECT MAX(timestamp) FROM messages WHERE conversation_jid = conversations.jid),
+			last_message_id = (SELECT id FROM messages WHERE conversation_jid = conversations.jid ORDER BY timestamp DESC, _rowid_ DESC LIMIT 1)
+		WHERE jid = ? AND EXISTS (SELECT 1 FROM messages WHERE conversation_jid = conversations.jid)`, jid)
 }
 
 // UpdateMediaURL sets the local media path for a downloaded message.

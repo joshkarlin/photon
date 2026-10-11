@@ -60,7 +60,7 @@ func TestOfferIsVideo(t *testing.T) {
 func TestCall_missed(t *testing.T) {
 	b := newClientBridge(t)
 	sent := captureEvents(b)
-	b.UpsertConversation(caller.String(), "Alice", false, "", 0)
+	b.UpsertConversation(caller.String(), "Alice", "", 0)
 
 	b.HandleEvent(&events.CallOffer{BasicCallMeta: callMeta("c1", caller, caller), Data: voiceOffer()})
 
@@ -171,7 +171,7 @@ func TestCall_LIDCallerResolvesToPhoneChat(t *testing.T) {
 func TestCall_groupCall(t *testing.T) {
 	b := newClientBridge(t)
 	sent := captureEvents(b)
-	b.UpsertConversation(group.String(), "Book club", true, "", 0)
+	b.UpsertConversation(group.String(), "Book club", "", 0)
 	other := types.NewJID("447700900002", types.DefaultUserServer)
 	meta := func(from types.JID) types.BasicCallMeta {
 		m := callMeta("g1", from, caller)
@@ -244,7 +244,7 @@ func TestHistorySync_missedCallStubs(t *testing.T) {
 
 func TestWithoutCallRows(t *testing.T) {
 	b := newTestBridge(t)
-	b.UpsertConversation(caller.String(), "Alice", false, "", 0)
+	b.UpsertConversation(caller.String(), "Alice", "", 0)
 	b.InsertMessages([]*MessageRow{
 		{ID: "m1", ConversationJID: caller.String(), SenderJID: caller.String(), Timestamp: 1, ContentType: "text"},
 		{ID: "log1", ConversationJID: caller.String(), SenderJID: caller.String(), Timestamp: 2, ContentType: "call"},

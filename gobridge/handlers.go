@@ -89,7 +89,6 @@ func (b *Bridge) reconcile() {
 	b.reconciler.run(func() {
 		b.MergeLIDConversations()
 		b.CanonicalizeSenderJIDs()
-		b.RepairConversationMetadata()
 		b.BackfillContactNames()
 		b.BackfillParticipantNames()
 	})

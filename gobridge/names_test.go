@@ -58,7 +58,7 @@ func TestHandleBusinessName(t *testing.T) {
 		b := newClientBridge(t)
 		sent := captureEvents(b)
 		b.client.Store.LIDs.PutLIDMapping(ctx, shopLID, shop)
-		b.UpsertConversation(shop.String(), "acme help", false, "m1", 100)
+		b.UpsertConversation(shop.String(), "acme help", "m1", 100)
 
 		lidDevice := shopLID
 		lidDevice.Device = 3
@@ -75,7 +75,7 @@ func TestHandleBusinessName(t *testing.T) {
 	t.Run("address book wins", func(t *testing.T) {
 		b := newClientBridge(t)
 		b.client.Store.Contacts.PutContactName(ctx, shop, "Corner", "Corner Shop")
-		b.UpsertConversation(shop.String(), "Corner Shop", false, "m1", 100)
+		b.UpsertConversation(shop.String(), "Corner Shop", "m1", 100)
 
 		b.handleBusinessName(&events.BusinessName{JID: shop, NewBusinessName: "ACME Ltd"})
 
@@ -90,7 +90,7 @@ func TestBackfillContactNames_namesLIDChats(t *testing.T) {
 	b := newClientBridge(t)
 	lid := types.NewJID("55443322", types.HiddenUserServer)
 	b.client.Store.Contacts.PutPushName(ctx, lid, "Bob")
-	b.UpsertConversation(lid.String(), "", false, "m1", 100)
+	b.UpsertConversation(lid.String(), "", "m1", 100)
 
 	b.BackfillContactNames()
 
