@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.provider.ContactsContract
+import android.provider.ContactsContract.CommonDataKinds.Phone
 import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.flow.Flow
@@ -100,6 +101,25 @@ class LocalContacts(
         return name
     }
 
+    /**
+     * Every LP3 contact with a number: their name and numbers as saved, the
+     * default number first, then mobiles. Empty without READ_CONTACTS. It
+     * reads the provider, so call it off the main thread; [changes] says
+     * when to read again.
+     */
+    fun all(): List<LocalContact> {
+        if (!observing) startObserving()
+        if (!canRead()) return emptyList()
+        return try {
+            allContacts(resolver)
+        } catch (_: SecurityException) {
+            emptyList()
+        } catch (e: Exception) {
+            Log.w(TAG, "Reading contacts failed: ${e.message}")
+            emptyList()
+        }
+    }
+
     /** Forget every cached lookup and tell the name flows to re-resolve. */
     fun invalidate() {
         cache.clear()
@@ -138,6 +158,36 @@ class LocalContacts(
                 instance ?: LocalContacts(context.applicationContext).also { instance = it }
             }
 
+        /** Every contact with a number, as [all] describes. */
+        internal fun allContacts(resolver: ContentResolver): List<LocalContact> {
+            class Number(val number: String, val rank: Int)
+            val names = LinkedHashMap<Long, String>()
+            val numbers = HashMap<Long, MutableList<Number>>()
+            resolver.query(
+                Phone.CONTENT_URI,
+                arrayOf(Phone.CONTACT_ID, Phone.DISPLAY_NAME_PRIMARY, Phone.NUMBER, Phone.IS_SUPER_PRIMARY, Phone.TYPE),
+                null, null, null,
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    val number = c.getString(2)?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+                    val id = c.getLong(0)
+                    names.putIfAbsent(id, c.getString(1)?.trim().orEmpty())
+                    val rank = when {
+                        c.getInt(3) != 0 -> 0
+                        c.getInt(4) == Phone.TYPE_MOBILE -> 1
+                        else -> 2
+                    }
+                    numbers.getOrPut(id) { mutableListOf() } += Number(number, rank)
+                }
+            }
+            return names.map { (id, name) ->
+                // The same number saved twice ("07400 123456", "+44 7400 123456") once.
+                val phones = numbers[id].orEmpty().sortedBy { it.rank }.map { it.number }
+                    .distinctBy { PhoneNumbers.e164(it) ?: it.filter(Char::isDigit) }
+                LocalContact(name.ifEmpty { DisplayNames.number(phones.first()) }, phones)
+            }
+        }
+
         /** The display name of the contact [phone] belongs to, via the provider's own number matching. */
         internal fun phoneLookup(resolver: ContentResolver, phone: String): String? {
             val uri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(phone))
@@ -146,3 +196,6 @@ class LocalContacts(
         }
     }
 }
+
+/** An LP3 contact: [name] and the [phones] saved for them, as written. */
+data class LocalContact(val name: String, val phones: List<String>)
