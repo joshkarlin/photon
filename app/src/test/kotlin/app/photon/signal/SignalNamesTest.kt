@@ -28,6 +28,8 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /** Signal names resolve when read, from the stored sources, LP3 contacts first. */
 @RunWith(RobolectricTestRunner::class)
@@ -97,6 +99,20 @@ class SignalNamesTest {
         db.updateContactProfileName(mum, "Jane")
 
         assertEquals("Mum", names.title(mum, isGroup = false))
+    }
+
+    /** A failed profile fetch used to blank the stored name, so the chat showed the number. */
+    @Test
+    fun aFailedProfileFetchKeepsTheKnownName() {
+        db.updateContactPhone(bob, bobPhone)
+        db.updateContactProfileName(bob, "Bob")
+
+        assertFalse(db.storeFetchedProfileName(bob, null))
+        assertFalse(db.storeFetchedProfileName(bob, " "))
+        assertEquals("Bob", names.person(bob))
+
+        assertTrue(db.storeFetchedProfileName(bob, "Robert"))
+        assertEquals("Robert", names.person(bob))
     }
 
     @Test

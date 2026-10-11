@@ -119,7 +119,7 @@ fun SignalMessageDatabase.updateContactProfileKey(jid: String, profileKey: ByteA
     )
 }
 
-fun SignalMessageDatabase.updateContactProfileName(jid: String, profileName: String?) {
+fun SignalMessageDatabase.updateContactProfileName(jid: String, profileName: String) {
     writableDatabase.execSQL(
         """
         INSERT INTO contacts (jid, profile_name, profile_fetched_at, updated_at) VALUES (?, ?, ?, ?)
