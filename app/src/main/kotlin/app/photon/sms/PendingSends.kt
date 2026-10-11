@@ -6,11 +6,11 @@ import java.util.UUID
 
 /**
  * SMS sent from Photon, from the moment they're sent until the SMS provider
- * has them. Android writes a sent message to the provider for an app that
- * isn't the default SMS app only once the radio has reported it sent or
- * failed. Until then these show it as sending; if SmsManager refused it
- * outright, or the provider never gets it, they show how it ended, so a
- * failed send can still be retried.
+ * has them. For an app that isn't the default SMS app, Android writes a sent
+ * message to the provider (as sent or failed) only once the radio has
+ * reported every part, just before the last report reaches Photon. Until
+ * then these show it as sending. One SmsManager refused outright never
+ * reaches the provider: it shows as failed here, to be retried as itself.
  */
 internal class PendingSends {
 
@@ -20,35 +20,42 @@ internal class PendingSends {
         val conversationJid: String,
         val text: String,
         val sentAtMillis: Long,
+        val newerThanRow: Long,
     ) {
         var status = MessageStatus.SENDING
         var partsLeft = 0
-        var anyPartFailed = false
     }
 
     // Oldest first. Guarded by this.
     private val sends = LinkedHashMap<String, Send>()
 
-    /** A new send of [text] to [address] in [conversationJid]; returns its id. */
+    /**
+     * A new send of [text] to [address] in [conversationJid]; returns its id.
+     * [newestRowId] is the newest provider row the chat has shown: the
+     * provider's ids only grow, so the send's own row will be newer.
+     */
     @Synchronized
-    fun add(address: String, conversationJid: String, text: String, nowMillis: Long): String {
+    fun add(address: String, conversationJid: String, text: String, nowMillis: Long, newestRowId: Long): String {
         val id = "$ID_PREFIX${UUID.randomUUID()}"
-        sends[id] = Send(id, address, conversationJid, text, nowMillis)
+        sends[id] = Send(id, address, conversationJid, text, nowMillis, newestRowId)
         return id
     }
 
-    /** Where to send [id] again, if it is one of these and failed. */
+    /**
+     * Take [id] to send again, if it is one of these and failed: it shows as
+     * sending from now. Returns where to send what, or null.
+     */
     @Synchronized
-    fun retryable(id: String): Pair<String, String>? =
-        sends[id]?.takeIf { it.status == MessageStatus.FAILED }?.let { it.address to it.text }
+    fun retry(id: String): Pair<String, String>? {
+        val send = sends[id]?.takeIf { it.status == MessageStatus.FAILED } ?: return null
+        send.status = MessageStatus.SENDING
+        return send.address to send.text
+    }
 
     /** [id] went to the radio in [parts] parts; each reports back through [partSent]. */
     @Synchronized
     fun submitted(id: String, parts: Int) {
-        val send = sends[id] ?: return
-        send.status = MessageStatus.SENDING
-        send.partsLeft = parts
-        send.anyPartFailed = false
+        sends[id]?.partsLeft = parts
     }
 
     /** [id] couldn't be sent at all. */
@@ -57,41 +64,42 @@ internal class PendingSends {
         sends[id]?.status = MessageStatus.FAILED
     }
 
-    /** The radio's result for one part of [id]. Returns whether that settled the send. */
+    /**
+     * The radio's result for one part of [id], sent or failed alike: once
+     * every part has reported, Android has stored the message, so it's
+     * forgotten here. Returns whether that happened.
+     */
     @Synchronized
-    fun partSent(id: String, ok: Boolean): Boolean {
+    fun partSent(id: String): Boolean {
         val send = sends[id] ?: return false
         if (send.status != MessageStatus.SENDING || send.partsLeft == 0) return false
-        if (!ok) send.anyPartFailed = true
         send.partsLeft--
         if (send.partsLeft > 0) return false
-        send.status = if (send.anyPartFailed) MessageStatus.FAILED else MessageStatus.SENT
+        sends.remove(id)
         return true
     }
 
     /**
-     * The sends in [conversationJid] as messages, leaving out (and
-     * forgetting) each one the provider now has: an outgoing row in [stored]
-     * with the same text, written no earlier than the send. A stored row
-     * accounts for one send only.
+     * The sends in [conversationJid] as messages. A send still going out is
+     * left out when [stored] already has it (Android stores it just before
+     * reporting the last part): an outgoing row with the same text, newer
+     * than any the chat showed before the send, each row standing for one
+     * send.
      */
     @Synchronized
     fun messages(conversationJid: String, stored: List<Message>): List<Message> {
-        val unmatched = stored.filter { it.isFromMe }.sortedBy { it.timestamp }.toMutableList()
-        val shown = mutableListOf<Message>()
-        val iterator = sends.values.iterator()
-        while (iterator.hasNext()) {
-            val send = iterator.next()
-            if (send.conversationJid != conversationJid) continue
-            val row = unmatched.firstOrNull { it.textBody == send.text && it.timestamp >= send.sentAtMillis / 1000 }
+        val unmatched = stored.filter { it.isFromMe }.sortedBy { rowId(it) }.toMutableList()
+        return sends.values.filter { it.conversationJid == conversationJid }.mapNotNull { send ->
+            val row = if (send.status != MessageStatus.SENDING) null else unmatched.firstOrNull {
+                it.textBody == send.text && rowId(it) > send.newerThanRow
+            }
             if (row != null) {
                 unmatched.remove(row)
-                iterator.remove()
+                null
             } else {
-                shown += send.toMessage()
+                send.toMessage()
             }
         }
-        return shown
     }
 
     private fun Send.toMessage() = Message(
@@ -115,5 +123,8 @@ internal class PendingSends {
     companion object {
         /** Their ids, unlike the provider's numeric ones. */
         const val ID_PREFIX = "pending:"
+
+        /** A provider row's id, as a number (0 for a send's own). */
+        fun rowId(message: Message): Long = message.id.toLongOrNull() ?: 0
     }
 }

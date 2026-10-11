@@ -60,15 +60,15 @@ class SmsRepositoryTest {
     private fun repo() = SmsRepository(context, scope, contacts, radio)
 
     /** Sends one part per message and records them. */
-    private class FakeRadio(private val refuse: Boolean = false) : SmsRadio {
+    private class FakeRadio(var refuse: Boolean = false) : SmsRadio {
         val sent = mutableListOf<Pair<String, String>>()
         val sentIntents = mutableListOf<PendingIntent>()
 
         override fun divide(text: String) = listOf(text)
 
-        override fun send(address: String, parts: List<String>, sentIntents: List<PendingIntent>) {
+        override fun send(address: String, text: String, parts: List<String>, sentIntents: List<PendingIntent>) {
             if (refuse) throw SecurityException("SEND_SMS not granted")
-            sent += address to parts.joinToString("")
+            sent += address to text
             this.sentIntents += sentIntents
         }
     }
@@ -146,15 +146,16 @@ class SmsRepositoryTest {
         assertEquals(listOf(mum to "On my way"), radio.sent)
         assertEquals(1, radio.sentIntents.size, "the radio's result comes back")
 
-        // The radio reports it sent, and Android writes it to the provider.
-        repo.onSendResult(sending.id, ok = true)
+        // Android stores it, then reports it sent: one bubble throughout.
         provider.add(mum, "On my way", System.currentTimeMillis(), Telephony.Sms.MESSAGE_TYPE_SENT, thread = 1)
         val stored = await(messages) { list -> list.size == 2 && list.none { it.id == sending.id } }
         assertEquals(MessageStatus.SENT, stored.first().status)
+        repo.onSendResult(sending.id)
+        assertEquals(2, await(messages) { it.size == 2 }.size)
     }
 
     @Test
-    fun aSendTheRadioFailsCanBeRetriedAsItself() {
+    fun aSendTheRadioFailsShowsAndroidsFailedRowWhichRetriesAsANewSend() {
         provider.add(mum, "Dinner?", 3_000, Telephony.Sms.MESSAGE_TYPE_INBOX, thread = 1)
         val repo = repo()
         val messages = repo.messages(mum)
@@ -162,21 +163,23 @@ class SmsRepositoryTest {
         repo.sendMessage(mum, "On my way")
         val sending = await(messages) { it.size == 2 }.first()
 
-        // No service: the radio reports failure and Android stores nothing.
-        repo.onSendResult(sending.id, ok = false)
-        val failed = await(messages) { it.first().status == MessageStatus.FAILED }.first()
-        assertEquals(sending.id, failed.id)
+        // No service: Android stores it as failed, then reports the failure.
+        val failedId = provider.add(mum, "On my way", System.currentTimeMillis(), Telephony.Sms.MESSAGE_TYPE_FAILED, thread = 1)
+        repo.onSendResult(sending.id)
+        val failed = await(messages) { it.first().id == failedId }.first()
+        assertEquals(MessageStatus.FAILED, failed.status)
 
-        repo.retryMessage(failed.id)
+        repo.retryMessage(failedId)
         assertEquals(listOf(mum to "On my way", mum to "On my way"), radio.sent)
-        val retried = await(messages) { it.first().status == MessageStatus.SENDING }
-        assertEquals(listOf(sending.id), retried.filter { it.isFromMe }.map { it.id })
+        val retried = await(messages) { it.size == 3 }
+        assertEquals(MessageStatus.SENDING, retried.first().status)
     }
 
     @Test
     fun aSendSmsManagerRefusesIsFailedAtOnce() {
         provider.add(mum, "Dinner?", 3_000, Telephony.Sms.MESSAGE_TYPE_INBOX, thread = 1)
-        val repo = SmsRepository(context, scope, contacts, FakeRadio(refuse = true))
+        val radio = FakeRadio(refuse = true)
+        val repo = SmsRepository(context, scope, contacts, radio)
         val messages = repo.messages(mum)
         await(messages) { it.isNotEmpty() }
 
@@ -185,6 +188,13 @@ class SmsRepositoryTest {
         val failed = await(messages) { it.size == 2 }.first()
         assertEquals("On my way", failed.textBody)
         assertEquals(MessageStatus.FAILED, failed.status)
+
+        // It never reached Android, so it's retried as itself.
+        radio.refuse = false
+        repo.retryMessage(failed.id)
+        assertEquals(listOf(mum to "On my way"), radio.sent)
+        val retried = await(messages) { it.first().status == MessageStatus.SENDING }.first()
+        assertEquals(failed.id, retried.id)
     }
 
     @Test
@@ -192,7 +202,7 @@ class SmsRepositoryTest {
         val intent = PendingIntent.getBroadcast(
             context, 0, Intent("test"), PendingIntent.FLAG_IMMUTABLE,
         )
-        SystemSmsRadio(context).send(mum, listOf("On my way"), listOf(intent))
+        SystemSmsRadio(context).send(mum, "On my way", listOf("On my way"), listOf(intent))
         val sent = shadowOf(context.getSystemService(SmsManager::class.java))
             .lastSentTextMessageParams
         assertEquals(mum, sent.destinationAddress)
