@@ -5,7 +5,7 @@ Minimalist multi-protocol messaging app for the Light Phone III. WhatsApp (whats
 ## Device
 
 - **Light Phone III**: Nearly square screen — 1080x1240 @ 480dpi, 3.92" matte AMOLED. Do NOT assume standard tall smartphone proportions.
-- Android 13, arm64-v8a only
+- Android 14+ (API ≥34; confirm with `adb shell getprop ro.build.version.sdk`), arm64-v8a only
 - Physical: scroll dial, two-stage camera button, home/menu button
 - **Scroll dial**: Pixart pat9126ja optical rotary encoder (`/dev/input/event4`). LightOS maps to custom keycodes: `WHEEL_CW` (318, clockwise/down) and `WHEEL_CCW` (317, counter-clockwise/up). Raw Linux events are KEY_T/KEY_R but Generic.kl remaps them. Intercepted in `MainActivity.dispatchKeyEvent` → `ScrollDialState` → `ScrollDialEffect` composable.
 
@@ -14,8 +14,8 @@ Minimalist multi-protocol messaging app for the Light Phone III. WhatsApp (whats
 Photon should feel native to the LP3. Understand these rules, then make deliberate exceptions when needed — don't deviate by accident.
 
 ### Font
-- **Public Sans** is the LP3 ecosystem font (LightOS, Luma launcher, Echo). Bundled in Echo at `assets/fonts/PublicSans-Regular.ttf`.
-- We currently use Compose default (Roboto). Switching to Public Sans is a deliberate future choice.
+- LightOS uses **Akkurat**, which ships as a system font on the LP3. The Light SDK's `lightFontFamily()` (`com.thelightphone.sdk.ui`, `LightFont.kt`) loads it from system fonts. If those are missing, it uses a locally bundled copy (licence permitting), and after that the Compose default.
+- Photon currently uses the Compose default (Roboto) and is moving to the SDK's font and type scale (`LightText` / `LightTextVariant`) as part of the Light SDK UI restyle. Public Sans is not the LightOS font, so don't switch to it.
 
 ### Color Palette (monochrome + semantic)
 | Role | Hex | Notes |
@@ -102,18 +102,18 @@ Platform-specific screens are thin wrappers (~20-30 lines) that provide data sou
 - **LID JIDs**: WhatsApp uses `@lid` JIDs for many conversations. The message handler resolves LID→phone via `GetPNForLID` for consistent conversation keys.
 - **Empty messages**: Sender key distribution messages in groups have no content — filtered out in handler.
 - **Conversation naming**: Only use push name from non-self messages (`!isFromMe`). Push name events use `UpdateConversationNameIfEmpty` to avoid overwriting contact names.
-- **Group names**: Fetched via `GetGroupInfo()` on each message. Participant push names stored in participants table.
+- **Group names**: When a group message arrives, the name is fetched via `GetGroupInfo()` and cached per group for an hour (`groupName()` in `handlers.go`). `events.GroupInfo` rename events update the cache and the conversation name immediately. Participant push names are stored in the participants table.
 - **History sync**: Only happens during initial pairing. Re-pairing needed for full refresh (Reset in settings).
 
 ## Signal quirks
 
 - **Java Records**: Turasa v143 uses `LinkDeviceRequest` as a Java Record. Android desugaring can't serialize via Jackson. Fixed with `AndroidRecordFix.kt` which patches JsonUtil's ObjectMapper via reflection to handle specific Record classes.
 - **Self-signed CA**: Signal uses its own CA. Bundled as `res/raw/signal_ca.pem`, loaded into BKS keystore at runtime via `SignalConfig.init()`.
-- **Kyber pre-keys**: Must be stored as `is_last_resort=1` or `markKyberPreKeyUsed()` deletes them.
-- **Pre-key upload**: `KeysApi.setPreKeys()` via WebSocket returns 422. Workaround: upload via `PushServiceSocket.makeServiceRequest()` using reflection.
+- **Kyber pre-keys**: The last-resort Kyber key, generated at registration and on every refill, must be stored via `storeLastResortKyberPreKey` (`is_last_resort=1`), or `markKyberPreKeyUsed()` deletes it. One-time Kyber pre-keys are stored with `is_last_resort=0` and deleted on use.
+- **Pre-key refill**: `uploadPreKeysIfNeeded` (in `SignalMessageReceiver`) runs when the server's ACI EC or Kyber count drops below 10. It rotates the signed pre-key and the last-resort Kyber key, then uploads fresh batches via `KeysApi.setPreKeys()`. Always rotate the signed pre-key: re-uploading the registration-time one was rejected with 422 "Invalid signature", which starved the server of one-time keys. If `KeysApi` fails, the upload falls back to `PushServiceSocket.makeServiceRequest()` via reflection (`serviceRequest()` in `SignalConfig.kt`).
 - **Sync message destinations**: Use `destinationServiceIdBinary` field, not the string `destinationServiceId`.
 - **AccountAttributes.Capabilities**: All must be `true` for linked device registration.
-- **Device name**: Set via `store.DeviceProps.Os` before client creation in Go bridge (WhatsApp) and `AccountAttributes.name` (Signal).
+- **Device name**: Set via `store.DeviceProps.Os` before client creation in Go bridge (WhatsApp) and `AccountAttributes.name` (Signal). The Signal name must be encrypted with `DeviceNameUtil.encryptDeviceName`; plaintext shows up garbled in the primary's linked-devices list.
 
 ## Speech/voice on LP3
 
@@ -128,13 +128,20 @@ Platform-specific screens are thin wrappers (~20-30 lines) that provide data sou
 - **Contact resolution**: Uses `ContactsContract.PhoneLookup` with caching.
 - **No MMS**: Only SMS supported currently.
 
-## Known issues
+## Known issues and verification
 
-The `Known issues` section in `README.md` is the source of truth for current bugs and limitations. Keep it accurate:
+Two files track problems. Keep both accurate.
 
-- **When you discover a new bug or limitation** during development, add it to the Known issues list in README.md.
-- **When the user confirms an issue is fixed**, remove it from the Known issues list. Only remove issues when the user explicitly confirms the fix — don't remove them just because code was changed.
-- **When a fix is partial** (e.g., mitigated but not fully resolved), update the description to reflect current state.
+- **`README.md` → Known issues** lists open bugs and by-design limitations only, one line each: a bold title and one sentence giving the symptom or limitation and its current state. Group entries under Bugs (including Inconsistencies) and Limitations.
+- **`docs/VERIFY.md`** lists fixes that are implemented but not yet confirmed on the LP3, grouped by platform (WhatsApp, Signal, SMS, App). Each entry gives what was wrong, what changed, exact on-device verification steps (actions, expected result, and the useful `adb logcat` lines or DB queries), and caveats such as "needs a re-pair".
+- Neither file holds fix narratives. Root-cause stories go in commit messages.
+
+Lifecycle:
+
+1. **New bug or limitation found**: add a one-liner to README Known issues.
+2. **Fix implemented**: move the entry to `docs/VERIFY.md` with verification steps and remove it from the README. If the fix is partial, keep a one-line README entry for what's still open and mark the VERIFY entry *(partial)*.
+3. **User confirms on device**: delete the VERIFY entry, and its partial README line if it has one. Only do this when the user explicitly confirms. A code change or a passing test is not confirmation. The fix history stays in git.
+4. **Verification fails**: move the entry back to README Known issues as an open bug, saying what you saw.
 
 ## Notifications
 
