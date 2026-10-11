@@ -627,25 +627,13 @@ class SignalMessageReceiver(
             localAddress, deviceId, protocolStore, sessionLock, certificateValidator,
         )
 
-        Log.d(TAG, "Starting message read loop")
         while (isCurrent(gen)) {
             try {
-                val hasMore = ws.readMessageBatch(MESSAGE_POLL_TIMEOUT_MS, 10) { envelopes ->
-                    Log.i(TAG, "Received batch of ${envelopes.size} envelopes")
-                    for (envelope in envelopes) {
-                        val env = envelope.envelope
-                        Log.i(
-                            TAG,
-                            "Envelope type=${env.type} src=${env.sourceServiceId ?: "sealed"} " +
-                                "dest=${env.destinationServiceId} urgent=${env.urgent} " +
-                                "contentLen=${env.content?.size ?: 0}",
-                        )
-                        processEnvelope(envelope, cipher, ws)
-                    }
+                ws.readMessageBatch(MESSAGE_POLL_TIMEOUT_MS, 10) { envelopes ->
+                    for (envelope in envelopes) processEnvelope(envelope, cipher, ws)
                 }
-                Log.d(TAG, "readMessageBatch returned, hasMore=$hasMore")
-            } catch (e: java.util.concurrent.TimeoutException) {
-                Log.d(TAG, "Read timeout (normal), looping")
+            } catch (_: java.util.concurrent.TimeoutException) {
+                // No traffic within the poll window: loop.
             } catch (e: Exception) {
                 Log.e(TAG, "Error reading messages", e)
                 throw e
@@ -765,14 +753,6 @@ class SignalMessageReceiver(
     }
 
     private fun processContent(content: Content, metadata: EnvelopeMetadata, envelopeResponse: EnvelopeResponse) {
-        Log.i(TAG, "Decrypted envelope from ${metadata.sourceServiceId}, " +
-            "hasData=${content.dataMessage != null}, " +
-            "hasSync=${content.syncMessage != null}, " +
-            "hasCall=${content.callMessage != null}, " +
-            "hasReceipt=${content.receiptMessage != null}, " +
-            "hasTyping=${content.typingMessage != null}, " +
-            "hasSenderKeyDistribution=${content.senderKeyDistributionMessage != null}")
-
         content.senderKeyDistributionMessage?.let {
             processSenderKeyDistribution(it.toByteArray(), metadata)
         }
@@ -1102,8 +1082,6 @@ class SignalMessageReceiver(
         app.photon.service.NotificationHelper.showMessageNotification(
             context, notifTitle, notifBody, app.photon.data.model.Platform.SIGNAL, conversationJid,
         )
-
-        Log.d(TAG, "Stored message from $senderAci: ${body?.take(30) ?: contentType}")
     }
 
     // ── Calls ──
@@ -1344,34 +1322,16 @@ class SignalMessageReceiver(
     }
 
     private fun processSyncMessage(sync: SyncMessage, metadata: EnvelopeMetadata) {
-        // Enumerate every non-null sub-field so we know which kind of sync this is.
-        val kinds = buildList {
-            if (sync.sent != null) add("sent")
-            if (sync.contacts != null) add("contacts")
-            if (sync.groups != null) add("groups")
-            if (sync.request != null) add("request")
-            if (sync.blocked != null) add("blocked")
-            if (sync.verified != null) add("verified")
-            if (sync.configuration != null) add("configuration")
-            if (sync.viewOnceOpen != null) add("viewOnceOpen")
-            sync.fetchLatest?.let { add("fetchLatest(${it.type})") }
-            if (sync.keys != null) add("keys")
-            if (sync.messageRequestResponse != null) add("messageRequestResponse")
-            if (sync.outgoingPayment != null) add("outgoingPayment")
-            if (sync.pniChangeNumber != null) add("pniChangeNumber")
-            if (sync.callEvent != null) add("callEvent")
-            if (sync.callLinkUpdate != null) add("callLinkUpdate")
-            if (sync.callLogEvent != null) add("callLogEvent")
-            if (sync.deleteForMe != null) add("deleteForMe")
-            if (sync.deviceNameChange != null) add("deviceNameChange")
-            if (sync.attachmentBackfillRequest != null) add("attachmentBackfillRequest")
-            if (sync.attachmentBackfillResponse != null) add("attachmentBackfillResponse")
-            if (!sync.read.isNullOrEmpty()) add("read[${sync.read.size}]")
-            if (!sync.viewed.isNullOrEmpty()) add("viewed[${sync.viewed.size}]")
-            if (!sync.stickerPackOperation.isNullOrEmpty()) add("stickerPackOperation[${sync.stickerPackOperation.size}]")
-            sync.padding?.let { if (it.size > 0) add("padding[${it.size}B]") }
-        }
-        Log.i(TAG, "Sync message kinds: ${if (kinds.isEmpty()) "<none>" else kinds.joinToString(",")}")
+        // What this sync carries that Photon acts on (docs/VERIFY.md looks for this line).
+        val kinds = listOfNotNull(
+            "sent".takeIf { sync.sent != null },
+            "read[${sync.read.size}]".takeIf { !sync.read.isNullOrEmpty() },
+            "contacts".takeIf { sync.contacts != null },
+            "verified".takeIf { sync.verified != null },
+            "callEvent".takeIf { sync.callEvent != null },
+            "callLogEvent".takeIf { sync.callLogEvent != null },
+        )
+        if (kinds.isNotEmpty()) Log.i(TAG, "Sync message kinds: ${kinds.joinToString(",")}")
         sync.verified?.let { verified ->
             try {
                 val applied = applySignalVerificationSync(
@@ -1387,9 +1347,6 @@ class SignalMessageReceiver(
         sync.callLogEvent?.let { processCallLogEvent(it) }
         // Sent messages from our primary device
         val sent = sync.sent
-        if (sent != null) {
-            Log.d(TAG, "Sync sent to ${sent.destinationServiceId ?: sent.destinationE164}")
-        }
         if (sent != null && sent.message != null) {
             val data = sent.message!!
             val timestamp = data.timestamp ?: System.currentTimeMillis()
