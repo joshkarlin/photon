@@ -18,7 +18,7 @@ class SignalMessageDatabaseUpgradeTest {
 
     private val context = ApplicationProvider.getApplicationContext<Context>()
 
-    /** The tables as v3 and v4 created them. */
+    /** The tables as v3, v4 and v5 created them. */
     private fun createOldSchema(db: SQLiteDatabase) {
         db.execSQL(
             "CREATE TABLE conversations (jid TEXT PRIMARY KEY, name TEXT, is_group INTEGER NOT NULL DEFAULT 0, " +
@@ -100,6 +100,41 @@ class SignalMessageDatabaseUpgradeTest {
             assertEquals(listOf(null, null), db.getParticipants("grp-named").map { it.displayName })
             assertEquals("+447700900123", db.getContact("aci-dm")?.phone)
             assertEquals("Jane", db.getContact("aci-dm")?.profileName)
+        } finally {
+            db.close()
+        }
+    }
+
+    /**
+     * v5 → v6: conversations gain muted_until (every chat unmuted until the
+     * storage service is read) and the storage tables appear. Nothing else
+     * changes.
+     */
+    @Test
+    fun upgradeAddsUnmutedMuteEndsAndStorageTables() {
+        context.openOrCreateDatabase(SignalMessageDatabase.DATABASE_NAME, Context.MODE_PRIVATE, null).use { v5 ->
+            createOldSchema(v5)
+            v5.execSQL("INSERT INTO conversations (jid, name, is_group, unread_count) VALUES ('aci-dm', NULL, 0, 2), ('grp', 'Climbing', 1, 0)")
+            v5.execSQL(
+                "INSERT INTO messages (id, conversation_jid, sender_jid, timestamp, content_type, text_body, is_from_me, status) " +
+                    "VALUES ('aci-dm_1_x', 'aci-dm', 'aci-dm', 1, 'text', 'm', 0, 'received')",
+            )
+            v5.version = 5
+        }
+
+        val db = SignalMessageDatabase(context)
+        try {
+            assertEquals(6, db.readableDatabase.version)
+            val dm = db.getConversation("aci-dm")
+            assertEquals(false, dm?.isMuted)
+            assertEquals(2, dm?.unreadCount)
+            assertEquals("Climbing", db.getConversation("grp")?.name)
+            assertEquals(MessageStatus.UNREAD, db.getMessage("aci-dm_1_x")?.status)
+            assertNull(db.storageManifestVersion())
+
+            db.applyStorageManifest(4, emptyList(), listOf(StorageMute("s1", "grp", -1)))
+            assertEquals(true, db.getConversation("grp")?.isMuted)
+            assertEquals(false, db.getConversation("aci-dm")?.isMuted)
         } finally {
             db.close()
         }

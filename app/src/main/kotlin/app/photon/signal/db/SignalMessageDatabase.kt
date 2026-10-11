@@ -11,10 +11,11 @@ import kotlinx.coroutines.flow.SharedFlow
  * Photon's Signal message store: schema, migrations and change
  * notifications. The queries are extension functions grouped by concern in
  * this package: SignalConversations, SignalMessages, SignalReadState,
- * SignalContacts, SignalReactions, SignalCallRows and SignalRetention.
+ * SignalContacts, SignalReactions, SignalCallRows, SignalRetention and
+ * SignalStorageMutes.
  */
 class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
-    context, DATABASE_NAME, null, 5,
+    context, DATABASE_NAME, null, 6,
 ) {
     companion object {
         const val DATABASE_NAME = "signal_messages.db"
@@ -48,7 +49,8 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                 avatar_url      TEXT,
                 updated_at      INTEGER NOT NULL DEFAULT 0,
                 master_key      BLOB,
-                group_revision  INTEGER NOT NULL DEFAULT 0
+                group_revision  INTEGER NOT NULL DEFAULT 0,
+                muted_until     INTEGER NOT NULL DEFAULT 0
             )
         """)
         db.execSQL("""
@@ -102,6 +104,7 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                 updated_at   INTEGER NOT NULL DEFAULT 0
             )
         """)
+        createStorageTables(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -142,6 +145,40 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         if (oldVersion < 5) {
             clearStoredDisplayNames(db)
         }
+        if (oldVersion < 6) {
+            // Mutes read from the primary's storage service. Every chat starts
+            // unmuted (Signal never wrote is_muted); the first storage read
+            // after the upgrade fills them in.
+            try {
+                db.execSQL("ALTER TABLE conversations ADD COLUMN muted_until INTEGER NOT NULL DEFAULT 0")
+            } catch (_: Exception) {
+                // Column may already exist on partially-upgraded databases
+            }
+            createStorageTables(db)
+        }
+    }
+
+    /**
+     * What Photon has read from the storage service (SignalStorageMutes):
+     * each contact and GroupV2 record it has seen, by storage id, with the
+     * conversation it maps to and its mute; and the manifest version those
+     * records belong to (one row, id 1).
+     */
+    private fun createStorageTables(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS storage_records (
+                storage_id  TEXT PRIMARY KEY,
+                jid         TEXT,
+                muted_until INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_storage_records_jid ON storage_records(jid)")
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS storage_manifest (
+                id      INTEGER PRIMARY KEY CHECK (id = 1),
+                version INTEGER NOT NULL
+            )
+        """)
     }
 
     /**

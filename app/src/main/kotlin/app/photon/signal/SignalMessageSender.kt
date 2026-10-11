@@ -20,6 +20,7 @@ import org.whispersystems.signalservice.api.messages.SignalServiceDataMessage
 import org.whispersystems.signalservice.api.messages.multidevice.ReadMessage
 import org.whispersystems.signalservice.api.messages.multidevice.RequestMessage
 import org.whispersystems.signalservice.api.messages.multidevice.SignalServiceSyncMessage
+import org.whispersystems.signalservice.internal.push.SyncMessage
 import org.whispersystems.signalservice.api.push.SignalServiceAddress
 import org.whispersystems.signalservice.api.websocket.SignalWebSocket
 
@@ -408,18 +409,27 @@ class SignalMessageSender internal constructor(
      * to the user's address book.
      */
     fun requestContactsSync() {
+        requestSync(SyncMessage.Request.Type.CONTACTS, "contacts")
+    }
+
+    /**
+     * Ask the primary for the account keys: it answers with a Keys sync
+     * carrying the account entropy pool, from which the storage key comes.
+     * Returns whether the request went out.
+     */
+    fun requestKeysSync(): Boolean = requestSync(SyncMessage.Request.Type.KEYS, "keys")
+
+    private fun requestSync(type: SyncMessage.Request.Type, what: String): Boolean =
         try {
             val sender = connection.getOrCreateSender()
-            val request = RequestMessage.forType(
-                org.whispersystems.signalservice.internal.push.SyncMessage.Request.Type.CONTACTS,
-            )
-            sender.sendSyncMessage(SignalServiceSyncMessage.forRequest(request))
-            Log.i(TAG, "Requested contacts sync from primary")
+            sender.sendSyncMessage(SignalServiceSyncMessage.forRequest(RequestMessage.forType(type)))
+            Log.i(TAG, "Requested $what sync from primary")
+            true
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to request contacts sync: ${e.message}")
+            Log.w(TAG, "Failed to request $what sync: ${e.message}")
             invalidate()
+            false
         }
-    }
 
     fun attachReceiverWebSockets(
         authWs: SignalWebSocket.AuthenticatedWebSocket,

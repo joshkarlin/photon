@@ -21,6 +21,8 @@ import app.photon.signal.receiver.RemoteEdits
 import app.photon.signal.receiver.SessionPings
 import app.photon.signal.receiver.SignalNotifier
 import app.photon.signal.receiver.SyncMessageHandler
+import app.photon.signal.storage.LibraryStorageReader
+import app.photon.signal.storage.StorageMuteSync
 import app.photon.signal.store.PhotonProtocolStore
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
@@ -103,6 +105,16 @@ class SignalMessageReceiver(
             }
         },
     )
+    // Chat mutes from the storage service, read over the live connection.
+    private val storageMutes = StorageMuteSync(
+        credentials, messageDb, scope,
+        reader = {
+            val pair = sockets
+            val ps = pushSocket
+            if (pair != null && ps != null) LibraryStorageReader(pair.auth, ps) else null
+        },
+        requestKeys = sender::requestKeysSync,
+    )
     private val receipts = Receipts(credentials, messageDb)
     private val messageNotifications = MessageNotifications(messageDb, names, notifier)
     private val remoteEdits = RemoteEdits(messageDb, messageNotifications)
@@ -112,7 +124,7 @@ class SignalMessageReceiver(
     )
     private val syncMessages = SyncMessageHandler(
         credentials, protocolStore.identityStore, messageDb, contactNames, groupMetadata,
-        calls, remoteEdits, contactsSync, earlyReads, notifier, scope,
+        calls, remoteEdits, contactsSync, earlyReads, notifier, storageMutes, scope,
     )
     private val sessionLock = SignalConfig.newSessionLock()
     private val envelopeProcessor = EnvelopeProcessor(
@@ -246,6 +258,7 @@ class SignalMessageReceiver(
         }
         if (!drained) Log.w(TAG, "Reset: receiver work still running after ${RESET_DRAIN_TIMEOUT_MS}ms")
         contactsSyncRequested = false
+        storageMutes.reset()
         sessionPings.reset()
         earlyReads.clear()
         envelopeProcessor.clearHeld()
@@ -450,6 +463,7 @@ class SignalMessageReceiver(
     ): Boolean {
         scope.launch { contactNames.sweepProfiles() }
         scope.launch { groupMetadata.refreshGroupsNeedingMetadata() }
+        storageMutes.onConnected()
 
         // Upload one-time pre-keys if they haven't been uploaded yet
         return preKeyRefill.uploadPreKeysIfNeeded(ws, unauthWs)

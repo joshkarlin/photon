@@ -7,6 +7,7 @@ import app.photon.signal.SignalNames
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.db.SignalMessageDatabase.RemoteDeleteChange
 import app.photon.signal.db.getConversation
+import app.photon.signal.db.isConversationMuted
 import app.photon.signal.db.newestUnreadMessage
 
 /** What a conversation's message notification should do after a delete-for-everyone. */
@@ -34,11 +35,16 @@ internal fun notificationAfterRemoteDelete(
     else -> AfterRemoteDelete.Show(newestUnread())
 }
 
-/** Signal message notifications: titles and previews, posted and corrected. */
+/**
+ * Signal message notifications: titles and previews, posted and corrected.
+ * A chat muted on the primary (storage service) posts none; its messages
+ * still count as unread.
+ */
 internal class MessageNotifications(
     private val messageDb: SignalMessageDatabase,
     private val names: SignalNames,
     private val notifier: SignalNotifier,
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     /**
      * For groups, the title is the group name (with the sender's name woven
@@ -53,6 +59,8 @@ internal class MessageNotifications(
         contentType: String,
         update: Boolean = false,
     ) {
+        // A correction only replaces a notification that is already up.
+        if (!update && messageDb.isConversationMuted(conversationJid, clock() / 1000)) return
         val notification = messageNotificationText(
             conversationTitle = names.title(conversationJid, isGroup),
             isGroup = isGroup,
