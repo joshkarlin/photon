@@ -156,32 +156,6 @@ class SignalMessageReceiver(
                 receiveLoop(gen)
             }
         }
-        scope.launch {
-            try { messageDb.repairConversationTimestamps() }
-            catch (e: Exception) { Log.w(TAG, "Timestamp repair failed: ${e.message}") }
-            // Clean up duplicate rows a pre-dedup build stored when a Signal
-            // message was redelivered (one group message landed 36 times).
-            try {
-                val removed = messageDb.deleteDuplicateMessages()
-                if (removed > 0) Log.i(TAG, "Removed $removed duplicate message rows")
-            } catch (e: Exception) { Log.w(TAG, "Duplicate cleanup failed: ${e.message}") }
-            // One-shot migration: clear primary-device-sourced names and
-            // re-resolve every conversation title from this device's local
-            // contacts. Idempotent past first run via the prefs flag.
-            try {
-                val prefs = context.getSharedPreferences("signal_migrations", android.content.Context.MODE_PRIVATE)
-                if (!prefs.getBoolean("local_contacts_authoritative_v1", false)) {
-                    messageDb.clearAllStoredProfileNames()
-                    val n = messageDb.reresolveConversationNames { phone ->
-                        contactResolver.resolve(phone)
-                    }
-                    Log.i(TAG, "Migration: cleared stored profile names and re-resolved $n conversations from local contacts")
-                    prefs.edit().putBoolean("local_contacts_authoritative_v1", true).apply()
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Local-contacts migration failed: ${e.message}")
-            }
-        }
     }
 
     /**

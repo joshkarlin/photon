@@ -596,42 +596,6 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         return cleared
     }
 
-    /**
-     * Collapse duplicate rows sharing the same "{author}_{timestampMs}" id
-     * prefix, keeping the earliest-inserted (lowest rowid). (author, sent
-     * timestamp) uniquely identifies a Signal message, so any extra rows are
-     * redeliveries a pre-dedup build stored — one group message arrived 36
-     * times. Returns the number of rows removed.
-     */
-    fun deleteDuplicateMessages(): Int {
-        val seen = HashSet<String>()
-        val toDelete = ArrayList<String>()
-        // Call rows aren't "{author}_{ts}_{rand}" ids: two calls from the same
-        // peer share prefixOf() and must not be collapsed.
-        readableDatabase.rawQuery(
-            "SELECT id FROM messages WHERE content_type != ? ORDER BY rowid",
-            arrayOf(CONTENT_CALL),
-        ).use { c ->
-            val idIdx = c.getColumnIndexOrThrow("id")
-            while (c.moveToNext()) {
-                val id = c.getString(idIdx)
-                if (!seen.add(MessageKeys.prefixOf(id))) toDelete.add(id)
-            }
-        }
-        if (toDelete.isEmpty()) return 0
-        writableDatabase.beginTransaction()
-        try {
-            for (id in toDelete) {
-                writableDatabase.execSQL("DELETE FROM messages WHERE id = ?", arrayOf(id))
-            }
-            writableDatabase.setTransactionSuccessful()
-        } finally {
-            writableDatabase.endTransaction()
-        }
-        notifyChanged()
-        return toDelete.size
-    }
-
     /** Remove a message and its reactions from the local DB. */
     fun deleteMessage(id: String) {
         writableDatabase.execSQL("DELETE FROM messages WHERE id = ?", arrayOf(id))
@@ -872,19 +836,6 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     /**
-     * Wipe `profile_name` on every contact so the Signal profile fetcher
-     * will refetch on next message activity. Used as a one-shot migration
-     * when the resolution policy changes — clears stale names sourced from
-     * the primary device's address book.
-     */
-    fun clearAllStoredProfileNames() {
-        writableDatabase.execSQL(
-            "UPDATE contacts SET profile_name = NULL, profile_fetched_at = 0",
-        )
-        notifyChanged()
-    }
-
-    /**
      * For each existing conversation, look at the row's stored phone (from
      * the contacts table) and reset `name` to whatever the supplied resolver
      * returns. Used to re-derive conversation titles from local contacts
@@ -953,28 +904,6 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             }
         }
         return out
-    }
-
-    /**
-     * Repair last_timestamp on every conversation whose row is desynced from
-     * the messages table — sets it to MAX(messages.timestamp) where the
-     * conversation has any messages stored. Idempotent; safe to run on every
-     * startup. Needed because an earlier bug in upsertConversation
-     * (CONFLICT_REPLACE) used to zero-out last_timestamp whenever contacts
-     * sync ran, hiding active chats from the recent-chats sort.
-     */
-    fun repairConversationTimestamps() {
-        writableDatabase.execSQL(
-            """
-            UPDATE conversations
-            SET last_timestamp = COALESCE(
-                (SELECT MAX(timestamp) FROM messages WHERE messages.conversation_jid = conversations.jid),
-                last_timestamp
-            )
-            WHERE EXISTS (SELECT 1 FROM messages WHERE messages.conversation_jid = conversations.jid)
-            """,
-        )
-        notifyChanged()
     }
 
     /**
