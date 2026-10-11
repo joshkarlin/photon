@@ -89,8 +89,17 @@ func TestApplyRevoke_retriesWhenTheDatabaseIsBusy(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	lock.Rollback()
 
+	// Poll without failing on a busy read: with no busy timeout, a read that
+	// lands on the retry's commit errors instead of waiting for it.
+	statusNow := func() string {
+		var s string
+		if err := b.msgDB.QueryRow(`SELECT status FROM messages WHERE id = ?`, "m1").Scan(&s); err != nil {
+			return ""
+		}
+		return s
+	}
 	deadline := time.Now().Add(5 * time.Second)
-	for messageStatus(t, b, "m1") != "deleted" {
+	for statusNow() != "deleted" {
 		if time.Now().After(deadline) {
 			t.Fatal("revoke never applied after the lock went")
 		}
