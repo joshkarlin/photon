@@ -3,6 +3,7 @@ package app.photon.signal
 import android.util.Base64
 import android.util.Log
 import app.photon.signal.db.SignalMessageDatabase
+import app.photon.signal.db.pruneMessages
 import app.photon.signal.receiver.AndroidSignalNotifier
 import app.photon.signal.receiver.Attachments
 import app.photon.signal.receiver.CallHandler

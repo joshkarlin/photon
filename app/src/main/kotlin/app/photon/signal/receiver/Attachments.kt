@@ -4,12 +4,16 @@ import android.content.Context
 import android.util.Log
 import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.db.SignalMessageDatabase
+import app.photon.signal.db.clearMediaUrlByPath
+import app.photon.signal.db.getMessage
+import app.photon.signal.db.getMessageRawProto
+import app.photon.signal.db.updateMediaUrl
+import java.io.File
 import org.whispersystems.signalservice.api.SignalServiceMessageReceiver
 import org.whispersystems.signalservice.api.crypto.AttachmentCipherInputStream
 import org.whispersystems.signalservice.api.util.AttachmentPointerUtil
 import org.whispersystems.signalservice.internal.push.AttachmentPointer
 import org.whispersystems.signalservice.internal.push.PushServiceSocket
-import java.io.File
 
 private const val TAG = SignalMessageReceiver.TAG
 

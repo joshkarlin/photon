@@ -3,6 +3,11 @@ package app.photon.signal
 import android.util.Base64
 import android.util.Log
 import app.photon.signal.db.SignalMessageDatabase
+import app.photon.signal.db.updateContactProfileName
+import java.util.Locale
+import java.util.Optional
+import java.util.UUID
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -15,10 +20,6 @@ import org.whispersystems.signalservice.api.push.SignalServiceAddress
 import org.whispersystems.signalservice.api.services.ProfileService
 import org.whispersystems.signalservice.api.websocket.SignalWebSocket
 import org.whispersystems.signalservice.internal.configuration.SignalServiceConfiguration
-import java.util.Locale
-import java.util.Optional
-import java.util.UUID
-import java.util.concurrent.TimeUnit
 
 /**
  * Fetches and decrypts Signal profile names using the authenticated websocket.

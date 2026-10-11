@@ -5,6 +5,7 @@ import android.util.Log
 import app.photon.signal.SignalCredentials
 import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.db.SignalMessageDatabase
+import app.photon.signal.db.getSessionPingTargetAcis
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch

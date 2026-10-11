@@ -6,6 +6,12 @@ import app.photon.signal.ConversationNaming
 import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.SignalProfileFetcher
 import app.photon.signal.db.SignalMessageDatabase
+import app.photon.signal.db.getAciForPhone
+import app.photon.signal.db.getContact
+import app.photon.signal.db.getContactsWithProfileKeyButNoName
+import app.photon.signal.db.reresolveConversationNames
+import app.photon.signal.db.updateContactPhone
+import app.photon.signal.db.upsertConversation
 import org.signal.core.models.ServiceId
 
 private const val TAG = SignalMessageReceiver.TAG

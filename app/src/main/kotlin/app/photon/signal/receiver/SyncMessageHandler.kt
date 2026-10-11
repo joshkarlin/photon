@@ -8,15 +8,24 @@ import app.photon.signal.SignalGroupV2Manager
 import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.applySignalVerificationSync
 import app.photon.signal.db.SignalMessageDatabase
+import app.photon.signal.db.findMessageByPrefix
+import app.photon.signal.db.getContact
+import app.photon.signal.db.insertMessage
+import app.photon.signal.db.markConversationRead
+import app.photon.signal.db.markIncomingReadByPrefix
+import app.photon.signal.db.updateContactPhone
+import app.photon.signal.db.updateContactProfileKey
+import app.photon.signal.db.updateConversationLastMessage
+import app.photon.signal.db.upsertConversation
 import app.photon.signal.replyPrefix
 import app.photon.signal.serviceIdString
 import app.photon.signal.store.PhotonIdentityKeyStore
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import org.signal.core.models.ServiceId
 import org.whispersystems.signalservice.api.crypto.EnvelopeMetadata
 import org.whispersystems.signalservice.internal.push.SyncMessage
-import java.util.UUID
 
 private const val TAG = SignalMessageReceiver.TAG
 

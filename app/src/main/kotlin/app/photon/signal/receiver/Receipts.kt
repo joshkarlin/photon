@@ -4,6 +4,7 @@ import android.util.Log
 import app.photon.signal.SignalCredentials
 import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.db.SignalMessageDatabase
+import app.photon.signal.db.updateStatusByIdPrefix
 import org.whispersystems.signalservice.api.crypto.EnvelopeMetadata
 import org.whispersystems.signalservice.internal.push.Envelope
 

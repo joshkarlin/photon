@@ -4,6 +4,9 @@ import android.util.Log
 import app.photon.signal.IncomingReaction
 import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.db.SignalMessageDatabase
+import app.photon.signal.db.markDeletedByPrefix
+import app.photon.signal.db.removeReaction
+import app.photon.signal.db.upsertReaction
 import app.photon.signal.incomingReactionFor
 import org.whispersystems.signalservice.internal.push.DataMessage
 

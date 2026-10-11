@@ -5,13 +5,15 @@ import android.util.Log
 import app.photon.signal.AndroidContactResolver
 import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.db.SignalMessageDatabase
+import app.photon.signal.db.updateContactPhone
+import app.photon.signal.db.upsertConversation
+import java.io.File
 import org.whispersystems.signalservice.api.SignalServiceMessageReceiver
 import org.whispersystems.signalservice.api.crypto.AttachmentCipherInputStream
 import org.whispersystems.signalservice.api.messages.multidevice.DeviceContactsInputStream
 import org.whispersystems.signalservice.api.util.AttachmentPointerUtil
 import org.whispersystems.signalservice.internal.push.AttachmentPointer
 import org.whispersystems.signalservice.internal.push.PushServiceSocket
-import java.io.File
 
 private const val TAG = SignalMessageReceiver.TAG
 

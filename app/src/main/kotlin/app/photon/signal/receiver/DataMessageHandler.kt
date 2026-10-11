@@ -6,12 +6,17 @@ import app.photon.signal.EarlyReadCache
 import app.photon.signal.SignalGroupV2Manager
 import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.db.SignalMessageDatabase
+import app.photon.signal.db.insertIncomingMessage
+import app.photon.signal.db.updateContactPhone
+import app.photon.signal.db.updateContactProfileKey
+import app.photon.signal.db.upsertConversation
+import app.photon.signal.db.upsertParticipant
 import app.photon.signal.replyPrefix
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import org.whispersystems.signalservice.api.crypto.EnvelopeMetadata
 import org.whispersystems.signalservice.internal.push.DataMessage
-import java.util.UUID
 
 private const val TAG = SignalMessageReceiver.TAG
 
