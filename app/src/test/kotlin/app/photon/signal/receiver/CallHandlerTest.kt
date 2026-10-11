@@ -139,6 +139,26 @@ class CallHandlerTest {
         assertEquals(1, scheduled.size)
     }
 
+    /**
+     * Calls left ringing long ago (by a build without ring expiry) become
+     * missed without coming back as unread or notifying: on the first start
+     * they would otherwise all ring out at once.
+     */
+    @Test
+    fun longStaleRingingRowsBecomeMissedQuietly() {
+        fx.db.upsertConversation(jid = peer, name = "Caller", isGroup = false)
+        val old = SignalCalls.rowId(peer, 1)
+        fx.db.upsertCallRow(old, peer, peer, (t0 - 2 * 24 * 3_600_000L) / 1000, "Incoming voice call", unread = false)
+
+        calls.expireStaleRinging()
+
+        assertEquals("Missed voice call", fx.db.getMessage(old)?.textBody)
+        assertEquals("read", fx.db.getMessage(old)?.status)
+        assertEquals(0, unread())
+        assertEquals(emptyList(), fx.notifier.events)
+        assertEquals(emptyList(), scheduled)
+    }
+
     /** After a restart: rows past the timeout are missed at once, younger ones get a timer. */
     @Test
     fun startupSweepExpiresStaleRingingRowsAndSchedulesTheRest() {

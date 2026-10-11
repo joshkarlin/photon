@@ -43,6 +43,11 @@ internal object SignalCalls {
     // this device.
     const val RING_TIMEOUT_MS = OFFER_MAX_AGE_MS
 
+    // A row whose ring timeout passed longer ago than this (left by a build
+    // without ring expiry, or by a process that stayed down) is old news: it
+    // becomes missed without counting unread or notifying.
+    const val QUIET_EXPIRY_AFTER_MS = 60 * 60_000L
+
     fun rowId(peerAci: String, callId: Long): String = "call_${peerAci}_$callId"
 
     /** One row per group call era, however many members announce joining it. */

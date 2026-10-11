@@ -70,7 +70,12 @@ class SignalMessageReceiver(
     private val earlyReads = EarlyReadCache()
     private val preKeyRefill = PreKeyRefill(protocolStore)
     private val sessionPings = SessionPings(context, credentials, messageDb, scope)
-    private val contactNames = ContactNames(messageDb, contactResolver, notifier) { profileFetcher }
+    private val contactNames: ContactNames = ContactNames(
+        messageDb, contactResolver, notifier,
+        profileFetcher = { profileFetcher },
+        // Runs only after construction, once calls is set.
+        onMerged = { calls.expireStaleRinging() },
+    )
     private val groupMetadata = GroupMetadata(messageDb, contactResolver, scope, { groupManager }, sessionPings)
     private val attachments = Attachments(context, messageDb) { pushSocket }
     private val contactsSync = ContactsSync(
@@ -78,7 +83,7 @@ class SignalMessageReceiver(
         pushSocket = { pushSocket },
         onSynced = { contactNames.mergeResolvableServiceIds() },
     )
-    private val calls = CallHandler(
+    private val calls: CallHandler = CallHandler(
         credentials, messageDb, contactNames, groupMetadata, notifier,
         schedule = { delayMs, task ->
             scope.launch {

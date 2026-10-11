@@ -28,6 +28,8 @@ internal class ContactNames(
     private val contactResolver: AndroidContactResolver,
     private val notifier: SignalNotifier,
     private val profileFetcher: () -> SignalProfileFetcher?,
+    // After a merge: renamed call rows need their ring-expiry timers again.
+    private val onMerged: () -> Unit = {},
 ) {
     /**
      * After (re)connecting, sweep for contacts that have a profile key
@@ -86,6 +88,7 @@ internal class ContactNames(
         // These would open a conversation that no longer exists.
         notifier.cancelIncomingCall(stored)
         notifier.cancelConversation(stored)
+        onMerged()
     }
 
     /**

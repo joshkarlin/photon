@@ -1,5 +1,6 @@
 package app.photon.signal.receiver
 
+import app.photon.signal.AndroidContactResolver
 import app.photon.signal.db.getConversation
 import app.photon.signal.db.insertIncomingMessage
 import app.photon.signal.db.updateContactPhone
@@ -50,6 +51,22 @@ class PniMergeTest {
         assertNull(fx.db.getConversation(pni))
         assertEquals(1, fx.db.getConversation(aci)?.unreadCount)
         assertEquals(listOf("cancelRinging:$pni", "cancel:$pni"), fx.notifier.events)
+    }
+
+    /** A merge renames call rows, so the ringing ones need watching again; a no-op merge doesn't. */
+    @Test
+    fun anActualMergeAsksForRingingRowsToBeRewatched() {
+        var merges = 0
+        val names = ContactNames(
+            fx.db, AndroidContactResolver(fx.context), fx.notifier,
+            profileFetcher = { null }, onMerged = { merges++ },
+        )
+        fx.db.updateContactPhone(aci, phone)
+
+        names.mergeResolvableServiceIds()
+        names.mergeResolvableServiceIds()
+
+        assertEquals(1, merges)
     }
 
     @Test

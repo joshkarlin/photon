@@ -38,10 +38,15 @@ internal class CallHandler(
     private val schedule: (delayMs: Long, task: () -> Unit) -> Unit,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
-    // Call rows are read, then rewritten from the read state: the read loop
-    // and ring-expiry timers mustn't interleave on one row.
-    private val callLock = Any()
     private val pendingExpiries = ConcurrentHashMap.newKeySet<String>()
+
+    private companion object {
+        // Call rows are read, then rewritten from the read state: the read
+        // loop and ring-expiry timers mustn't interleave on one row. Process
+        // wide, because a stopped receiver's timers can still fire after a
+        // new receiver has started.
+        val callLock = Any()
+    }
 
     /**
      * 1:1 call signalling. Photon can't take part in the call (no RingRTC),
@@ -134,12 +139,19 @@ internal class CallHandler(
     }
 
     /**
-     * Rows still ringing from before a restart: expire those whose ring
-     * timeout has passed and schedule the rest.
+     * Rows still ringing that no timer is watching: from before a restart,
+     * or renamed by a PNI merge. Those whose ring timeout has passed expire
+     * now (quietly once it's long past), the rest get a timer.
      */
     fun expireStaleRinging() {
+        val now = clock()
         for (row in messageDb.getCallRowsWithText(SignalCalls.RINGING_TEXTS)) {
-            scheduleRingExpiry(row.id, row.timestamp * 1000 + SignalCalls.RING_TIMEOUT_MS)
+            val dueAtMs = row.timestamp * 1000 + SignalCalls.RING_TIMEOUT_MS
+            if (now - dueAtMs > SignalCalls.QUIET_EXPIRY_AFTER_MS) {
+                expireRinging(row.id, quiet = true)
+            } else {
+                scheduleRingExpiry(row.id, dueAtMs)
+            }
         }
     }
 
@@ -161,13 +173,14 @@ internal class CallHandler(
         if (delayMs <= 0) task() else schedule(delayMs, task)
     }
 
-    private fun expireRinging(id: String) {
+    private fun expireRinging(id: String, quiet: Boolean = false) {
         synchronized(callLock) {
             val row = messageDb.getMessage(id) ?: return
-            updateCallRow(id, row.conversationJid, row.textBody, CallSignal.RING_EXPIRED, null, row.timestamp)
+            updateCallRow(id, row.conversationJid, row.textBody, CallSignal.RING_EXPIRED, null, row.timestamp, quiet)
         }
     }
 
+    /** [quiet]: record the outcome without counting it unread or notifying. */
     private fun updateCallRow(
         id: String,
         conversationJid: String,
@@ -175,6 +188,7 @@ internal class CallHandler(
         signal: CallSignal,
         offerIsVideo: Boolean?,
         timestampSeconds: Long,
+        quiet: Boolean = false,
     ): CallOutcome? {
         val current = SignalCalls.parse(currentText)
         val outcome = SignalCalls.next(current?.outcome, signal) ?: return null
@@ -185,9 +199,10 @@ internal class CallHandler(
             senderJid = conversationJid,
             timestamp = timestampSeconds,
             text = SignalCalls.text(state),
-            unread = SignalCalls.isUnread(outcome),
+            unread = SignalCalls.isUnread(outcome) && !quiet,
         )
-        Log.i(TAG, "Call ${id.takeLast(12)}: ${current?.outcome ?: "new"} -> $outcome ($signal)")
+        Log.i(TAG, "Call ${id.takeLast(12)}: ${current?.outcome ?: "new"} -> $outcome ($signal${if (quiet) ", quiet" else ""})")
+        if (quiet) return outcome
 
         when (outcome) {
             CallOutcome.RINGING ->
