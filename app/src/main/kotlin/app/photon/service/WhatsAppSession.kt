@@ -24,6 +24,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.JsonObject
 
 /**
  * WhatsApp for as long as the service runs: the bridge process and the
@@ -207,6 +208,24 @@ class WhatsAppSession internal constructor(
                     NotificationHelper.cancelForConversation(context, convJid)
                 }
             }
+            "messages_removed" -> {
+                // Messages disappeared (or were placeholders for nothing).
+                // The notification mustn't keep showing one.
+                val convJid = evt.string("conversation_jid") ?: return
+                when (val change = removedNotification(evt)) {
+                    RemovedNotification.Keep -> {}
+                    RemovedNotification.Cancel -> NotificationHelper.cancelForConversation(context, convJid)
+                    is RemovedNotification.Show -> {
+                        if (isPseudoWhatsAppJid(convJid)) return
+                        val conversation = repository.storedConversation(convJid)
+                        if (conversation?.isMuted == true) return
+                        val text = repository.names.messageNotification(change.newest, conversation)
+                        NotificationHelper.showMessageNotification(
+                            context, text.title, text.body, Platform.WHATSAPP, convJid, update = true,
+                        )
+                    }
+                }
+            }
             "message_revoked" -> {
                 // A sender deleted the only unread message: withdraw the banner
                 // that announced it.
@@ -248,7 +267,8 @@ class WhatsAppSession internal constructor(
 
         // Bridge events the notification layer acts on; delivered losslessly.
         val NOTIFIED_EVENTS = setOf(
-            "new_message", "read_self", "message_revoked", "call_incoming", "call_ended", "call_missed",
+            "new_message", "read_self", "message_revoked", "messages_removed",
+            "call_incoming", "call_ended", "call_missed",
         )
 
         // A restarted bridge that stays up this long resets the restart backoff.
@@ -256,4 +276,23 @@ class WhatsAppSession internal constructor(
 
         const val QR_TTL_MS = 15_000L
     }
+}
+
+/** What a bridge `messages_removed` event does to its chat's notification. */
+internal sealed interface RemovedNotification {
+    /** Nothing it showed went, or nothing was unread. */
+    data object Keep : RemovedNotification
+
+    /** Nothing in the chat is unread any more. */
+    data object Cancel : RemovedNotification
+
+    /** The message it showed went; show [newest] (a `new_message`-shaped event) instead, quietly. */
+    data class Show(val newest: BridgeEvent) : RemovedNotification
+}
+
+internal fun removedNotification(evt: BridgeEvent): RemovedNotification {
+    if (evt.boolean("was_unread") != true) return RemovedNotification.Keep
+    if ((evt.int("unread_count") ?: 0) == 0) return RemovedNotification.Cancel
+    val newest = evt.payload["newest_unread"] as? JsonObject ?: return RemovedNotification.Keep
+    return RemovedNotification.Show(BridgeEvent(type = "new_message", payload = newest))
 }

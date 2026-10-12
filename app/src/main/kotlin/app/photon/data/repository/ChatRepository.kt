@@ -22,7 +22,7 @@ import kotlinx.coroutines.withContext
 // after each DB write, so these replace the old 500ms poll.
 private val REFRESH_EVENTS = setOf(
     "new_message", "message_updated", "conversation_updated", "receipt", "read_self",
-    "call_ended", "call_missed", "names_changed",
+    "messages_removed", "call_ended", "call_missed", "names_changed",
     "history_sync_progress", "history_sync_complete", "connection_state",
 )
 

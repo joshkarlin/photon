@@ -3,6 +3,7 @@ package app.photon.data.db
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteException
+import app.photon.data.model.ContentTypes
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
 import app.photon.data.model.MessageStatus
@@ -56,7 +57,31 @@ class PhotonDatabase(context: Context) {
     fun invalidate() {
         try { handle?.close() } catch (_: Exception) {}
         handle = null
+        expiryColumn = false
     }
+
+    // Whether messages has expires_at. A database the bridge hasn't migrated
+    // yet (moments after an upgrade) doesn't; once it has, it always will.
+    @Volatile private var expiryColumn = false
+
+    private fun hasExpiry(db: SQLiteDatabase): Boolean {
+        if (expiryColumn) return true
+        return db.rawQuery("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'expires_at'", null)
+            .use { it.moveToFirst() }
+            .also { expiryColumn = it }
+    }
+
+    /**
+     * A WHERE condition (on messages aliased [table]) leaving out messages
+     * whose disappearing timer has run out but which the bridge, deleting
+     * them each minute, hasn't yet. Takes the current second as its argument.
+     */
+    private fun notExpired(db: SQLiteDatabase, table: String = "messages"): Pair<String, Array<String>> =
+        if (hasExpiry(db)) {
+            "($table.expires_at = 0 OR $table.expires_at > ?)" to arrayOf((System.currentTimeMillis() / 1000).toString())
+        } else {
+            "1" to emptyArray()
+        }
 
     private fun <T> query(block: (SQLiteDatabase) -> T): T? {
         val db = open() ?: return null
@@ -84,12 +109,14 @@ class PhotonDatabase(context: Context) {
         // creates a row for every chat in WhatsApp's payload, but messages
         // outside the retention window are never inserted — leaving empty rows
         // with blank (raw-JID) names. Hiding zero-message conversations drops
-        // those ghosts (existing and future) without a migration.
+        // those ghosts (existing and future) without a migration, and chats
+        // whose messages have all disappeared.
+        val (live, args) = notExpired(d, "m")
         d.rawQuery(
             "SELECT c.* FROM conversations c " +
-                "WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_jid = c.jid) " +
+                "WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_jid = c.jid AND $live) " +
                 "ORDER BY c.last_timestamp DESC",
-            null,
+            args,
         ).use { it.toConversations() }
     } ?: emptyList()
 
@@ -103,15 +130,17 @@ class PhotonDatabase(context: Context) {
         // Tiebreak on _rowid_ so messages sharing a wall-clock second
         // (storage is in seconds) still render in insertion order
         // instead of swapping unpredictably between polls.
+        val (live, args) = notExpired(d)
         d.rawQuery(
-            "SELECT $messageColumns FROM messages WHERE conversation_jid = ? " +
+            "SELECT $messageColumns FROM messages WHERE conversation_jid = ? AND $live " +
                 "ORDER BY timestamp DESC, _rowid_ DESC LIMIT ?",
-            arrayOf(conversationJid, limit.toString()),
+            arrayOf(conversationJid, *args, limit.toString()),
         ).use { it.toMessages(::whatsAppStatus) }
     } ?: emptyList()
 
     fun getMessage(id: String): Message? = query { d ->
-        d.rawQuery("SELECT $messageColumns FROM messages WHERE id = ?", arrayOf(id)).use {
+        val (live, args) = notExpired(d)
+        d.rawQuery("SELECT $messageColumns FROM messages WHERE id = ? AND $live", arrayOf(id, *args)).use {
             if (it.moveToFirst()) it.toMessage(::whatsAppStatus) else null
         }
     }
@@ -134,11 +163,14 @@ class PhotonDatabase(context: Context) {
         } ?: emptyMap()
     }
 
-    /** Everyone other than the user who has a message stored in the conversation. */
+    /**
+     * Everyone other than the user who has a message stored in the
+     * conversation. The chat's own lines (timer changes) have no sender.
+     */
     fun getMessageSenders(conversationJid: String): List<String> = query { d ->
         d.rawQuery(
-            "SELECT DISTINCT sender_jid FROM messages WHERE conversation_jid = ? AND is_from_me = 0",
-            arrayOf(conversationJid),
+            "SELECT DISTINCT sender_jid FROM messages WHERE conversation_jid = ? AND is_from_me = 0 AND content_type <> ?",
+            arrayOf(conversationJid, ContentTypes.SYSTEM),
         ).use { c -> buildList { while (c.moveToNext()) c.getString(0)?.let(::add) } }
     } ?: emptyList()
 
