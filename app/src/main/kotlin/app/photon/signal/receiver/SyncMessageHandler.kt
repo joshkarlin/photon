@@ -224,8 +224,11 @@ internal class SyncMessageHandler(
             // works even when the transcript carries no E.164.
             messageDb.upsertConversation(jid = destinationAci, name = null, isGroup = false)
             if (destinationAci != myAci) contactNames.maybeFetchProfile(destinationAci)
-            messageDb.updateDmTimer(destinationAci, lineTimestamp = timestamp / 1000, explicit = data.isExpirationUpdate) { stored ->
-                syncedTimerUpdate(stored, expiresIn, data.expireTimerVersion)
+            // A story reply sets no timer (see DataMessageHandler).
+            if (data.storyContext == null) {
+                messageDb.updateDmTimer(destinationAci, lineTimestamp = timestamp / 1000, explicit = data.isExpirationUpdate) { stored ->
+                    syncedTimerUpdate(stored, expiresIn, data.expireTimerVersion)
+                }
             }
             messageDb.insertOwnRows(
                 messageId, rows, destinationAci, myAci, timestamp / 1000, replyPrefix(data.quote),

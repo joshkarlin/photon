@@ -167,10 +167,12 @@ internal class DataMessageHandler(
         // Each message carries its chat's disappearing-messages timer. In a
         // 1:1 chat it can change the chat's timer (by Signal-Android's
         // version rule); a group's timer comes only from the group's state,
-        // as Signal-Android ignores the timer on group messages. Either way
-        // the message itself disappears after its own timer, once read.
+        // as Signal-Android ignores the timer on group messages. A story
+        // reply doesn't either: Signal-Android only reads its timer when it
+        // has the story, and Photon keeps no stories. Either way the message
+        // itself disappears after its own timer, once read.
         val expiresIn = (data.expireTimer ?: 0).coerceAtLeast(0)
-        if (!isGroup) {
+        if (!isGroup && data.storyContext == null) {
             messageDb.updateDmTimer(conversationJid, lineTimestamp = timestamp / 1000, explicit = timerChange) { stored ->
                 incomingTimerUpdate(stored, expiresIn, data.expireTimerVersion)
             }

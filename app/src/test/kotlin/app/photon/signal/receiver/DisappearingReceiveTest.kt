@@ -196,6 +196,30 @@ class DisappearingReceiveTest {
         assertEquals(2, fx.db.getMessages(alice).count { it.contentType == "text" })
     }
 
+    /**
+     * A story reply's timer isn't the chat's: Signal-Android only reads it
+     * when it has the story, and Photon keeps none. The reply still shows.
+     */
+    @Test
+    fun aStoryReplyLeavesTheTimerAlone() {
+        val story = DataMessage.StoryContext(authorAci = local, sentTimestamp = 1)
+        h.data.processDataMessage(
+            DataMessage(body = "nice view", timestamp = ++now, expireTimer = 86_400, expireTimerVersion = 5, storyContext = story),
+            h.from(alice),
+        )
+        assertEquals(null, fx.db.chatTimer(alice))
+
+        receive("a week", week, 2)
+        h.data.processDataMessage(
+            DataMessage(body = "lol", timestamp = ++now, expireTimer = 0, expireTimerVersion = 9, storyContext = story),
+            h.from(alice),
+        )
+        transcript(DataMessage(body = "thanks", timestamp = ++now, expireTimer = 0, expireTimerVersion = 9, storyContext = story))
+
+        assertEquals(ChatTimer(week, 2), fx.db.chatTimer(alice))
+        assertEquals(listOf("nice view", "a week", "lol", "thanks"), thread().map { it.second })
+    }
+
     /** Reactions carry no timer, and Signal doesn't read one from them. */
     @Test
     fun aReactionLeavesTheTimerAlone() {
