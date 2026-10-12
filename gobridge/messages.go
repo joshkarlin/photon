@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"time"
 
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
@@ -44,13 +45,31 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 	case kindEdit:
 		b.applyEdit(chatJID, targetID, msg.GetProtocolMessage().GetEditedMessage(), b.authorOf(evt.Info))
 		return
+	case kindTimer:
+		// Only a DM's two people set its timer this way; a group's comes
+		// from the server (group info), not from any member's say-so.
+		if !isGroupJID(chatJID) {
+			t := settingMessageTimer(msg.GetProtocolMessage(), ts)
+			b.applyTimer(chatJID, timerReport{timerSetting: t, at: ts})
+		}
+		return
 	case kindDrop:
 		b.log.Debugf("Skipping content-free message %s in %s", msgID, chatJID)
 		return
 	}
 
 	content := contentMessage(msg)
+	// The chat's timer as this message has it. A change it reveals goes in
+	// the chat before the message itself.
+	if t, ok := contextTimer(content); ok {
+		b.applyTimer(chatJID, timerReport{timerSetting: t, at: ts})
+	}
 	row := b.buildMessageRow(content, msgID, chatJID, senderJID, ts, isFromMe, "sent")
+	if row.ExpiresAt > 0 && row.ExpiresAt <= time.Now().Unix() {
+		// Delivered after it was due to disappear (Photon was offline).
+		b.log.Debugf("Skipping message %s in %s: already disappeared", msgID, chatJID)
+		return
+	}
 	if row.ContentType == "call" {
 		// The phone's log entry for a call, which Photon may already hold as
 		// a row from the call's own events. Keyed by call ID like those
@@ -292,6 +311,7 @@ func (b *Bridge) buildMessageRow(msg *waE2E.Message, id, convJID, senderJID stri
 		IsFromMe:        isFromMe,
 		Status:          status,
 		RawProto:        rawProto,
+		ExpiresAt:       messageExpiry(msg, ts),
 	}
 }
 

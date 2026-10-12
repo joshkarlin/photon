@@ -132,6 +132,7 @@ func (b *Bridge) UploadAndSend(p SendMediaPayload) (string, int64, error) {
 		ReplyToID:       sql.NullString{String: p.ReplyToID, Valid: p.ReplyToID != ""},
 		IsFromMe:        true,
 		Status:          "sending",
+		ExpiresAt:       expiryAfter(ts, b.chatTimer(jid).seconds),
 	})
 	b.UpsertConversation(jid, rankedName{}, id, ts)
 	b.BroadcastEvent("new_message", b.newMessageEvent(jid, id, b.client.Store.ID.ToNonAD().String(), body, contentType, true))
@@ -149,14 +150,16 @@ func (b *Bridge) UploadAndSend(p SendMediaPayload) (string, int64, error) {
 		return id, ts, fmt.Errorf("upload failed: %w", err)
 	}
 
-	msg := buildMediaMessage(resp, p.MimeType, text, p.ReplyToID, data)
+	b.refreshGroupTimer(targetJID)
+	ctxInfo, timer := b.outgoingContext(jid, p.ReplyToID)
+	msg := buildMediaMessage(resp, p.MimeType, text, ctxInfo, data)
 	sendResp, err := b.sendWithID(ctx, targetJID, msg, id)
 	if err != nil {
 		b.markMessageFailed(jid, id)
 		return id, ts, fmt.Errorf("send failed: %w", err)
 	}
 
-	b.markMessageSent(jid, id, sendResp.Timestamp.Unix())
+	b.markMessageSent(jid, id, sendResp.Timestamp.Unix(), timer)
 	return id, sendResp.Timestamp.Unix(), nil
 }
 
@@ -171,11 +174,15 @@ func (b *Bridge) uploadMedia(ctx context.Context, data []byte, mediaType whatsme
 // sendWithID sends msg under the message id the row was stored with, so a
 // retry reuses the original's and recipients dedupe it.
 func (b *Bridge) sendWithID(ctx context.Context, to types.JID, msg *waE2E.Message, id string) (whatsmeow.SendResponse, error) {
-	extra := whatsmeow.SendRequestExtra{ID: id}
+	return b.sendMessage(ctx, to, msg, whatsmeow.SendRequestExtra{ID: id})
+}
+
+// sendMessage sends msg to WhatsApp (or, in tests, to messageSender).
+func (b *Bridge) sendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, extra ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error) {
 	if b.messageSender != nil {
-		return b.messageSender(ctx, to, msg, extra)
+		return b.messageSender(ctx, to, msg, extra...)
 	}
-	return b.client.SendMessage(ctx, to, msg, extra)
+	return b.client.SendMessage(ctx, to, msg, extra...)
 }
 
 // mediaText is what a media message carries besides the media: a caption,
@@ -218,11 +225,9 @@ func mediaKind(mimeType string) (contentType string, mediaType whatsmeow.MediaTy
 	}
 }
 
-func buildMediaMessage(resp whatsmeow.UploadResponse, mimeType string, text mediaText, replyToID string, data []byte) *waE2E.Message {
-	var ctx *waE2E.ContextInfo
-	if replyToID != "" {
-		ctx = &waE2E.ContextInfo{StanzaID: &replyToID}
-	}
+// buildMediaMessage is an uploaded file as a message of its kind, with ctx
+// (see outgoingContext) as its context.
+func buildMediaMessage(resp whatsmeow.UploadResponse, mimeType string, text mediaText, ctx *waE2E.ContextInfo, data []byte) *waE2E.Message {
 
 	switch {
 	case strings.HasPrefix(mimeType, "image/"):

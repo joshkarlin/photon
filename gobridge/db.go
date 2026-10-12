@@ -22,7 +22,9 @@ func (b *Bridge) InitMessageDB(ctx context.Context) error {
 			avatar_url      TEXT,
 			updated_at      INTEGER NOT NULL DEFAULT 0,
 			muted_until     INTEGER NOT NULL DEFAULT 0,
-			name_rank       INTEGER NOT NULL DEFAULT 0
+			name_rank       INTEGER NOT NULL DEFAULT 0,
+			disappearing_seconds INTEGER NOT NULL DEFAULT 0,
+			disappearing_set_at  INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS messages (
 			id              TEXT PRIMARY KEY,
@@ -41,6 +43,7 @@ func (b *Bridge) InitMessageDB(ctx context.Context) error {
 			is_from_me      INTEGER NOT NULL DEFAULT 0,
 			status          TEXT NOT NULL DEFAULT 'sent',
 			raw_proto       BLOB,
+			expires_at      INTEGER NOT NULL DEFAULT 0,
 			FOREIGN KEY (conversation_jid) REFERENCES conversations(jid)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_conv_ts ON messages(conversation_jid, timestamp DESC)`,
@@ -82,6 +85,7 @@ var migrations = []func(b *Bridge, ctx context.Context, tx *sql.Tx) error{
 	(*Bridge).migrateMutedUntil,
 	(*Bridge).migrateIncomingReadState,
 	(*Bridge).migrateNameRanks,
+	(*Bridge).migrateDisappearing,
 }
 
 // migrateMessageDB runs the migrations this database hasn't had yet.

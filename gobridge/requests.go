@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -199,11 +198,10 @@ func (b *Bridge) handleEditMessage(ctx context.Context, raw json.RawMessage) (js
 	// is keyed by the resolved JID.
 	targetJID := b.resolveLIDJID(parsedJID)
 
-	editMsg := b.client.BuildEdit(targetJID, p.MessageID, &waE2E.Message{
-		Conversation: &p.NewText,
-	})
-	_, err = b.client.SendMessage(ctx, targetJID, editMsg)
-	if err != nil {
+	// The new text carries the chat's timer, as every message Photon sends.
+	ctxInfo, _ := b.outgoingContext(targetJID.String(), "")
+	editMsg := b.client.BuildEdit(targetJID, p.MessageID, buildTextMessage(p.NewText, ctxInfo))
+	if _, err = b.sendMessage(ctx, targetJID, editMsg); err != nil {
 		return nil, err
 	}
 

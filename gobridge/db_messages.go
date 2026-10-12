@@ -24,6 +24,8 @@ type MessageRow struct {
 	IsFromMe        bool
 	Status          string
 	RawProto        []byte
+	// ExpiresAt is when a disappearing message goes (unix seconds); 0 = never.
+	ExpiresAt int64
 }
 
 // SendersForMessages returns the sender_jid for each of the given message IDs,
@@ -58,9 +60,9 @@ func (b *Bridge) SendersForMessages(ids []string) map[string]string {
 	return out
 }
 
-// WithoutCallRows drops call rows from a list of message IDs. Their IDs are
-// Photon's own ("call_<id>"), not message IDs WhatsApp could take a read
-// receipt for.
+// WithoutCallRows drops call rows and SYSTEM lines from a list of message
+// IDs. Their IDs are Photon's own ("call_<id>", "timer_…"), not message IDs
+// WhatsApp could take a read receipt for.
 func (b *Bridge) WithoutCallRows(ids []string) []string {
 	if len(ids) == 0 {
 		return ids
@@ -70,7 +72,8 @@ func (b *Bridge) WithoutCallRows(ids []string) []string {
 		args[i] = id
 	}
 	calls := map[string]bool{}
-	rows, err := b.msgDB.Query(`SELECT id FROM messages WHERE content_type = 'call' AND id IN (`+sqlInList(len(ids))+`)`, args...)
+	args = append(args, contentSystem)
+	rows, err := b.msgDB.Query(`SELECT id FROM messages WHERE id IN (`+sqlInList(len(ids))+`) AND content_type IN ('call', ?)`, args...)
 	if err == nil {
 		for rows.Next() {
 			var id string
@@ -159,8 +162,8 @@ const insertMessageSQL = `
 	INSERT OR IGNORE INTO messages
 	(id, conversation_jid, sender_jid, timestamp, content_type, text_body,
 	 media_url, media_mime, media_size, thumbnail_path, sticker_pack_id,
-	 reply_to_id, edit_version, is_from_me, status, raw_proto)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	 reply_to_id, edit_version, is_from_me, status, raw_proto, expires_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 func (m *MessageRow) insertArgs() []interface{} {
 	isFromMe := 0
@@ -171,7 +174,7 @@ func (m *MessageRow) insertArgs() []interface{} {
 		m.ID, m.ConversationJID, m.SenderJID, m.Timestamp,
 		m.ContentType, m.TextBody, m.MediaURL, m.MediaMime,
 		m.MediaSize, m.ThumbnailPath, m.StickerPackID,
-		m.ReplyToID, m.EditVersion, isFromMe, m.Status, m.RawProto,
+		m.ReplyToID, m.EditVersion, isFromMe, m.Status, m.RawProto, m.ExpiresAt,
 	}
 }
 
@@ -290,11 +293,11 @@ func (b *Bridge) AdvanceOutgoingStatus(ids []string, status string) error {
 	return err
 }
 
-// UpdateMessageStatusAndTimestamp updates both fields together. Used when a
-// "sending" row needs to flip to "sent" and adopt the server-confirmed
-// timestamp on success.
-func (b *Bridge) UpdateMessageStatusAndTimestamp(id, status string, ts int64) error {
-	_, err := b.msgDB.Exec(`UPDATE messages SET status = ?, timestamp = ? WHERE id = ?`, status, ts, id)
+// UpdateMessageStatusAndTimestamp updates status, timestamp and expiry
+// together. Used when a "sending" row flips to "sent" and adopts the
+// server-confirmed timestamp, which its disappearing clock starts from.
+func (b *Bridge) UpdateMessageStatusAndTimestamp(id, status string, ts, expiresAt int64) error {
+	_, err := b.msgDB.Exec(`UPDATE messages SET status = ?, timestamp = ?, expires_at = ? WHERE id = ?`, status, ts, expiresAt, id)
 	return err
 }
 
@@ -346,10 +349,7 @@ func (b *Bridge) DeleteMessageRow(msgID string) {
 		b.log.Warnf("Failed to delete message %s: %v", msgID, err)
 	}
 	b.msgDB.Exec(`DELETE FROM reactions WHERE message_id = ?`, msgID)
-	b.msgDB.Exec(`UPDATE conversations SET
-			last_timestamp  = (SELECT MAX(timestamp) FROM messages WHERE conversation_jid = conversations.jid),
-			last_message_id = (SELECT id FROM messages WHERE conversation_jid = conversations.jid ORDER BY timestamp DESC, _rowid_ DESC LIMIT 1)
-		WHERE jid = ? AND EXISTS (SELECT 1 FROM messages WHERE conversation_jid = conversations.jid)`, jid)
+	movePreviewBack(b.msgDB, jid)
 }
 
 // UpdateMediaURL sets the local media path for a downloaded message.

@@ -106,8 +106,11 @@ func (b *Bridge) mergeConversation(from, to string) (bool, error) {
 	var name rankedName
 	var unread int
 	var lastTS, mutedUntil int64
-	err = tx.QueryRow(`SELECT COALESCE(name, ''), name_rank, COALESCE(last_message_id, ''), last_timestamp, unread_count, muted_until
-		FROM conversations WHERE jid = ?`, from).Scan(&name.name, &name.rank, &lastMsgID, &lastTS, &unread, &mutedUntil)
+	var timer timerSetting
+	err = tx.QueryRow(`SELECT COALESCE(name, ''), name_rank, COALESCE(last_message_id, ''), last_timestamp, unread_count, muted_until,
+		disappearing_seconds, disappearing_set_at
+		FROM conversations WHERE jid = ?`, from).Scan(&name.name, &name.rank, &lastMsgID, &lastTS, &unread, &mutedUntil,
+		&timer.seconds, &timer.setAt)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -139,6 +142,12 @@ func (b *Bridge) mergeConversation(from, to string) (bool, error) {
 		is_muted = CASE WHEN ? <> 0 OR muted_until <> 0 THEN 1 ELSE 0 END
 		WHERE jid = ?`, unread, mutedUntil, mutedUntil, mutedUntil, to); err != nil {
 		return false, err
+	}
+	// The disappearing timer set more recently under either JID stands.
+	if timer != (timerSetting{}) {
+		if _, _, err := b.applyTimerTx(tx, to, timerReport{timerSetting: timer}); err != nil {
+			return false, err
+		}
 	}
 	if _, err := tx.Exec(`DELETE FROM conversations WHERE jid = ?`, from); err != nil {
 		return false, err

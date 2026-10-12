@@ -76,6 +76,8 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 		b.handleCallEvent(v)
 	case *events.GroupInfo:
 		b.handleGroupInfo(v)
+	case *events.JoinedGroup:
+		b.handleJoinedGroup(v)
 	case *events.Mute:
 		b.handleMute(v)
 	case *events.MarkChatAsRead:

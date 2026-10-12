@@ -105,15 +105,22 @@ func (b *Bridge) SetRetention(maxMessages, maxDays, mediaTTLMins int) {
 	}
 }
 
-// StartPruning runs periodic cleanup of old messages and temp media.
+// StartPruning runs periodic cleanup of old messages and temp media, and
+// deletes disappearing messages as their timers run out: at once (they may
+// have run out while the bridge was down), then every minute.
 func (b *Bridge) StartPruning(ctx context.Context) {
 	go func() {
+		b.expireMessages(time.Now().Unix())
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
+		expiry := time.NewTicker(expiryInterval)
+		defer expiry.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-expiry.C:
+				b.expireMessages(time.Now().Unix())
 			case <-ticker.C:
 				b.pruneMessages()
 				b.pruneMedia()
@@ -121,6 +128,10 @@ func (b *Bridge) StartPruning(ctx context.Context) {
 		}
 	}()
 }
+
+// expiryInterval is how often disappeared messages are looked for; one
+// lingers at most this long past its time.
+const expiryInterval = time.Minute
 
 func (b *Bridge) pruneMessages() {
 	b.mu.RLock()
@@ -177,8 +188,11 @@ func (b *Bridge) pruneMessages() {
 		b.msgDB.Exec(`DELETE FROM reactions WHERE message_id NOT IN (SELECT id FROM messages)`)
 	}
 
-	// Remove empty conversations (no messages left)
-	b.msgDB.Exec(`DELETE FROM conversations WHERE jid NOT IN (SELECT DISTINCT conversation_jid FROM messages)`)
+	// Remove empty conversations (no messages left), except those holding
+	// state that arrives once: a disappearing timer (which Photon's sends
+	// must keep carrying) or a mute.
+	b.msgDB.Exec(`DELETE FROM conversations WHERE jid NOT IN (SELECT DISTINCT conversation_jid FROM messages)
+		AND disappearing_seconds = 0 AND disappearing_set_at = 0 AND muted_until = 0`)
 }
 
 func (b *Bridge) pruneMedia() {
@@ -246,8 +260,8 @@ func (b *Bridge) markMessageFailed(jid, id string) {
 // markMessageSent records a server-confirmed send. The row adopts the
 // server's timestamp (replacing the optimistic local one) so it sorts
 // correctly relative to messages that arrived during the send.
-func (b *Bridge) markMessageSent(jid, id string, ts int64) {
-	b.UpdateMessageStatusAndTimestamp(id, "sent", ts)
+func (b *Bridge) markMessageSent(jid, id string, ts int64, timer uint32) {
+	b.UpdateMessageStatusAndTimestamp(id, "sent", ts, expiryAfter(ts, timer))
 	b.UpsertConversation(jid, rankedName{}, id, ts)
 	b.BroadcastEvent("message_updated", MessageUpdatedEvent{
 		ConversationJID: jid, MessageID: id,
@@ -319,18 +333,20 @@ func (b *Bridge) SendTextMessage(ctx context.Context, jid string, text string, r
 		ReplyToID:       sql.NullString{String: replyToID, Valid: replyToID != ""},
 		IsFromMe:        true,
 		Status:          "sending",
+		ExpiresAt:       expiryAfter(ts, b.chatTimer(jid).seconds),
 	})
 	b.UpsertConversation(jid, rankedName{}, id, ts)
 	b.BroadcastEvent("new_message", b.newMessageEvent(jid, id, b.client.Store.ID.ToNonAD().String(), text, "text", true))
 
-	msg := b.buildTextMessage(text, replyToID)
-	resp, err := b.client.SendMessage(ctx, targetJID, msg, whatsmeow.SendRequestExtra{ID: id})
+	b.refreshGroupTimer(targetJID)
+	ctxInfo, timer := b.outgoingContext(jid, replyToID)
+	resp, err := b.sendWithID(ctx, targetJID, buildTextMessage(text, ctxInfo), id)
 	if err != nil {
 		b.markMessageFailed(jid, id)
 		return id, ts, err
 	}
 
-	b.markMessageSent(jid, id, resp.Timestamp.Unix())
+	b.markMessageSent(jid, id, resp.Timestamp.Unix(), timer)
 	return id, resp.Timestamp.Unix(), nil
 }
 
@@ -365,13 +381,15 @@ func (b *Bridge) RetryMessage(ctx context.Context, messageID string) error {
 	// CDN before sending — the original upload's URL/keys aren't persisted.
 	// Both reuse the original stanza ID so recipients dedupe a retry that
 	// actually went through the first time.
+	b.refreshGroupTimer(targetJID)
+	ctxInfo, timer := b.outgoingContext(jid, replyToID)
 	var msg *waE2E.Message
 	if contentType == "text" || contentType == "" {
 		if text == "" {
 			b.markMessageFailed(jid, messageID)
 			return fmt.Errorf("retry: text row has empty body")
 		}
-		msg = b.buildTextMessage(text, replyToID)
+		msg = buildTextMessage(text, ctxInfo)
 	} else {
 		if mediaURL == "" {
 			b.markMessageFailed(jid, messageID)
@@ -393,7 +411,7 @@ func (b *Bridge) RetryMessage(ctx context.Context, messageID string) error {
 			return fmt.Errorf("retry: upload failed: %w", err)
 		}
 		// text_body holds the caption, or a document's file name.
-		msg = buildMediaMessage(resp, mediaMime, mediaTextOf(contentType, text), replyToID, data)
+		msg = buildMediaMessage(resp, mediaMime, mediaTextOf(contentType, text), ctxInfo, data)
 	}
 
 	resp, err := b.sendWithID(ctx, targetJID, msg, messageID)
@@ -401,7 +419,7 @@ func (b *Bridge) RetryMessage(ctx context.Context, messageID string) error {
 		b.markMessageFailed(jid, messageID)
 		return err
 	}
-	b.markMessageSent(jid, messageID, resp.Timestamp.Unix())
+	b.markMessageSent(jid, messageID, resp.Timestamp.Unix(), timer)
 	return nil
 }
 
@@ -497,8 +515,10 @@ func (b *Bridge) Logout() error {
 	return b.client.Logout(context.Background())
 }
 
-func (b *Bridge) buildTextMessage(text string, replyToID string) *waE2E.Message {
-	if replyToID == "" {
+// buildTextMessage is a text message; one with a context (a reply, a
+// disappearing timer; see outgoingContext) is an extended text.
+func buildTextMessage(text string, ctx *waE2E.ContextInfo) *waE2E.Message {
+	if ctx == nil {
 		return &waE2E.Message{
 			Conversation: proto.String(text),
 		}
@@ -506,10 +526,8 @@ func (b *Bridge) buildTextMessage(text string, replyToID string) *waE2E.Message 
 
 	return &waE2E.Message{
 		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
-			Text: proto.String(text),
-			ContextInfo: &waE2E.ContextInfo{
-				StanzaID: proto.String(replyToID),
-			},
+			Text:        proto.String(text),
+			ContextInfo: ctx,
 		},
 	}
 }

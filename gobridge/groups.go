@@ -51,6 +51,14 @@ func (b *Bridge) handleGroupInfo(evt *events.GroupInfo) {
 	if len(evt.Promote) > 0 || len(evt.Demote) > 0 {
 		b.forgetGroupAdmins(jid)
 	}
+	if evt.Ephemeral != nil {
+		seconds := uint32(0)
+		if evt.Ephemeral.IsEphemeral {
+			seconds = evt.Ephemeral.DisappearingTimer
+		}
+		at := evt.Timestamp.Unix()
+		b.applyTimer(jid, timerReport{timerSetting: timerSetting{seconds: seconds, setAt: at}, at: at})
+	}
 	b.BroadcastEvent("conversation_updated", ConversationUpdatedEvent{JID: jid})
 }
 
@@ -96,6 +104,7 @@ func (b *Bridge) groupEntry(jid types.JID, needAdmins bool) cachedGroupName {
 	if groupInfo.Name == "" {
 		b.log.Warnf("GetGroupInfo returned empty name for %s", key)
 	}
+	b.applyGroupTimer(jid, groupInfo)
 	entry := cachedGroupName{name: groupInfo.Name, admins: map[string]bool{}, fetched: time.Now()}
 	for _, p := range groupInfo.Participants {
 		if p.IsAdmin || p.IsSuperAdmin {
@@ -183,4 +192,10 @@ func (b *Bridge) resolveGroupParticipants(groupJID string) (changed bool) {
 		}
 	}
 	return changed
+}
+
+// handleJoinedGroup records the timer of a group the user joined (or was
+// added to): its info is the server's current state.
+func (b *Bridge) handleJoinedGroup(evt *events.JoinedGroup) {
+	b.applyGroupTimer(evt.JID, &evt.GroupInfo)
 }

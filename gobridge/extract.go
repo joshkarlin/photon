@@ -62,6 +62,7 @@ const (
 	kindReaction                    // a reaction to targetID
 	kindRevoke                      // "delete for everyone" of targetID
 	kindEdit                        // an edit of targetID
+	kindTimer                       // a chat's disappearing timer was set
 )
 
 // classifyMessageEvent decides what a (UnwrapRaw-ed) message does. Shared by
@@ -69,6 +70,9 @@ const (
 func classifyMessageEvent(msg *waE2E.Message) (kind messageKind, targetID string) {
 	if r := msg.GetReactionMessage(); r != nil {
 		return kindReaction, r.GetKey().GetID()
+	}
+	if msg.GetProtocolMessage().GetType() == waE2E.ProtocolMessage_EPHEMERAL_SETTING {
+		return kindTimer, ""
 	}
 	if pm := msg.GetProtocolMessage(); pm != nil && pm.GetKey().GetID() != "" {
 		switch pm.GetType() {
