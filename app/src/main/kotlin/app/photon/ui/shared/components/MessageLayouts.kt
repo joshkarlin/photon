@@ -172,8 +172,7 @@ internal fun locationIntent(msg: Message): Intent? {
 }
 
 /** Opens a location in whatever map app answers `geo:`; with none, nothing happens. */
-private fun openLocation(context: Context, msg: Message) {
-    val intent = locationIntent(msg) ?: return
+private fun openLocation(context: Context, intent: Intent) {
     try {
         context.startActivity(intent)
     } catch (_: ActivityNotFoundException) {
@@ -404,6 +403,8 @@ fun MessageRow(
 ) {
     var revealed by remember { mutableStateOf(false) }
     val context = LocalContext.current
+    // A location without a usable point taps like text.
+    val mapIntent = remember(msg) { if (isLocation(msg)) locationIntent(msg) else null }
     val fromMe = msg.isFromMe
     val showName = senderName != null && !fromMe && startsBurst
 
@@ -414,7 +415,7 @@ fun MessageRow(
                 onClick = {
                     when {
                         isMedia(msg) -> onMediaTap()
-                        isLocation(msg) -> openLocation(context, msg)
+                        mapIntent != null -> openLocation(context, mapIntent)
                         else -> revealed = !revealed
                     }
                 },

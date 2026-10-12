@@ -15,6 +15,8 @@ import app.photon.data.model.Message
 import app.photon.data.model.Platform
 import app.photon.ui.RegisterComposeHostActivity
 import app.photon.ui.preview.PreviewSamples
+import app.photon.ui.shared.components.MessageRow
+import app.photon.ui.shared.components.formatMessageTime
 import app.photon.ui.theme.PhotonTheme
 import org.junit.Rule
 import org.junit.Test
@@ -157,5 +159,19 @@ class NewContentRowsTest {
         shadowOf(rule.activity.application).checkActivities(true)
         rule.onNodeWithText(location).performClick()
         assertNull(shadowOf(rule.activity).nextStartedActivity)
+    }
+
+    /** A location with no point to open taps like text: it shows its time. */
+    @Test
+    fun aLocationWithoutAPointRevealsItsTime() {
+        val pointless = PreviewSamples.newRowMessages.first().copy(id = "x", mediaUrl = null, textBody = "Somewhere")
+        rule.setContent {
+            PhotonTheme {
+                MessageRow(msg = pointless, startsBurst = false, onMediaTap = {})
+            }
+        }
+        rule.onNodeWithText("Location · Somewhere").performClick()
+        assertNull(shadowOf(rule.activity).nextStartedActivity)
+        rule.onNodeWithText(formatMessageTime(pointless.timestamp)).assertExists()
     }
 }
