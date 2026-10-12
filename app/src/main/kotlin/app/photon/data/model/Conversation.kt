@@ -10,6 +10,10 @@ data class Conversation(
     val isMuted: Boolean,
     val avatarUrl: String?,
     val updatedAt: Long,
+    /** Archived on the user's primary device; hidden from the main list. */
+    val isArchived: Boolean = false,
+    /** The chat's disappearing-messages timer in seconds; 0 = off. */
+    val disappearingSeconds: Long = 0,
 ) {
     /**
      * WhatsApp pseudo-chats — status broadcasts ("status@broadcast"), the
