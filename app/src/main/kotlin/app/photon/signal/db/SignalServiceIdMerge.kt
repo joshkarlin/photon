@@ -1,6 +1,7 @@
 package app.photon.signal.db
 
 import android.database.sqlite.SQLiteDatabase
+import app.photon.signal.ChatTimer
 import app.photon.signal.MessageKeys
 import app.photon.signal.db.SignalMessageDatabase.Companion.STATUS_UNREAD
 import org.signal.core.models.ServiceId
@@ -36,7 +37,8 @@ fun SignalMessageDatabase.getResolvableNonAciIds(): List<Pair<String, String>> {
  *    same message delivered again once the ACI was known) keeps that copy;
  *    the [from] copy is dropped and stops counting as unread.
  *  - The two conversations become one: unread counts add up, the newer last
- *    message wins, and a blank name takes the other's.
+ *    message wins, a blank name takes the other's, the timer at the higher
+ *    version wins ([mergedTimer]), and it's archived if either was.
  *  - Storage records that mapped to [from] map to [to], and [to]'s mute
  *    follows them (SignalStorageMutes).
  *  - Participant rows move to [to]. The contact row's phone, address-book
@@ -169,11 +171,19 @@ private fun SignalMessageDatabase.rekeyMessages(db: SQLiteDatabase, from: String
 }
 
 private fun mergeConversationRows(db: SQLiteDatabase, from: String, to: String) {
-    data class Conv(val name: String?, val unread: Int, val lastId: String?, val lastTs: Long)
+    data class Conv(
+        val name: String?, val unread: Int, val lastId: String?, val lastTs: Long,
+        val timer: ChatTimer?, val archived: Boolean,
+    )
     fun load(jid: String) = db.rawQuery(
-        "SELECT name, unread_count, last_message_id, last_timestamp FROM conversations WHERE jid = ?",
+        "SELECT name, unread_count, last_message_id, last_timestamp, expire_timer, expire_timer_version, archived " +
+            "FROM conversations WHERE jid = ?",
         arrayOf(jid),
-    ).use { c -> if (c.moveToFirst()) Conv(c.getString(0), c.getInt(1), c.getString(2), c.getLong(3)) else null }
+    ).use { c ->
+        if (!c.moveToFirst()) return@use null
+        val timer = if (c.isNull(4)) null else ChatTimer(c.getInt(4), if (c.isNull(5)) 0 else c.getInt(5))
+        Conv(c.getString(0), c.getInt(1), c.getString(2), c.getLong(3), timer, c.getInt(6) == 1)
+    }
 
     val old = load(from) ?: return
     val target = load(to)
@@ -181,16 +191,36 @@ private fun mergeConversationRows(db: SQLiteDatabase, from: String, to: String) 
         db.execSQL("UPDATE conversations SET jid = ? WHERE jid = ?", arrayOf(to, from))
     } else {
         val newer = old.lastTs > target.lastTs
+        val timer = mergedTimer(target.timer, old.timer, oldIsNewer = newer)
         db.execSQL(
             "UPDATE conversations SET unread_count = unread_count + ?, " +
                 "name = COALESCE(NULLIF(name, ''), ?), " +
                 "last_message_id = CASE WHEN ? THEN ? ELSE last_message_id END, " +
-                "last_timestamp = CASE WHEN ? THEN ? ELSE last_timestamp END " +
+                "last_timestamp = CASE WHEN ? THEN ? ELSE last_timestamp END, " +
+                "expire_timer = ?, expire_timer_version = ?, archived = ? " +
                 "WHERE jid = ?",
-            arrayOf<Any?>(old.unread, old.name, if (newer) 1 else 0, old.lastId, if (newer) 1 else 0, old.lastTs, to),
+            arrayOf<Any?>(
+                old.unread, old.name, if (newer) 1 else 0, old.lastId, if (newer) 1 else 0, old.lastTs,
+                timer?.seconds, timer?.version, if (old.archived || target.archived) 1 else 0, to,
+            ),
         )
         db.execSQL("DELETE FROM conversations WHERE jid = ?", arrayOf(from))
     }
+}
+
+/**
+ * The timer a merged chat keeps: the one at the higher version, a known
+ * one over an unknown one, and on a tie the newer chat's. (The archive
+ * state is kept when either was archived: if a message has since
+ * unarchived the chat on the primary, its next storage record says so.)
+ */
+internal fun mergedTimer(target: ChatTimer?, old: ChatTimer?, oldIsNewer: Boolean): ChatTimer? = when {
+    target == null -> old
+    old == null -> target
+    old.version > target.version -> old
+    old.version < target.version -> target
+    oldIsNewer -> old
+    else -> target
 }
 
 /** Point [jid]'s last_message_id at its newest row if the one it names is gone. */

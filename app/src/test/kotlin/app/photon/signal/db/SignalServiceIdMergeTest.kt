@@ -2,6 +2,7 @@ package app.photon.signal.db
 
 import androidx.test.core.app.ApplicationProvider
 import app.photon.data.model.MessageStatus
+import app.photon.signal.ChatTimer
 import app.photon.signal.planReadSync
 import org.junit.After
 import org.junit.Before
@@ -184,6 +185,36 @@ class SignalServiceIdMergeTest {
         db.updateContactPhone(aci, phone)
 
         assertEquals(setOf(pni to aci, phone to aci), db.getResolvableNonAciIds().toSet())
+    }
+
+    /** The merged chat keeps the timer at the higher version (known over unknown) and the archive state. */
+    @Test
+    fun theMergedChatKeepsTheTimerAndArchive() {
+        db.upsertConversation(jid = pni, name = null, isGroup = false)
+        db.updateContactPhone(pni, phone)
+        receive(pni, pni, t + 1_000)
+        db.updateDmTimer(pni, 0) { ChatTimer(604_800, 3) }
+        db.applyStorageManifest(1, emptyList(), listOf(StorageMute("s-pni", pni, 0, archived = true)))
+        db.upsertConversation(jid = aci, name = null, isGroup = false)
+        receive(aci, aci, t + 2_000)
+        db.updateDmTimer(aci, 0) { ChatTimer(0, 2) }
+        db.updateContactFromSync(aci, phone, null)
+
+        assertTrue(db.mergeServiceId(pni, aci))
+
+        assertEquals(ChatTimer(604_800, 3), db.chatTimer(aci))
+        assertEquals(true, db.getConversation(aci)?.isArchived)
+    }
+
+    @Test
+    fun anUnknownTimerLosesToAKnownOneInAMerge() {
+        assertEquals(ChatTimer(60, 1), mergedTimer(null, ChatTimer(60, 1), oldIsNewer = false))
+        assertEquals(ChatTimer(60, 1), mergedTimer(ChatTimer(60, 1), null, oldIsNewer = true))
+        assertEquals(null, mergedTimer(null, null, oldIsNewer = true))
+        assertEquals(ChatTimer(0, 4), mergedTimer(ChatTimer(0, 4), ChatTimer(60, 3), oldIsNewer = true))
+        // A tie goes to the newer chat.
+        assertEquals(ChatTimer(60, 3), mergedTimer(ChatTimer(0, 3), ChatTimer(60, 3), oldIsNewer = true))
+        assertEquals(ChatTimer(0, 3), mergedTimer(ChatTimer(0, 3), ChatTimer(60, 3), oldIsNewer = false))
     }
 
     /**
