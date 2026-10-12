@@ -2,12 +2,18 @@ package app.photon.signal
 
 import android.util.Log
 import app.photon.signal.db.SignalMessageDatabase
+import app.photon.signal.db.chatTimer
 import app.photon.signal.db.deleteMessage
+import app.photon.signal.db.deleteMessagesByPrefix
 import app.photon.signal.db.getConversation
 import app.photon.signal.db.getGroupMeta
 import app.photon.signal.db.getMessage
+import app.photon.signal.db.groupTimerKnown
 import app.photon.signal.db.insertMessage
+import app.photon.signal.db.markOutgoingSent
+import app.photon.signal.db.setExpiresIn
 import app.photon.signal.db.updateConversationLastMessage
+import app.photon.signal.db.updateGroupTimer
 import app.photon.signal.db.updateMessageStatus
 import app.photon.signal.db.upsertConversation
 import app.photon.signal.db.upsertReaction
@@ -43,7 +49,7 @@ class SignalMessageSender internal constructor(
     private val messageDb: SignalMessageDatabase,
     // The network side of sends; replaced in tests.
     transport: SignalTransport? = null,
-    groupManager: () -> SignalGroupV2Manager? = { null },
+    private val groupManager: () -> SignalGroupV2Manager? = { null },
 ) {
     companion object {
         private const val TAG = "SignalMessageSender"
@@ -91,10 +97,13 @@ class SignalMessageSender internal constructor(
         false
     }
 
-    /** Send an outgoing row: it ends "sent", or "failed" for the user to retry. */
+    /**
+     * Send an outgoing row: it ends "sent", with its disappearing clock
+     * started, or "failed" for the user to retry.
+     */
     private fun deliverRow(messageId: String, recipient: Recipient, timestamp: Long, content: () -> OutgoingContent): Boolean {
         val sent = deliver(recipient, timestamp, messageId, content)
-        messageDb.updateMessageStatus(messageId, if (sent) "sent" else "failed")
+        if (sent) messageDb.markOutgoingSent(messageId) else messageDb.updateMessageStatus(messageId, "failed")
         return sent
     }
 
@@ -147,7 +156,30 @@ class SignalMessageSender internal constructor(
             Log.w(TAG, "Refusing send: $conversationJid is neither an ACI nor a known group")
             return false
         }
-        return deliverRow(messageId, recipient, timestamp) { OutgoingContent.Message(text, replyPrefix) }
+        return deliverRow(messageId, recipient, timestamp) {
+            OutgoingContent.Message(text, replyPrefix, timer = sendTimer(messageId, recipient))
+        }
+    }
+
+    /**
+     * The disappearing-messages timer [messageId] goes to [recipient] with:
+     * the chat's, as stored now (a retry too: an older timer at the current
+     * version could change the chat's timer). The row disappears after it
+     * once sent. A group whose timer hasn't been read since the v7 upgrade
+     * (its state is fetched after connecting) is read first, so a message
+     * sent meanwhile still disappears for everyone.
+     */
+    private fun sendTimer(messageId: String, recipient: Recipient): ChatTimer {
+        if (recipient is Recipient.Group && !messageDb.groupTimerKnown(recipient.conversationJid)) {
+            groupManager()?.fetchGroup(recipient.meta.masterKey)?.let { group ->
+                messageDb.updateGroupTimer(
+                    recipient.conversationJid, group.disappearingMessagesTimer?.duration ?: 0, group.revision,
+                )
+            }
+        }
+        val timer = messageDb.chatTimer(recipient.conversationJid)
+        messageDb.setExpiresIn(messageId, timer.seconds)
+        return timer
     }
 
     /**
@@ -190,7 +222,7 @@ class SignalMessageSender internal constructor(
                 file, mimeType, voiceNote = contentType == "audio",
                 fileName = attachmentFileName(contentType, fileName, file),
             )
-            OutgoingContent.Message(text, replyPrefix, listOf(pointer))
+            OutgoingContent.Message(text, replyPrefix, listOf(pointer), sendTimer(messageId, recipient))
         }
     }
 
@@ -266,7 +298,7 @@ class SignalMessageSender internal constructor(
                     fileName = attachmentFileName(row.contentType, text.takeIf { isDocument }, mediaFile),
                 ),
             )
-            OutgoingContent.Message(text.takeUnless { isDocument }, row.replyToId, attachments)
+            OutgoingContent.Message(text.takeUnless { isDocument }, row.replyToId, attachments, sendTimer(messageId, recipient))
         }
     }
 
@@ -298,6 +330,10 @@ class SignalMessageSender internal constructor(
                 OutgoingContent.RemoteDelete(targetTs)
             }
             if (!sent) return false
+            // The other devices delete the whole message: every attachment
+            // row stored for it goes here too.
+            messageDb.deleteMessagesByPrefix(MessageKeys.prefixOf(messageId))
+            return true
         }
         messageDb.deleteMessage(messageId)
         return true

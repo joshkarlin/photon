@@ -7,6 +7,7 @@ import app.photon.signal.db.getContact
 import app.photon.signal.db.getGroupMeta
 import app.photon.signal.db.getParticipants
 import app.photon.signal.db.updateGroupMeta
+import app.photon.signal.db.updateGroupTimer
 import app.photon.signal.db.upsertConversation
 import app.photon.signal.db.upsertParticipant
 import app.photon.signal.store.PhotonIdentityKeyStore
@@ -57,6 +58,57 @@ internal fun parseSignalAttachmentUploadForm(response: String): AttachmentUpload
 }
 
 /**
+ * The DataMessage a send carries. A message (text, attachments, a quote)
+ * carries the chat's disappearing-messages timer and its version: the
+ * recipient's copy disappears as the chat's do, and a send can't turn the
+ * timer off (a message with no timer at the chat's version would). The
+ * library's builder sends version 1 unless told otherwise, which is the
+ * case the roadmap flagged. Reactions and deletes carry no timer, as
+ * Signal-Android sends them.
+ */
+internal fun outgoingDataMessage(
+    content: OutgoingContent,
+    timestamp: Long,
+    group: SignalServiceGroupV2?,
+    quote: (String) -> SignalServiceDataMessage.Quote?,
+): SignalServiceDataMessage {
+    val builder = SignalServiceDataMessage.newBuilder().withTimestamp(timestamp)
+    if (group != null) builder.asGroupMessage(group)
+    when (content) {
+        is OutgoingContent.Reaction -> builder.withReaction(content.reaction)
+        is OutgoingContent.RemoteDelete ->
+            builder.withRemoteDelete(SignalServiceDataMessage.RemoteDelete(content.targetSentTimestamp))
+        is OutgoingContent.Message -> {
+            if (!content.text.isNullOrBlank()) builder.withBody(content.text)
+            if (content.attachments.isNotEmpty()) builder.withAttachments(content.attachments)
+            content.replyPrefix?.let(quote)?.let { builder.withQuote(it) }
+            builder.withExpiration(content.timer.seconds)
+            builder.withExpireTimerVersion(content.timer.version)
+        }
+    }
+    return builder.build()
+}
+
+/**
+ * The sent transcript that shows [message] in the right thread on the
+ * user's other devices: the same DataMessage, so it carries the same timer
+ * and version. [recipients] all got it unsealed (an `unidentified` status
+ * that disagrees with the send makes Desktop open an "Unknown contact"
+ * thread). The library sets expirationStartTimestamp itself when the
+ * message has a timer, so the 0 here is never sent.
+ */
+internal fun sentTranscript(
+    destination: Optional<SignalServiceAddress>,
+    timestamp: Long,
+    message: SignalServiceDataMessage,
+    recipients: List<ServiceId>,
+): SentTranscriptMessage = SentTranscriptMessage(
+    destination, timestamp, Optional.of(message), 0L,
+    recipients.associateWith { false },
+    false, Optional.empty(), emptySet(), Optional.empty(),
+)
+
+/**
  * Sends through signal-service-java: the DataMessage to the recipient (or,
  * for a group, each member), then a sent transcript so the user's other
  * devices show it in the right thread.
@@ -77,22 +129,8 @@ internal class LibraryTransport(
         is Recipient.Group -> sendGroup(recipient, content, timestamp)
     }
 
-    private fun dataMessage(content: OutgoingContent, timestamp: Long, group: SignalServiceGroupV2?): SignalServiceDataMessage {
-        val builder = SignalServiceDataMessage.newBuilder().withTimestamp(timestamp)
-        if (group != null) builder.asGroupMessage(group)
-        when (content) {
-            is OutgoingContent.Reaction -> builder.withReaction(content.reaction)
-            is OutgoingContent.RemoteDelete ->
-                builder.withRemoteDelete(SignalServiceDataMessage.RemoteDelete(content.targetSentTimestamp))
-            is OutgoingContent.Message -> {
-                val quote = content.replyPrefix?.let { buildQuote(it) }
-                if (!content.text.isNullOrBlank()) builder.withBody(content.text)
-                if (content.attachments.isNotEmpty()) builder.withAttachments(content.attachments)
-                if (quote != null) builder.withQuote(quote)
-            }
-        }
-        return builder.build()
-    }
+    private fun dataMessage(content: OutgoingContent, timestamp: Long, group: SignalServiceGroupV2?): SignalServiceDataMessage =
+        outgoingDataMessage(content, timestamp, group) { buildQuote(it) }
 
     /**
      * One-to-one DataMessage send. Attaches the recipient's E.164 to the
@@ -137,12 +175,7 @@ internal class LibraryTransport(
             // unidentifiedStatusBySid must agree with the actual send mode
             // (non-sealed → false); a `true` here makes Desktop create a
             // separate "Unknown contact" thread per message.
-            // expirationStartTimestamp is an absolute time, not a duration.
-            val transcript = SentTranscriptMessage(
-                Optional.of(recipientAddress), timestamp, Optional.of(message), 0L,
-                mapOf<ServiceId, Boolean>(aci to false),
-                false, Optional.empty(), emptySet(), Optional.empty(),
-            )
+            val transcript = sentTranscript(Optional.of(recipientAddress), timestamp, message, listOf(aci))
             sender.sendSyncMessage(SignalServiceSyncMessage.forSentTranscript(transcript))
         } catch (e: Exception) {
             Log.w(TAG, "DM sync transcript failed (recipient still got the message): ${e.message}")
@@ -223,18 +256,7 @@ internal class LibraryTransport(
         // primary/desktop just won't see it in the right thread until
         // storage-service sync next runs.
         try {
-            val statusBySid: Map<ServiceId, Boolean> = members.associateWith { false }
-            val transcript = SentTranscriptMessage(
-                Optional.empty(),
-                timestamp,
-                Optional.of(message),
-                0L,
-                statusBySid,
-                false,
-                Optional.empty(),
-                emptySet(),
-                Optional.empty(),
-            )
+            val transcript = sentTranscript(Optional.empty(), timestamp, message, members)
             sender.sendSyncMessage(SignalServiceSyncMessage.forSentTranscript(transcript))
         } catch (e: Exception) {
             Log.w(TAG, "Group sync transcript failed (recipients still got the message): ${e.message}")
@@ -274,6 +296,7 @@ internal class LibraryTransport(
                 messageDb.upsertConversation(jid = conversationJid, name = title, isGroup = true)
             }
             messageDb.updateGroupMeta(conversationJid, recipient.meta.masterKey, group.revision)
+            messageDb.updateGroupTimer(conversationJid, group.disappearingMessagesTimer?.duration ?: 0, group.revision)
             for (memberAci in groupManager.memberAcis(group)) {
                 messageDb.upsertParticipant(conversationJid, memberAci.toString())
             }
