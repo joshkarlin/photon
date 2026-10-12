@@ -108,7 +108,13 @@ func TestExtractContent(t *testing.T) {
 		}}, "contact", "Ann, Bo"},
 		{"live location", &waE2E.Message{LiveLocationMessage: &waE2E.LiveLocationMessage{
 			DegreesLatitude: proto.Float64(51.5), DegreesLongitude: proto.Float64(-0.12),
-		}}, "location", "51.500000, -0.120000"},
+		}}, "location", "Live location"},
+		{"named place", &waE2E.Message{LocationMessage: &waE2E.LocationMessage{
+			Name: s("British Museum"), Address: s("Great Russell St"), DegreesLatitude: proto.Float64(51.5194),
+		}}, "location", "British Museum"},
+		{"address only", &waE2E.Message{LocationMessage: &waE2E.LocationMessage{Address: s(" Great Russell St ")}}, "location", "Great Russell St"},
+		{"dropped pin", &waE2E.Message{LocationMessage: &waE2E.LocationMessage{DegreesLatitude: proto.Float64(51.5)}}, "location", ""},
+		{"document named by its title", &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{Title: s("Minutes")}}, "document", "Minutes"},
 		{"group invite", &waE2E.Message{GroupInviteMessage: &waE2E.GroupInviteMessage{GroupName: s("Book club")}}, "text", "Group invite: Book club"},
 		{"product", &waE2E.Message{ProductMessage: &waE2E.ProductMessage{
 			Product: &waE2E.ProductMessage_ProductSnapshot{Title: s("Mug")},

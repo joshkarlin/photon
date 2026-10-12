@@ -318,6 +318,11 @@ func (b *Bridge) buildMessageRow(msg *waE2E.Message, id, convJID, senderJID stri
 	if mime := getMediaMime(msg); mime != "" {
 		mediaMime = sql.NullString{String: mime, Valid: true}
 	}
+	// A place's map link (see location).
+	var mediaURL sql.NullString
+	if _, geo, ok := location(msg); ok {
+		mediaURL = sql.NullString{String: geo, Valid: true}
+	}
 
 	return &MessageRow{
 		ID:              id,
@@ -326,6 +331,7 @@ func (b *Bridge) buildMessageRow(msg *waE2E.Message, id, convJID, senderJID stri
 		Timestamp:       ts,
 		ContentType:     contentType,
 		TextBody:        sql.NullString{String: textBody, Valid: textBody != ""},
+		MediaURL:        mediaURL,
 		MediaMime:       mediaMime,
 		ReplyToID:       replyToID,
 		IsFromMe:        isFromMe,
