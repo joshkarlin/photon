@@ -30,6 +30,11 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 
 	b.log.Infof("History sync: %d conversations (retention: %d days, %d msgs)", totalConvs, cfg.MaxDays, cfg.MaxMessages)
 
+	// "Keep chats archived", as the phone had it when it sent the history.
+	if gs := data.GetGlobalSettings(); gs != nil && gs.AutoUnarchiveChats != nil {
+		b.setKeepArchived(!gs.GetAutoUnarchiveChats(), 0)
+	}
+
 	for i, conv := range convs {
 		rawJID := conv.GetID()
 		if rawJID == "" {
@@ -154,6 +159,9 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 			b.applyRevoke(jid, r.info, r.targetID)
 		}
 		b.applyHistoryTimers(jid, conv, timers)
+		if conv.Archived != nil {
+			b.SetArchived(jid, conv.GetArchived(), 0)
+		}
 
 		// Name each distinct group sender once, as live messages do, but
 		// from the contact store first: it holds their current push name,

@@ -24,7 +24,9 @@ func (b *Bridge) InitMessageDB(ctx context.Context) error {
 			muted_until     INTEGER NOT NULL DEFAULT 0,
 			name_rank       INTEGER NOT NULL DEFAULT 0,
 			disappearing_seconds INTEGER NOT NULL DEFAULT 0,
-			disappearing_set_at  INTEGER NOT NULL DEFAULT 0
+			disappearing_set_at  INTEGER NOT NULL DEFAULT 0,
+			is_archived     INTEGER NOT NULL DEFAULT 0,
+			archived_at     INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS messages (
 			id              TEXT PRIMARY KEY,
@@ -62,6 +64,13 @@ func (b *Bridge) InitMessageDB(ctx context.Context) error {
 			name_rank        INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (conversation_jid, jid)
 		)`,
+		// Account-wide settings WhatsApp syncs (see keepArchivedKey), with
+		// the unix second each was set (0 = not known).
+		`CREATE TABLE IF NOT EXISTS settings (
+			key    TEXT PRIMARY KEY,
+			value  TEXT NOT NULL,
+			set_at INTEGER NOT NULL DEFAULT 0
+		)`,
 	}
 
 	for i, stmt := range statements {
@@ -88,6 +97,7 @@ var migrations = []func(b *Bridge, ctx context.Context, tx *sql.Tx) error{
 	(*Bridge).migrateDisappearing,
 	(*Bridge).migrateViewOnce,
 	(*Bridge).migrateLocations,
+	(*Bridge).migrateArchived,
 }
 
 // migrateMessageDB runs the migrations this database hasn't had yet.

@@ -190,9 +190,9 @@ func (b *Bridge) pruneMessages() {
 
 	// Remove empty conversations (no messages left), except those holding
 	// state that arrives once: a disappearing timer (which Photon's sends
-	// must keep carrying) or a mute.
+	// must keep carrying), a mute or an archive.
 	b.msgDB.Exec(`DELETE FROM conversations WHERE jid NOT IN (SELECT DISTINCT conversation_jid FROM messages)
-		AND disappearing_seconds = 0 AND disappearing_set_at = 0 AND muted_until = 0`)
+		AND disappearing_seconds = 0 AND disappearing_set_at = 0 AND muted_until = 0 AND is_archived = 0`)
 }
 
 func (b *Bridge) pruneMedia() {

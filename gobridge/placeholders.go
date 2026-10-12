@@ -75,7 +75,7 @@ func (b *Bridge) handleUndecryptable(evt *events.UndecryptableMessage) {
 		return
 	}
 	b.upsertMessageConversation(info, chatJID, senderJID, info.ID, ts)
-	b.announceNewMessage(chatJID, info.ID, senderJID, row.TextBody.String, row.ContentType, info.IsFromMe)
+	b.announceNewMessage(chatJID, info.ID, senderJID, row.TextBody.String, row.ContentType, info.IsFromMe, ts)
 }
 
 // viewOnceMediaKind names the media a message's stanza says it carries.

@@ -107,10 +107,12 @@ func (b *Bridge) mergeConversation(from, to string) (bool, error) {
 	var unread int
 	var lastTS, mutedUntil int64
 	var timer timerSetting
+	var archived bool
+	var archivedAt int64
 	err = tx.QueryRow(`SELECT COALESCE(name, ''), name_rank, COALESCE(last_message_id, ''), last_timestamp, unread_count, muted_until,
-		disappearing_seconds, disappearing_set_at
+		disappearing_seconds, disappearing_set_at, is_archived, archived_at
 		FROM conversations WHERE jid = ?`, from).Scan(&name.name, &name.rank, &lastMsgID, &lastTS, &unread, &mutedUntil,
-		&timer.seconds, &timer.setAt)
+		&timer.seconds, &timer.setAt, &archived, &archivedAt)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -143,9 +145,15 @@ func (b *Bridge) mergeConversation(from, to string) (bool, error) {
 		WHERE jid = ?`, unread, mutedUntil, mutedUntil, mutedUntil, to); err != nil {
 		return false, err
 	}
-	// The disappearing timer set more recently under either JID stands.
+	// The disappearing timer and archive state set more recently under
+	// either JID stand.
 	if timer != (timerSetting{}) {
 		if _, _, err := b.applyTimerTx(tx, to, timerReport{timerSetting: timer}); err != nil {
+			return false, err
+		}
+	}
+	if archived || archivedAt > 0 {
+		if _, err := setArchived(tx, to, archived, archivedAt); err != nil {
 			return false, err
 		}
 	}

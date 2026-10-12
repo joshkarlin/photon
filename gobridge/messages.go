@@ -131,7 +131,7 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 		b.BroadcastEvent("message_updated", MessageUpdatedEvent{ConversationJID: chatJID, MessageID: msgID})
 		return
 	}
-	b.announceNewMessage(chatJID, msgID, senderJID, textBody, contentType, isFromMe)
+	b.announceNewMessage(chatJID, msgID, senderJID, textBody, contentType, isFromMe, ts)
 }
 
 // fetchMediaExtras saves a stored media message's inline preview and
@@ -169,10 +169,12 @@ func (b *Bridge) upsertMessageConversation(info types.MessageInfo, chatJID, send
 }
 
 // announceNewMessage counts a message just stored as unread, unless the
-// user sent it, and tells Kotlin (new_message).
-func (b *Bridge) announceNewMessage(chatJID, msgID, senderJID, text, contentType string, isFromMe bool) {
+// user sent it, unarchives its chat if the account wants that, and tells
+// Kotlin (new_message).
+func (b *Bridge) announceNewMessage(chatJID, msgID, senderJID, text, contentType string, isFromMe bool, ts int64) {
 	if !isFromMe {
 		b.IncrementUnread(chatJID)
+		b.unarchiveForMessage(chatJID, ts)
 	}
 	b.BroadcastEvent("new_message", b.newMessageEvent(chatJID, msgID, senderJID, text, contentType, isFromMe))
 }
