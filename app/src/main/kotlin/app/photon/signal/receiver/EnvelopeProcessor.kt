@@ -157,6 +157,7 @@ internal class EnvelopeProcessor(
 
         when {
             content.dataMessage != null -> dataMessages.processDataMessage(content.dataMessage!!, metadata)
+            content.editMessage != null -> dataMessages.processEditMessage(content.editMessage!!, metadata)
             content.syncMessage != null -> syncMessages.processSyncMessage(content.syncMessage!!, metadata)
             content.callMessage != null -> calls.processCallMessage(content.callMessage!!, metadata, envelopeResponse)
             content.receiptMessage != null -> receipts.processReceipt(content.receiptMessage!!, metadata)

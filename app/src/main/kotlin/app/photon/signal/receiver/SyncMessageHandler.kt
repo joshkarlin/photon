@@ -28,13 +28,14 @@ import kotlinx.coroutines.launch
 import org.signal.core.models.ServiceId
 import org.whispersystems.signalservice.api.crypto.EnvelopeMetadata
 import org.whispersystems.signalservice.internal.push.DataMessage
+import org.whispersystems.signalservice.internal.push.EditMessage
 import org.whispersystems.signalservice.internal.push.SyncMessage
 
 private const val TAG = SignalMessageReceiver.TAG
 
 /**
- * SyncMessages from the user's other devices: sent transcripts, reads,
- * view-once opens, contacts, verification, calls, and the keys and
+ * SyncMessages from the user's other devices: sent transcripts (and edits),
+ * reads, view-once opens, contacts, verification, calls, and the keys and
  * storage changes that chat mutes and archives come from
  * ([StorageMuteSync]).
  */
@@ -56,6 +57,7 @@ internal class SyncMessageHandler(
         // What this sync carries that Photon acts on (docs/VERIFY.md looks for this line).
         val kinds = listOfNotNull(
             "sent".takeIf { sync.sent != null },
+            "sentEdit".takeIf { sync.sent?.editMessage != null },
             "read[${sync.read.size}]".takeIf { !sync.read.isNullOrEmpty() },
             "viewOnceOpen".takeIf { sync.viewOnceOpen != null },
             "contacts".takeIf { sync.contacts != null },
@@ -145,12 +147,16 @@ internal class SyncMessageHandler(
     /**
      * A message the user sent from another device (a sent transcript):
      * stored as their own, in the group or DM it went to, row by row as an
-     * incoming one is (plannedRows). Reactions and deletes apply to their
-     * target instead. In a DM the transcript's timer can move the chat's,
-     * by Signal-Android's sent-transcript rule.
+     * incoming one is (plannedRows). Reactions, deletes and edits apply to
+     * their target instead. In a DM the transcript's timer can move the
+     * chat's, by Signal-Android's sent-transcript rule.
      */
     private fun processSent(sent: SyncMessage.Sent) {
         val myAci = credentials.aciString ?: return
+        sent.editMessage?.let { edit ->
+            processSentEdit(sent, edit, myAci)
+            return
+        }
         val data = sent.message ?: return
         val timestamp = data.timestamp ?: System.currentTimeMillis()
         // Reactions and deletes-for-everyone the user made on another
@@ -227,6 +233,14 @@ internal class SyncMessageHandler(
         messageDb.markConversationRead(destinationAci)
         notifier.cancelConversation(destinationAci)
         Log.d(TAG, "Stored sync sent message to $destinationAci")
+    }
+
+    /** The user edited one of their messages on another device. */
+    private fun processSentEdit(sent: SyncMessage.Sent, edit: EditMessage, myAci: String) {
+        val data = edit.dataMessage ?: return
+        val targetTimestamp = edit.targetSentTimestamp ?: return
+        val conversationJid = groupJidOf(data) ?: destinationOf(sent) ?: return
+        remoteEdits.applyEdit(myAci, targetTimestamp, data, conversationJid, notify = false)
     }
 
     /** The group a sent message went to, seeding its metadata; null for a DM or an invalid master key. */

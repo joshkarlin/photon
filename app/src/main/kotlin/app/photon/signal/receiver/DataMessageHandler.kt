@@ -23,6 +23,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import org.whispersystems.signalservice.api.crypto.EnvelopeMetadata
 import org.whispersystems.signalservice.internal.push.DataMessage
+import org.whispersystems.signalservice.internal.push.EditMessage
 
 private const val TAG = SignalMessageReceiver.TAG
 
@@ -31,8 +32,8 @@ internal val DataMessage.isExpirationUpdate: Boolean
     get() = (flags ?: 0) and DataMessage.Flags.EXPIRATION_TIMER_UPDATE.value != 0
 
 /**
- * Incoming DataMessages: text, media, contacts, polls, view-once media,
- * timer changes, reactions, deletes and group-call announcements.
+ * Incoming DataMessages and edits: text, media, contacts, polls, view-once
+ * media, timer changes, reactions, deletes and group-call announcements.
  */
 internal class DataMessageHandler(
     private val messageDb: SignalMessageDatabase,
@@ -215,5 +216,18 @@ internal class DataMessageHandler(
 
         val (previewText, previewType) = notificationContent(rows, data.body)
         messageNotifications.showMessage(conversationJid, isGroup, senderAci, previewText, previewType)
+    }
+
+    /**
+     * Someone edited a message they sent. The edit is a message of its own
+     * naming the original by its sent timestamp; its text replaces the
+     * original's in place (RemoteEdits.applyEdit). It changes no timer.
+     */
+    fun processEditMessage(edit: EditMessage, metadata: EnvelopeMetadata) {
+        val data = edit.dataMessage ?: return
+        val targetTimestamp = edit.targetSentTimestamp ?: return
+        val senderAci = senderOf(metadata)
+        val (conversationJid, _) = conversationOf(data, metadata, senderAci)
+        remoteEdits.applyEdit(senderAci, targetTimestamp, data, conversationJid, notify = true)
     }
 }
