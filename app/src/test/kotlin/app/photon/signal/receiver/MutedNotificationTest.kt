@@ -97,6 +97,33 @@ class MutedNotificationTest {
         assertEquals(2, fx.db.getConversation(group)?.unreadCount)
     }
 
+    /**
+     * A group-call start the server held longer than a ringing call lasts
+     * (Photon was offline) is recorded, unread, without alerting.
+     */
+    @Test
+    fun aLateGroupCallStartIsRecordedWithoutAlerting() {
+        val serverGot = System.currentTimeMillis() - 10 * 60_000
+        handler.processDataMessage(
+            DataMessage(timestamp = now, groupCallUpdate = DataMessage.GroupCallUpdate(eraId = "era-3")),
+            metadata(groupId),
+            serverReceivedMs = serverGot,
+            serverDeliveredMs = System.currentTimeMillis(),
+        )
+
+        assertEquals(emptyList(), fx.notifier.events)
+        assertEquals(1, fx.db.getConversation(group)?.unreadCount)
+
+        // One the server passed on promptly still alerts.
+        handler.processDataMessage(
+            DataMessage(timestamp = now + 1, groupCallUpdate = DataMessage.GroupCallUpdate(eraId = "era-4")),
+            metadata(groupId),
+            serverReceivedMs = System.currentTimeMillis() - 5_000,
+            serverDeliveredMs = System.currentTimeMillis(),
+        )
+        assertEquals(1, fx.notifier.events.size)
+    }
+
     /** A group call starting is announced at the Calls level, not as a message. */
     @Test
     fun aGroupCallStartingAlertsAsACall() {

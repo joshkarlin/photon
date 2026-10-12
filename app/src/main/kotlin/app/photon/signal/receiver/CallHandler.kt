@@ -281,14 +281,17 @@ internal class CallHandler(
 
     /**
      * Someone started (or joined) a group call. One row per call era, however
-     * many members announce it; notifies like a message (so not in a muted
-     * group), never rings.
+     * many members announce it. It alerts at the Calls level (not in a
+     * muted group) and never rings. One that reached Photon [stale] (the
+     * server held it longer than a ringing offer lasts, as for a 1:1 offer)
+     * is recorded without alerting: the call has most likely moved on.
      */
     fun recordGroupCall(
         groupJid: String,
         senderAci: String,
         eraId: String?,
         timestampMs: Long,
+        stale: Boolean = false,
     ) {
         messageDb.upsertParticipant(groupJid, senderAci)
         val id = SignalCalls.groupRowId(groupJid, eraId?.takeIf { it.isNotBlank() } ?: timestampMs.toString())
@@ -302,6 +305,10 @@ internal class CallHandler(
             dedupePrefix = null,
         )
         if (!inserted) return
+        if (stale) {
+            Log.i(TAG, "Group call start in ${groupJid.take(12)}… arrived late; recorded without alerting")
+            return
+        }
         if (messageDb.isConversationMuted(groupJid, clock() / 1000)) return
         notifier.showGroupCallStarted(names.title(groupJid, isGroup = true), names.person(senderAci), groupJid)
     }

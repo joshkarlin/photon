@@ -4,6 +4,7 @@ import android.util.Base64
 import android.util.Log
 import app.photon.signal.EarlyReadCache
 import app.photon.signal.MessageKeys
+import app.photon.signal.SignalCalls
 import app.photon.signal.SignalGroupV2Manager
 import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.db.SignalMessageDatabase
@@ -85,7 +86,16 @@ internal class DataMessageHandler(
         return conversationJid to true
     }
 
-    fun processDataMessage(data: DataMessage, metadata: EnvelopeMetadata) {
+    /**
+     * @param serverReceivedMs when the server got the envelope (null: not known)
+     * @param serverDeliveredMs when the server delivered it (0: not known)
+     */
+    fun processDataMessage(
+        data: DataMessage,
+        metadata: EnvelopeMetadata,
+        serverReceivedMs: Long? = null,
+        serverDeliveredMs: Long = 0,
+    ) {
         val senderE164 = metadata.sourceE164
         val senderAci = senderOf(metadata)
         val timestamp = data.timestamp ?: System.currentTimeMillis()
@@ -135,7 +145,12 @@ internal class DataMessageHandler(
         // record it like a message so the chat shows it. Group-call update
         // messages have no body, so this must run before the empty check.
         data.groupCallUpdate?.let { update ->
-            if (isGroup) calls.recordGroupCall(conversationJid, senderAci, update.eraId, timestamp)
+            if (isGroup) {
+                // Late by the same rule as a 1:1 offer: the server held it
+                // longer than a ringing call lasts.
+                val stale = SignalCalls.isStaleOffer(serverReceivedMs, serverDeliveredMs, System.currentTimeMillis())
+                calls.recordGroupCall(conversationJid, senderAci, update.eraId, timestamp, stale)
+            }
             return
         }
 
