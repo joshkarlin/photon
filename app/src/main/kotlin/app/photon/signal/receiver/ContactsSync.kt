@@ -5,6 +5,7 @@ import android.util.Log
 import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.db.updateContactFromSync
+import app.photon.signal.db.updateTimerFromContactSync
 import java.io.File
 import org.whispersystems.signalservice.api.SignalServiceMessageReceiver
 import org.whispersystems.signalservice.api.crypto.AttachmentCipherInputStream
@@ -110,11 +111,20 @@ internal class ContactsSync(
      * LP3 address book name them) and the name the primary's address book
      * gives them. The LP3 contact still wins when there is one; this name
      * ranks above their Signal profile name.
+     *
+     * Also the chat's disappearing-messages timer and its version, as the
+     * primary knows them. That's how Photon learns a timer it hasn't seen a
+     * message carry (a chat untouched since the v7 upgrade, or one first
+     * opened from New message), so its first send there can't turn the
+     * timer off.
      */
     internal fun ingestDeviceContact(
         contact: org.whispersystems.signalservice.api.messages.multidevice.DeviceContact,
     ) {
         val aci = contact.aci.orElse(null)?.toString() ?: return
         messageDb.updateContactFromSync(aci, phone = contact.e164.orElse(null), name = contact.name.orElse(null))
+        val timer = contact.expirationTimer.orElse(null)
+        val version = contact.expirationTimerVersion.orElse(null)
+        if (timer != null && version != null) messageDb.updateTimerFromContactSync(aci, timer.coerceAtLeast(0), version)
     }
 }

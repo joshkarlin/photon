@@ -24,15 +24,18 @@ import org.whispersystems.signalservice.internal.storage.protos.ContactRecord
 private const val TAG = SignalMessageReceiver.TAG
 
 /**
- * Chat mutes from the primary's storage service, read-only: Photon never
- * writes a manifest or a record.
+ * Chat mutes and archive state from the primary's storage service,
+ * read-only: Photon never writes a manifest or a record.
  *
  * The storage key comes from linking (the provisioning message's account
  * entropy pool) or, for a device linked before Photon kept it, from a Keys
  * sync the primary sends in answer to a KEYS request. With it, a read takes
  * the manifest only when its version has changed since the last read, then
- * only the contact and GroupV2 records that are new since then, and stores
- * each one's mute against the conversation it maps to.
+ * only the contact, GroupV2 and account records that are new since then,
+ * and stores each one's mute and archive state against the conversation it
+ * maps to (SignalStorageMutes). A record is new when the primary changed
+ * that chat, so its archive state applies; a chat a new message took out of
+ * the archive stays out until the primary says otherwise.
  *
  * Reads run after a connect (the receiver's upkeep, at most every 10
  * minutes) and when the primary says storage changed (FetchLatest
@@ -146,7 +149,7 @@ internal class StorageMuteSync(
             }
         }
 
-        val wanted = manifest.storageIds.filter(::carriesMute).associateBy(::storageIdKey)
+        val wanted = manifest.storageIds.filter(::carriesChatState).associateBy(::storageIdKey)
         val known = messageDb.storageRecordIds()
         val toRead = wanted.filterKeys { it !in known }.values.toList()
         val removed = known - wanted.keys
@@ -163,7 +166,7 @@ internal class StorageMuteSync(
             }
         }
 
-        val mutes = records.map { record -> record to storageMuteOf(record, ::contactJid, groupJid) }
+        val mutes = records.map { record -> record to storageMuteOf(record, ::contactJid, groupJid, credentials.aciString) }
         // The account was reset (or re-keyed) while this read was on the
         // network: what it read belongs to the old key.
         if (!keyBytes.contentEquals(credentials.storageKey)) return Outcome.KEY_CHANGED
@@ -172,7 +175,8 @@ internal class StorageMuteSync(
         Log.i(
             TAG,
             "Storage manifest v${manifest.version}: read ${records.size} chat records, " +
-                "${removed.size} gone, ${mutes.count { it.second.mutedUntil != 0L }} of the new ones muted",
+                "${removed.size} gone, ${mutes.count { it.second.mutedUntil != 0L }} of the new ones muted, " +
+                "${mutes.count { it.second.archived }} archived",
         )
         return Outcome.UPDATED
     }

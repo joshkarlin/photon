@@ -57,13 +57,17 @@ fun SignalMessageDatabase.pruneMessages(
         for (chunk in doomed.keys.chunked(500)) {
             val placeholders = chunk.joinToString(",") { "?" }
             db.execSQL("DELETE FROM messages WHERE id IN ($placeholders)", chunk.toTypedArray())
-            // Reactions are keyed by the "{author}_{ts}" prefix.
-            val prefixes = chunk.map { MessageKeys.prefixOf(it) }.distinct()
+        }
+        // Reactions are keyed by the "{author}_{ts}" prefix; a message stored
+        // as several rows keeps them while any of its rows is left.
+        val gonePrefixes = doomed.keys.map { MessageKeys.prefixOf(it) }.distinct().filterNot { prefixExists(db, it) }
+        for (chunk in gonePrefixes.chunked(500)) {
             db.execSQL(
-                "DELETE FROM reactions WHERE message_id IN (${prefixes.joinToString(",") { "?" }})",
-                prefixes.toTypedArray(),
+                "DELETE FROM reactions WHERE message_id IN (${chunk.joinToString(",") { "?" }})",
+                chunk.toTypedArray(),
             )
         }
+        db.execSQL("DELETE FROM message_aliases WHERE target_id NOT IN (SELECT id FROM messages)")
         val unreadPruned = doomed.values.filter { it.second }.groupingBy { it.first }.eachCount()
         decrementUnread(db, unreadPruned)
         // Keep last_message_id pointing at a row that still exists.

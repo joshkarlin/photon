@@ -1,9 +1,13 @@
 package app.photon.signal.receiver
 
+import app.photon.signal.ChatTimer
+import app.photon.signal.db.chatTimer
 import app.photon.signal.db.getContact
 import app.photon.signal.db.getConversations
+import app.photon.signal.db.getMessages
 import app.photon.signal.db.updateContactPhone
 import app.photon.signal.db.updateContactProfileName
+import app.photon.signal.db.upsertConversation
 import java.util.Optional
 import org.junit.After
 import org.junit.Before
@@ -72,5 +76,35 @@ class ContactsSyncTest {
 
         assertNull(fx.db.getContact(mum)?.name)
         assertEquals(mumPhone, fx.db.getContact(mum)?.phone)
+    }
+
+    /**
+     * The primary's timer for each person: a chat Photon has a row for
+     * takes it (by the transcript rule, with no line), and one it starts
+     * later begins with it. A timer without a version can't be ordered
+     * against what messages said, so it's ignored.
+     */
+    @Test
+    fun theDisappearingTimerComesWithTheContact() {
+        val dad = "00000000-0000-4000-8000-0000000000d0"
+        fx.db.upsertConversation(jid = mum, name = null, isGroup = false)
+
+        sync.ingestDeviceContact(
+            DeviceContact(
+                Optional.of(ServiceId.ACI.parseOrNull(mum)!!), Optional.of(mumPhone), Optional.empty(),
+                Optional.empty(), Optional.of(604_800), Optional.of(2), Optional.empty(),
+            ),
+        )
+        sync.ingestDeviceContact(
+            DeviceContact(
+                Optional.of(ServiceId.ACI.parseOrNull(dad)!!), Optional.empty(), Optional.empty(),
+                Optional.empty(), Optional.of(3_600), Optional.empty(), Optional.empty(),
+            ),
+        )
+
+        assertEquals(ChatTimer(604_800, 2), fx.db.chatTimer(mum))
+        assertEquals(emptyList(), fx.db.getMessages(mum))
+        fx.db.upsertConversation(jid = dad, name = null, isGroup = false)
+        assertEquals(ChatTimer.DEFAULT, fx.db.chatTimer(dad))
     }
 }

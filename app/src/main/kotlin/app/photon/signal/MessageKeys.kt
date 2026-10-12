@@ -16,6 +16,18 @@ object MessageKeys {
     /** The `"{author}_{timestampMs}"` prefix a message shares with its reactions. */
     fun prefixOf(messageId: String): String = messageId.substringBeforeLast("_")
 
+    /**
+     * The id of row [index] of a message stored as several rows (one per
+     * attachment; see plannedRows): the first is [messageId] itself, the
+     * rest add ".2", ".3", … after the random suffix, so every row keeps the
+     * message's prefix, and sorts after the first.
+     */
+    fun partId(messageId: String, index: Int): String =
+        if (index == 0) messageId else "$messageId.${index + 1}"
+
+    /** Whether [messageId] is a later row of a message stored as several ([partId]). */
+    fun isExtraPart(messageId: String): Boolean = messageId.substringAfterLast("_").contains('.')
+
     /** `(authorAci, timestampMs)` parsed from a message id, or null if malformed. */
     fun parse(messageId: String): Pair<String, Long>? {
         val prefix = prefixOf(messageId)
@@ -38,11 +50,12 @@ object MessageKeys {
     /**
      * Remap values keyed by message-id *prefix* back onto the full message ids
      * supplied. Used to attach reactions (stored by prefix) to the full ids the
-     * UI indexes by. Preserves input order.
+     * UI indexes by. A message stored as several rows shows them once, on its
+     * first row. Preserves input order.
      */
     fun <T> remapByPrefix(messageIds: List<String>, byPrefix: Map<String, T>): Map<String, T> {
         val out = LinkedHashMap<String, T>()
-        for (id in messageIds) byPrefix[prefixOf(id)]?.let { out[id] = it }
+        for (id in messageIds) if (!isExtraPart(id)) byPrefix[prefixOf(id)]?.let { out[id] = it }
         return out
     }
 }

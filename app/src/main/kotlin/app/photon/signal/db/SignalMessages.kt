@@ -6,6 +6,7 @@ import app.photon.data.db.toMessage
 import app.photon.data.db.toMessages
 import app.photon.data.model.Message
 import app.photon.signal.MessageKeys
+import app.photon.signal.PlannedRow
 import app.photon.signal.db.SignalMessageDatabase.Companion.STATUS_READ
 import app.photon.signal.db.SignalMessageDatabase.Companion.STATUS_UNREAD
 
@@ -25,6 +26,7 @@ fun SignalMessageDatabase.insertMessage(
     isFromMe: Boolean = false,
     status: String = "received",
     rawProto: ByteArray? = null,
+    expiresIn: Int = 0,
 ) {
     writableDatabase.insertWithOnConflict(
         "messages", null,
@@ -44,10 +46,140 @@ fun SignalMessageDatabase.insertMessage(
             // For incoming media: the serialized AttachmentPointer proto,
             // so the attachment can be downloaded on demand later.
             if (rawProto != null) put("raw_proto", rawProto)
+            put("expires_in", expiresIn)
         },
         SQLiteDatabase.CONFLICT_IGNORE,
     )
     notifyChanged()
+}
+
+/** One planned row as a messages row; see [insertIncomingRows] and [insertOwnRows]. */
+private fun PlannedRow.values(
+    id: String,
+    conversationJid: String,
+    senderJid: String,
+    timestamp: Long,
+    replyToId: String?,
+    isFromMe: Boolean,
+    status: String,
+    expiresIn: Int,
+    expiresAt: Long,
+) = ContentValues().apply {
+    put("id", id)
+    put("conversation_jid", conversationJid)
+    put("sender_jid", senderJid)
+    put("timestamp", timestamp)
+    put("content_type", contentType)
+    put("text_body", text)
+    attachment?.let { pointer ->
+        put("media_mime", pointer.contentType)
+        pointer.size?.let { put("media_size", it.toLong()) }
+        // The serialized pointer, so the media can be downloaded when tapped.
+        put("raw_proto", pointer.encode())
+    }
+    put("reply_to_id", replyToId)
+    put("is_from_me", if (isFromMe) 1 else 0)
+    put("status", status)
+    put("expires_in", expiresIn)
+    put("expires_at", expiresAt)
+}
+
+/**
+ * Store an incoming message as its [rows] (plannedRows: one per attachment,
+ * contact, poll or body), each counted unread, in one transaction. The
+ * first row is [messageId], the rest [MessageKeys.partId]s of it; only the
+ * first quotes [replyToId]. Each row disappears [expiresIn] seconds after
+ * it's read (0: never).
+ *
+ * Dedupes like [insertIncomingMessage], on the message's
+ * "{author}_{timestampMs}" prefix: returns false, changing nothing, for a
+ * redelivery. [alreadyRead] stores it read (a read sync came first), with
+ * its clock started. A new message unarchives its chat
+ * ([unarchiveForNewMessage]).
+ */
+internal fun SignalMessageDatabase.insertIncomingRows(
+    messageId: String,
+    rows: List<PlannedRow>,
+    conversationJid: String,
+    senderJid: String,
+    timestamp: Long,
+    replyToId: String? = null,
+    expiresIn: Int = 0,
+    alreadyRead: Boolean = false,
+    nowMs: Long = System.currentTimeMillis(),
+): Boolean {
+    if (rows.isEmpty()) return false
+    val db = writableDatabase
+    val expiresAt = if (alreadyRead && expiresIn > 0) nowMs + expiresIn * 1000L else 0L
+    db.beginTransaction()
+    try {
+        if (rowExists(db, messageId) || prefixExists(db, MessageKeys.prefixOf(messageId))) return false
+        var lastId = messageId
+        rows.forEachIndexed { index, row ->
+            lastId = MessageKeys.partId(messageId, index)
+            db.insertOrThrow(
+                "messages", null,
+                row.values(
+                    lastId, conversationJid, senderJid, timestamp,
+                    replyToId.takeIf { index == 0 }, isFromMe = false,
+                    status = if (alreadyRead) STATUS_READ else STATUS_UNREAD,
+                    expiresIn = expiresIn, expiresAt = expiresAt,
+                ),
+            )
+        }
+        setLastMessageIfNewer(db, conversationJid, lastId, timestamp)
+        if (!alreadyRead) adjustUnread(db, conversationJid, rows.size)
+        unarchiveForNewMessage(db, conversationJid, nowMs / 1000)
+        db.setTransactionSuccessful()
+    } finally {
+        db.endTransaction()
+    }
+    notifyChanged()
+    if (expiresAt > 0) notifyExpiryScheduled()
+    return true
+}
+
+/**
+ * Store the user's own message from another device (a sent transcript) as
+ * its [rows], "sent", unless its prefix is already stored. Its clock
+ * started at [expireStartMs] when it has a timer.
+ */
+internal fun SignalMessageDatabase.insertOwnRows(
+    messageId: String,
+    rows: List<PlannedRow>,
+    conversationJid: String,
+    senderJid: String,
+    timestamp: Long,
+    replyToId: String? = null,
+    expiresIn: Int = 0,
+    expireStartMs: Long = 0,
+): Boolean {
+    if (rows.isEmpty()) return false
+    val db = writableDatabase
+    val expiresAt = if (expiresIn > 0) expireStartMs + expiresIn * 1000L else 0L
+    db.beginTransaction()
+    try {
+        if (rowExists(db, messageId) || prefixExists(db, MessageKeys.prefixOf(messageId))) return false
+        var lastId = messageId
+        rows.forEachIndexed { index, row ->
+            lastId = MessageKeys.partId(messageId, index)
+            db.insertOrThrow(
+                "messages", null,
+                row.values(
+                    lastId, conversationJid, senderJid, timestamp,
+                    replyToId.takeIf { index == 0 }, isFromMe = true, status = "sent",
+                    expiresIn = expiresIn, expiresAt = expiresAt,
+                ),
+            )
+        }
+        setLastMessageIfNewer(db, conversationJid, lastId, timestamp)
+        db.setTransactionSuccessful()
+    } finally {
+        db.endTransaction()
+    }
+    notifyChanged()
+    if (expiresAt > 0) notifyExpiryScheduled()
+    return true
 }
 
 /**
@@ -131,14 +263,40 @@ fun SignalMessageDatabase.updateMessageStatus(id: String, status: String) {
     notifyChanged()
 }
 
-/** Remove a message and its reactions from the local DB. */
+/**
+ * Remove a row and, once none of its message's rows is left, the message's
+ * reactions from the local DB.
+ */
 fun SignalMessageDatabase.deleteMessage(id: String) {
-    writableDatabase.execSQL("DELETE FROM messages WHERE id = ?", arrayOf(id))
+    val db = writableDatabase
+    db.execSQL("DELETE FROM messages WHERE id = ?", arrayOf(id))
     // Reactions are keyed by the "{author}_{timestampMs}" prefix of the id.
-    writableDatabase.execSQL(
-        "DELETE FROM reactions WHERE message_id = ?",
-        arrayOf(id.substringBeforeLast("_")),
-    )
+    val prefix = MessageKeys.prefixOf(id)
+    if (!prefixExists(db, prefix)) db.execSQL("DELETE FROM reactions WHERE message_id = ?", arrayOf(prefix))
+    notifyChanged()
+}
+
+/**
+ * Remove every row of the message keyed [prefix] (all its attachments) and
+ * its reactions: our own delete-for-everyone, which the other devices apply
+ * to the whole message.
+ */
+fun SignalMessageDatabase.deleteMessagesByPrefix(prefix: String) {
+    val db = writableDatabase
+    db.beginTransaction()
+    try {
+        val jids = db.rawQuery(
+            "SELECT DISTINCT conversation_jid FROM messages WHERE id >= ? AND id < ?",
+            arrayOf("${prefix}_", "${prefix}_\uFFFF"),
+        ).use { c -> buildList { while (c.moveToNext()) add(c.getString(0)) } }
+        db.execSQL("DELETE FROM messages WHERE id >= ? AND id < ?", arrayOf("${prefix}_", "${prefix}_\uFFFF"))
+        db.execSQL("DELETE FROM reactions WHERE message_id = ?", arrayOf(prefix))
+        db.execSQL("DELETE FROM message_aliases WHERE target_id NOT IN (SELECT id FROM messages)")
+        jids.forEach { repairLastMessageId(db, it) }
+        db.setTransactionSuccessful()
+    } finally {
+        db.endTransaction()
+    }
     notifyChanged()
 }
 
@@ -187,10 +345,13 @@ fun SignalMessageDatabase.getMessage(id: String): Message? {
 fun SignalMessageDatabase.findMessageByPrefix(prefix: String): Message? {
     // Range scan instead of LIKE — LIKE is case-insensitive in SQLite so
     // it can't use the PK index. IDs are ASCII "{aci}_{tsMs}_{rand}", so
-    // ["prefix_", "prefix_\uFFFF") covers every suffix.
+    // ["prefix_", "prefix_\uFFFF") covers every suffix. The first row of a
+    // message stored as several sorts first. A quote of an edited message
+    // may name the edit (see resolveMessagePrefix).
+    val resolved = resolveMessagePrefix(prefix)
     return readableDatabase.rawQuery(
-        "SELECT * FROM messages WHERE id >= ? AND id < ? LIMIT 1",
-        arrayOf("${prefix}_", "${prefix}_\uFFFF"),
+        "SELECT * FROM messages WHERE id >= ? AND id < ? ORDER BY id LIMIT 1",
+        arrayOf("${resolved}_", "${resolved}_\uFFFF"),
     ).use { if (it.moveToFirst()) it.toMessage(::signalStatus) else null }
 }
 
@@ -208,3 +369,6 @@ fun SignalMessageDatabase.updateStatusByIdPrefix(prefix: String, status: String)
     )
     notifyChanged()
 }
+
+/** Whether a message keyed "{author}_{timestampMs}" [prefix] is stored (a redelivery when it is). */
+fun SignalMessageDatabase.isMessageStored(prefix: String): Boolean = prefixExists(readableDatabase, prefix)

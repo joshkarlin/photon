@@ -18,7 +18,9 @@ internal data class ReadSyncPlan(
 )
 
 internal fun planReadSync(pendingIds: List<String>): ReadSyncPlan {
-    val entries = mutableListOf<Pair<ServiceId.ACI, Long>>()
+    // A set: a message stored as several rows (one per attachment) is one
+    // entry, covering all of them.
+    val entries = linkedSetOf<Pair<ServiceId.ACI, Long>>()
     val rowIds = mutableListOf<String>()
     val skipped = mutableListOf<String>()
     for (id in pendingIds) {
@@ -31,7 +33,7 @@ internal fun planReadSync(pendingIds: List<String>): ReadSyncPlan {
             rowIds.add(id)
         }
     }
-    return ReadSyncPlan(entries, rowIds, skipped)
+    return ReadSyncPlan(entries.toList(), rowIds, skipped)
 }
 
 /**

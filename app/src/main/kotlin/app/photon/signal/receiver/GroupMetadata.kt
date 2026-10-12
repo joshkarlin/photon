@@ -10,10 +10,12 @@ import app.photon.signal.db.getConversation
 import app.photon.signal.db.getGroupMeta
 import app.photon.signal.db.getGroupsNeedingMetadataRefresh
 import app.photon.signal.db.updateGroupMeta
+import app.photon.signal.db.updateGroupTimer
 import app.photon.signal.db.upsertConversation
 import app.photon.signal.db.upsertParticipant
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import org.signal.storageservice.storage.protos.groups.local.DecryptedGroup
 
 private const val TAG = SignalMessageReceiver.TAG
 
@@ -31,7 +33,8 @@ internal class GroupMetadata(
     /**
      * Repair/refetch GroupV2 metadata after reconnect. Blank titles need
      * the old name-wipe repair; empty participant tables need a refetch so
-     * group-only members can be session-primed below.
+     * group-only members can be session-primed below; a timer not read at
+     * the group's latest revision needs one so Photon's messages carry it.
      */
     fun refreshGroupsNeedingMetadata() {
         try {
@@ -69,11 +72,12 @@ internal class GroupMetadata(
     }
 
     /**
-     * Async-fetch the GroupV2 state from the server (title + members),
+     * Async-fetch the GroupV2 state from the server (title, members, timer),
      * decrypt it via libsignal's GroupsV2Operations, and write back: the
-     * conversation row's `name` becomes the decrypted title, and every
-     * member ACI lands in the participants table (for sends, session pings
-     * and sender names). Failures are non-fatal — the group shows as
+     * conversation row's `name` becomes the decrypted title, the
+     * disappearing-messages timer is stored (a change adds its line), and
+     * every member ACI lands in the participants table (for sends, session
+     * pings and sender names). Failures are non-fatal — the group shows as
      * "Signal group" until the next message or reconnect tries again.
      */
     private fun resolveGroupMetadata(conversationJid: String, masterKey: ByteArray) {
@@ -85,12 +89,20 @@ internal class GroupMetadata(
             Log.w(TAG, "Group fetch returned null for ${conversationJid.take(12)}… — see GroupV2Manager warnings")
             return
         }
+        applyGroupState(conversationJid, group)
+        sessionPings.scheduleActiveContactPing()
+    }
+
+    /** Store what a fetched group state says: title, disappearing-messages timer and members. */
+    internal fun applyGroupState(conversationJid: String, group: DecryptedGroup) {
         val title = group.title?.takeIf { it.isNotBlank() }
         messageDb.upsertConversation(jid = conversationJid, name = title, isGroup = true)
+        // The group's disappearing-messages timer: the only source Signal
+        // uses for a group (it ignores the timer on group messages).
+        messageDb.updateGroupTimer(conversationJid, group.disappearingMessagesTimer?.duration ?: 0, group.revision)
 
-        val acis = gm.memberAcis(group)
+        val acis = SignalGroupV2Manager.memberAcis(group)
         for (memberAci in acis) messageDb.upsertParticipant(conversationJid, memberAci.toString())
         Log.i(TAG, "Resolved group ${conversationJid.take(12)}…: $title (${acis.size} members)")
-        sessionPings.scheduleActiveContactPing()
     }
 }

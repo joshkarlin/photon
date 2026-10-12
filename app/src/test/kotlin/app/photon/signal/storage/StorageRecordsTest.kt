@@ -20,7 +20,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Storage records → which chat they're about and its mute. */
+/** Storage records → which chat they're about, its mute and whether it's archived. */
 class StorageRecordsTest {
 
     private val aci = "00000000-0000-4000-8000-00000000a11c"
@@ -93,11 +93,48 @@ class StorageRecordsTest {
 
         assertEquals(
             StorageMute(Base64.getEncoder().encodeToString(byteArrayOf(1, 2, 3)), aci, -1),
-            storageMuteOf(contact, { jid(it) }, groupJids),
+            storageMuteOf(contact, { jid(it) }, groupJids, selfJid = null),
         )
         assertEquals(
             StorageMute(Base64.getEncoder().encodeToString(byteArrayOf(4, 5, 6)), "group-jid", 1_700_000_000),
-            storageMuteOf(group, { jid(it) }, groupJids),
+            storageMuteOf(group, { jid(it) }, groupJids, selfJid = null),
+        )
+    }
+
+    @Test
+    fun contactAndGroupRecordsCarryTheirArchive() {
+        val masterKey = ByteArray(32) { 9 }
+        val contact = SignalStorageRecord(
+            StorageId.forContact(byteArrayOf(1)), StorageRecord(contact = ContactRecord(aci = aci, archived = true)),
+        )
+        val group = SignalStorageRecord(
+            StorageId.forGroupV2(byteArrayOf(2)),
+            StorageRecord(groupV2 = GroupV2Record(masterKey = masterKey.toByteString(), archived = true)),
+        )
+        val unarchived = SignalStorageRecord(
+            StorageId.forContact(byteArrayOf(3)), StorageRecord(contact = ContactRecord(aci = aci)),
+        )
+
+        assertTrue(storageMuteOf(contact, { jid(it) }, { "group-jid" }, selfJid = null).archived)
+        assertEquals("group-jid", storageMuteOf(group, { jid(it) }, { "group-jid" }, selfJid = null).jid)
+        assertTrue(storageMuteOf(group, { jid(it) }, { "group-jid" }, selfJid = null).archived)
+        assertFalse(storageMuteOf(unarchived, { jid(it) }, { "group-jid" }, selfJid = null).archived)
+    }
+
+    /**
+     * The account record is Note to Self's (its archive) and carries "keep
+     * muted chats archived"; it's never muted.
+     */
+    @Test
+    fun theAccountRecordIsNoteToSelfAndKeepsMutedChatsArchived() {
+        val account = SignalStorageRecord(
+            StorageId.forAccount(byteArrayOf(8)),
+            StorageRecord(account = AccountRecord(noteToSelfArchived = true, keepMutedChatsArchived = true)),
+        )
+
+        assertEquals(
+            StorageMute("CA==", "me", 0, archived = true, keepMutedChatsArchived = true),
+            storageMuteOf(account, { jid(it) }, { "never" }, selfJid = "me"),
         )
     }
 
@@ -107,19 +144,20 @@ class StorageRecordsTest {
             StorageId.forGroupV2(byteArrayOf(7)),
             StorageRecord(groupV2 = GroupV2Record(masterKey = ByteArray(5).toByteString(), mutedUntilTimestamp = 1)),
         )
+        // Before the account is known (no ACI), its record names no chat.
         val account = SignalStorageRecord(StorageId.forAccount(byteArrayOf(8)), StorageRecord(account = AccountRecord()))
 
-        assertNull(storageMuteOf(badGroup, { jid(it) }, { "never" }).jid)
-        assertEquals(StorageMute("CA==", null, 0), storageMuteOf(account, { jid(it) }, { "never" }))
+        assertNull(storageMuteOf(badGroup, { jid(it) }, { "never" }, selfJid = null).jid)
+        assertEquals(StorageMute("CA==", null, 0), storageMuteOf(account, { jid(it) }, { "never" }, selfJid = null))
     }
 
     @Test
-    fun onlyContactAndGroupV2RecordsAreRead() {
-        assertTrue(carriesMute(StorageId.forContact(byteArrayOf(1))))
-        assertTrue(carriesMute(StorageId.forGroupV2(byteArrayOf(1))))
-        assertFalse(carriesMute(StorageId.forAccount(byteArrayOf(1))))
-        assertFalse(carriesMute(StorageId.forGroupV1(byteArrayOf(1))))
-        assertFalse(carriesMute(StorageId.forStoryDistributionList(byteArrayOf(1))))
+    fun onlyContactGroupV2AndAccountRecordsAreRead() {
+        assertTrue(carriesChatState(StorageId.forContact(byteArrayOf(1))))
+        assertTrue(carriesChatState(StorageId.forGroupV2(byteArrayOf(1))))
+        assertTrue(carriesChatState(StorageId.forAccount(byteArrayOf(1))))
+        assertFalse(carriesChatState(StorageId.forGroupV1(byteArrayOf(1))))
+        assertFalse(carriesChatState(StorageId.forStoryDistributionList(byteArrayOf(1))))
     }
 
     /** The storage key is the AEP's master key's storage-service key; a malformed pool gives none. */

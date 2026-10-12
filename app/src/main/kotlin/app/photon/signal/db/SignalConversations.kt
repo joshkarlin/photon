@@ -1,7 +1,7 @@
 package app.photon.signal.db
 
+import android.database.Cursor
 import app.photon.data.db.toConversation
-import app.photon.data.db.toConversations
 import app.photon.data.model.Conversation
 import app.photon.signal.db.SignalMessageDatabase.Contact
 import app.photon.signal.db.SignalMessageDatabase.GroupMeta
@@ -24,12 +24,17 @@ fun SignalMessageDatabase.upsertConversation(
     // contacts-sync ingest) don't clobber the existing last_message_id or
     // last_timestamp on a conversation that already has message history.
     // INSERT plants defaults on new rows; UPDATE only writes the fields
-    // the caller actually supplied. A new row takes the mute the storage
-    // service gave its jid before it existed (SignalStorageMutes).
+    // the caller actually supplied. A new row takes the mute and archive
+    // state the storage service gave its jid before it existed
+    // (SignalStorageMutes), and the timer the contact sync gave the person
+    // (SignalTimers).
     writableDatabase.execSQL(
         """
-        INSERT INTO conversations (jid, name, is_group, last_message_id, last_timestamp, updated_at, muted_until)
-          VALUES (?, ?, ?, ?, ?, ?, ${storageMuteOf("?")})
+        INSERT INTO conversations (jid, name, is_group, last_message_id, last_timestamp, updated_at, muted_until,
+                                   archived, expire_timer, expire_timer_version)
+          VALUES (?, ?, ?, ?, ?, ?, ${storageMuteOf("?")}, ${storageArchivedOf("?")},
+                  COALESCE((SELECT expire_timer FROM contacts WHERE jid = ? AND ? = 0), 0),
+                  COALESCE((SELECT expire_timer_version FROM contacts WHERE jid = ? AND ? = 0), 1))
         ON CONFLICT(jid) DO UPDATE SET
           name           = COALESCE(excluded.name, conversations.name),
           is_group       = excluded.is_group,
@@ -47,6 +52,9 @@ fun SignalMessageDatabase.upsertConversation(
             lastTimestamp,
             System.currentTimeMillis(),
             jid,
+            jid,
+            jid, if (isGroup) 1 else 0,
+            jid, if (isGroup) 1 else 0,
         ),
     )
     notifyChanged()
@@ -88,11 +96,20 @@ fun SignalMessageDatabase.getGroupMeta(jid: String): GroupMeta? {
     }
 }
 
+/**
+ * A conversation row as the shared model, with Signal's own columns: its
+ * archive state and disappearing-messages timer.
+ */
+internal fun Cursor.toSignalConversation(): Conversation = toConversation().copy(
+    isArchived = getInt(getColumnIndexOrThrow("archived")) == 1,
+    disappearingSeconds = getLong(getColumnIndexOrThrow("expire_timer")),
+)
+
 /** Every conversation row, including those [getConversationsWithContacts] doesn't list. */
 fun SignalMessageDatabase.getConversations(): List<Conversation> {
     return readableDatabase.rawQuery(
         "SELECT * FROM conversations ORDER BY last_timestamp DESC", null,
-    ).use { it.toConversations() }
+    ).use { c -> buildList { while (c.moveToNext()) add(c.toSignalConversation()) } }
 }
 
 // A conversation row and the contacts row of the person it's with (none
@@ -101,8 +118,8 @@ private const val CONVERSATION_WITH_CONTACT =
     "SELECT c.*, ct.jid AS ct_jid, ct.name AS ct_name, ct.phone_number AS ct_phone, ct.profile_name AS ct_profile " +
         "FROM conversations c LEFT JOIN contacts ct ON ct.jid = c.jid"
 
-private fun android.database.Cursor.conversationWithContact(): Pair<Conversation, Contact?> =
-    toConversation() to nameSources(getColumnIndexOrThrow("ct_jid"))
+private fun Cursor.conversationWithContact(): Pair<Conversation, Contact?> =
+    toSignalConversation() to nameSources(getColumnIndexOrThrow("ct_jid"))
 
 /**
  * The conversation list, each with its name sources, newest first. Only
@@ -128,7 +145,7 @@ fun SignalMessageDatabase.getConversationWithContact(jid: String): Pair<Conversa
 fun SignalMessageDatabase.getConversation(jid: String): Conversation? {
     return readableDatabase.rawQuery(
         "SELECT * FROM conversations WHERE jid = ?", arrayOf(jid),
-    ).use { if (it.moveToFirst()) it.toConversation() else null }
+    ).use { if (it.moveToFirst()) it.toSignalConversation() else null }
 }
 
 /** Whether [jid]'s chat has a message, so [getConversationsWithContacts] lists it. */
@@ -137,10 +154,14 @@ fun SignalMessageDatabase.hasMessages(jid: String): Boolean =
         .use { it.moveToFirst() }
 
 /**
- * Groups whose server metadata should be refreshed after reconnect: either
- * the title is blank or the member table is empty. The latter matters for
- * linked-device session priming, because group-only contacts are discovered
- * through GroupV2 member state before they can be NullMessage-pinged.
+ * Groups whose server metadata should be refreshed after reconnect: the
+ * title is blank, the member table is empty, or the disappearing-messages
+ * timer hasn't been read at the group's latest revision (a fetch that
+ * failed, or every group once after the v7 upgrade). Empty members matter
+ * for linked-device session priming, because group-only contacts are
+ * discovered through GroupV2 member state before they can be
+ * NullMessage-pinged; the timer, because Photon's messages into the group
+ * must carry it.
  */
 fun SignalMessageDatabase.getGroupsNeedingMetadataRefresh(): List<Pair<String, ByteArray>> {
     val out = mutableListOf<Pair<String, ByteArray>>()
@@ -155,6 +176,8 @@ fun SignalMessageDatabase.getGroupsNeedingMetadataRefresh(): List<Pair<String, B
                 OR NOT EXISTS (
                     SELECT 1 FROM participants p WHERE p.conversation_jid = c.jid
                 )
+                OR c.timer_revision < c.group_revision
+                OR c.timer_revision < 0
             )
         """,
         null,

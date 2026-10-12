@@ -20,13 +20,24 @@ internal sealed interface Recipient {
 
 /** What an outgoing DataMessage carries. */
 internal sealed interface OutgoingContent {
-    /** Text and/or attachments, optionally quoting the message keyed [replyPrefix]. */
+    /**
+     * Text and/or attachments, optionally quoting the message keyed
+     * [replyPrefix], sent with the chat's disappearing-messages [timer] and
+     * its version, so it disappears as the chat's messages do and can't
+     * change the chat's timer.
+     */
     data class Message(
         val text: String?,
         val replyPrefix: String?,
         val attachments: List<SignalServiceAttachment> = emptyList(),
+        val timer: ChatTimer = ChatTimer.DEFAULT,
     ) : OutgoingContent
 
+    /**
+     * A reaction. Like a delete-for-everyone, it goes without a timer, as
+     * Signal-Android sends them (ReactionSendJob, RemoteDeleteSendJob):
+     * receivers never read a timer from either.
+     */
     data class Reaction(val reaction: SignalServiceDataMessage.Reaction) : OutgoingContent
 
     /** Delete-for-everyone of the message sent at [targetSentTimestamp]. */

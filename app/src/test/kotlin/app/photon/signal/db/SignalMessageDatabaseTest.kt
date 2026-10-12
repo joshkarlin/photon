@@ -28,18 +28,30 @@ class SignalMessageDatabaseTest {
     /**
      * Reconnect-time GroupV2 refresh must also pick up named groups with an
      * empty participants table, because those member ACIs are the session-ping
-     * targets for group-only contacts.
+     * targets for group-only contacts, and groups whose disappearing-messages
+     * timer wasn't read at their latest revision, because Photon's messages
+     * there must carry it.
      */
     @Test
-    fun getGroupsNeedingMetadataRefresh_selectsBlankOrParticipantlessGroups() {
+    fun getGroupsNeedingMetadataRefresh_selectsBlankParticipantlessOrTimerlessGroups() {
         val mk = ByteArray(32) { 2 }
         db.upsertConversation(jid = "meta-blank", name = null, isGroup = true)
         db.updateGroupMeta("meta-blank", mk, 1)
         db.upsertConversation(jid = "meta-no-participants", name = "Known title", isGroup = true)
         db.updateGroupMeta("meta-no-participants", mk, 1)
+        db.updateGroupTimer("meta-no-participants", 0, 1)
         db.upsertConversation(jid = "meta-ready", name = "Ready", isGroup = true)
         db.updateGroupMeta("meta-ready", mk, 1)
         db.upsertParticipant("meta-ready", "meta-member")
+        db.updateGroupTimer("meta-ready", 0, 1)
+        db.upsertConversation(jid = "meta-timer-unread", name = "Never read", isGroup = true)
+        db.updateGroupMeta("meta-timer-unread", mk, 1)
+        db.upsertParticipant("meta-timer-unread", "meta-member")
+        db.upsertConversation(jid = "meta-timer-stale", name = "Moved on", isGroup = true)
+        db.updateGroupMeta("meta-timer-stale", mk, 1)
+        db.upsertParticipant("meta-timer-stale", "meta-member")
+        db.updateGroupTimer("meta-timer-stale", 0, 1)
+        db.updateGroupMeta("meta-timer-stale", mk, 2)
         db.upsertConversation(jid = "meta-keyless", name = null, isGroup = true)
 
         val refreshable = db.getGroupsNeedingMetadataRefresh()
@@ -47,7 +59,7 @@ class SignalMessageDatabaseTest {
             .filter { it.startsWith("meta-") }
             .toSet()
 
-        assertEquals(setOf("meta-blank", "meta-no-participants"), refreshable)
+        assertEquals(setOf("meta-blank", "meta-no-participants", "meta-timer-unread", "meta-timer-stale"), refreshable)
     }
 
     /**

@@ -185,4 +185,28 @@ class SignalServiceIdMergeTest {
 
         assertEquals(setOf(pni to aci, phone to aci), db.getResolvableNonAciIds().toSet())
     }
+
+    /**
+     * A message stored as several rows (one per attachment) moves whole:
+     * its later rows aren't duplicates of its first. An edit made under the
+     * PNI still finds it.
+     */
+    @Test
+    fun aMessageWithSeveralAttachmentsMovesWhole() {
+        db.upsertConversation(jid = pni, name = null, isGroup = false)
+        db.updateContactPhone(pni, phone)
+        val id = "${pni}_${t}_r"
+        db.insertIncomingRows(
+            id, listOf(app.photon.signal.PlannedRow("image", "a"), app.photon.signal.PlannedRow("image", null)),
+            pni, pni, t / 1000,
+        )
+        db.applyEdit("${pni}_$t", "${pni}_${t + 9}", pni, "a, edited")
+        db.updateContactFromSync(aci, phone, null)
+
+        assertTrue(db.mergeServiceId(pni, aci))
+
+        assertEquals(listOf("${aci}_${t}_r", "${aci}_${t}_r.2"), db.getMessages(aci).map { it.id }.sorted())
+        assertEquals(2, db.getConversation(aci)?.unreadCount)
+        assertEquals("${aci}_$t", db.resolveMessagePrefix("${aci}_${t + 9}"))
+    }
 }

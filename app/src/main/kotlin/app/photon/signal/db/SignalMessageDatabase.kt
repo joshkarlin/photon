@@ -3,19 +3,25 @@ package app.photon.signal.db
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import android.util.Log
 import app.photon.data.model.MessageStatus
+import app.photon.signal.documentName
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
+import org.whispersystems.signalservice.internal.push.AttachmentPointer
 
 /**
  * Photon's Signal message store: schema, migrations and change
  * notifications. The queries are extension functions grouped by concern in
  * this package: SignalConversations, SignalMessages, SignalReadState,
- * SignalContacts, SignalReactions, SignalCallRows, SignalRetention and
- * SignalStorageMutes.
+ * SignalContacts, SignalReactions, SignalCallRows, SignalRetention,
+ * SignalStorageMutes, SignalTimers and SignalEdits.
  */
 class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
-    context, DATABASE_NAME, null, 6,
+    context, DATABASE_NAME, null, 7,
 ) {
     companion object {
         const val DATABASE_NAME = "signal_messages.db"
@@ -34,6 +40,8 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         // Call log rows (see SignalCalls). Their ids aren't "{author}_{ts}"
         // keys, so they're excluded from read sync, dedupe and reactions.
         const val CONTENT_CALL = "call"
+
+        private const val TAG = "SignalRepository"
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -50,7 +58,11 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                 updated_at      INTEGER NOT NULL DEFAULT 0,
                 master_key      BLOB,
                 group_revision  INTEGER NOT NULL DEFAULT 0,
-                muted_until     INTEGER NOT NULL DEFAULT 0
+                muted_until     INTEGER NOT NULL DEFAULT 0,
+                archived        INTEGER NOT NULL DEFAULT 0,
+                expire_timer    INTEGER NOT NULL DEFAULT 0,
+                expire_timer_version INTEGER NOT NULL DEFAULT 1,
+                timer_revision  INTEGER NOT NULL DEFAULT -1
             )
         """)
         db.execSQL("""
@@ -71,6 +83,8 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                 is_from_me      INTEGER NOT NULL DEFAULT 0,
                 status          TEXT NOT NULL DEFAULT 'sent',
                 raw_proto       BLOB,
+                expires_in      INTEGER NOT NULL DEFAULT 0,
+                expires_at      INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (conversation_jid) REFERENCES conversations(jid)
             )
         """)
@@ -101,10 +115,13 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                 profile_key  BLOB,
                 profile_name TEXT,
                 profile_fetched_at INTEGER NOT NULL DEFAULT 0,
-                updated_at   INTEGER NOT NULL DEFAULT 0
+                updated_at   INTEGER NOT NULL DEFAULT 0,
+                expire_timer INTEGER,
+                expire_timer_version INTEGER
             )
         """)
         createStorageTables(db)
+        createV7Tables(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -156,20 +173,109 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
             }
             createStorageTables(db)
         }
+        if (oldVersion < 7) {
+            upgradeToV7(db)
+        }
+    }
+
+    /**
+     * v7: disappearing messages, archived chats, and messages that used to
+     * be dropped or shown without their names.
+     *
+     *  - conversations: `archived` (from the primary's storage service),
+     *    `expire_timer` / `expire_timer_version` (the chat's timer, 0 = off),
+     *    and `timer_revision` (for a group, the group revision its timer was
+     *    read at; -1 = never, so every group's state is fetched once).
+     *  - messages: `expires_in` (seconds) and `expires_at` (epoch ms when the
+     *    message goes; 0 = its clock hasn't started).
+     *  - contacts: the timer the primary's contact sync gave each person, for
+     *    a chat Photon has no row for yet.
+     *  - storage_records: each record's `archived`, and the account record's
+     *    "keep muted chats archived". Existing installs read every record
+     *    again: until now only mutes were kept, and a read only fetches
+     *    records it hasn't seen.
+     *  - message_aliases: an edit's own timestamp, for later edits, reactions
+     *    and deletes that name it.
+     *  - Received documents get their file name from the stored pointer.
+     */
+    private fun upgradeToV7(db: SQLiteDatabase) {
+        for ((table, col) in listOf(
+            "conversations" to "archived INTEGER NOT NULL DEFAULT 0",
+            "conversations" to "expire_timer INTEGER NOT NULL DEFAULT 0",
+            "conversations" to "expire_timer_version INTEGER NOT NULL DEFAULT 1",
+            "conversations" to "timer_revision INTEGER NOT NULL DEFAULT -1",
+            "messages" to "expires_in INTEGER NOT NULL DEFAULT 0",
+            "messages" to "expires_at INTEGER NOT NULL DEFAULT 0",
+            "contacts" to "expire_timer INTEGER",
+            "contacts" to "expire_timer_version INTEGER",
+            "storage_records" to "archived INTEGER NOT NULL DEFAULT 0",
+            "storage_records" to "keep_muted_archived INTEGER NOT NULL DEFAULT 0",
+        )) {
+            try {
+                db.execSQL("ALTER TABLE $table ADD COLUMN $col")
+            } catch (_: Exception) {
+                // Column may already exist on partially-upgraded databases
+            }
+        }
+        createV7Tables(db)
+        db.execSQL("DELETE FROM storage_records")
+        db.execSQL("DELETE FROM storage_manifest")
+        backfillDocumentNames(db)
+    }
+
+    private fun createV7Tables(db: SQLiteDatabase) {
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_expires_at ON messages(expires_at) WHERE expires_at > 0")
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS message_aliases (
+                alias     TEXT PRIMARY KEY,
+                target_id TEXT NOT NULL
+            )
+        """)
+    }
+
+    /**
+     * Received documents were stored without their names, though each row
+     * kept its AttachmentPointer, which carries it. Fill in the blanks; a
+     * document that came with a caption keeps it.
+     */
+    private fun backfillDocumentNames(db: SQLiteDatabase) {
+        val names = mutableListOf<Pair<String, String>>()
+        db.rawQuery(
+            "SELECT id, raw_proto FROM messages WHERE content_type = 'document' " +
+                "AND raw_proto IS NOT NULL AND (text_body IS NULL OR TRIM(text_body) = '')",
+            null,
+        ).use { c ->
+            while (c.moveToNext()) {
+                val name = try {
+                    documentName(AttachmentPointer.ADAPTER.decode(c.getBlob(1)).fileName)
+                } catch (_: Exception) {
+                    null
+                }
+                if (name != null) names += c.getString(0) to name
+            }
+        }
+        for ((id, name) in names) {
+            db.execSQL("UPDATE messages SET text_body = ? WHERE id = ?", arrayOf(name, id))
+        }
+        if (names.isNotEmpty()) Log.i(TAG, "Named ${names.size} received documents from their pointers")
     }
 
     /**
      * What Photon has read from the storage service (SignalStorageMutes):
-     * each contact and GroupV2 record it has seen, by storage id, with the
-     * conversation it maps to and its mute; and the manifest version those
-     * records belong to (one row, id 1).
+     * each contact, GroupV2 and account record it has seen, by storage id,
+     * with the conversation it maps to, its mute and whether it's archived
+     * (the account record: Note to Self's, plus "keep muted chats
+     * archived"); and the manifest version those records belong to (one
+     * row, id 1).
      */
     private fun createStorageTables(db: SQLiteDatabase) {
         db.execSQL("""
             CREATE TABLE IF NOT EXISTS storage_records (
                 storage_id  TEXT PRIMARY KEY,
                 jid         TEXT,
-                muted_until INTEGER NOT NULL DEFAULT 0
+                muted_until INTEGER NOT NULL DEFAULT 0,
+                archived    INTEGER NOT NULL DEFAULT 0,
+                keep_muted_archived INTEGER NOT NULL DEFAULT 0
             )
         """)
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_storage_records_jid ON storage_records(jid)")
@@ -242,6 +348,16 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
 
     internal fun notifyChanged() {
         _changes.tryEmit(Unit)
+    }
+
+    // Bumped whenever a message's disappearing clock starts, so the expiry
+    // sweep (SignalSession) can wake for a timer shorter than its sleep. A
+    // StateFlow, so a bump between a sweep and its wait isn't lost.
+    private val _expiryScheduled = MutableStateFlow(0L)
+    val expiryScheduled: StateFlow<Long> = _expiryScheduled
+
+    internal fun notifyExpiryScheduled() {
+        _expiryScheduled.update { it + 1 }
     }
 
     /**
