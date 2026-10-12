@@ -4,15 +4,19 @@ Fixes that are implemented (with tests where practical) but not yet confirmed on
 
 Each check has an id (A1, W3, …) so a result can be reported in one line, for example "W3 fails: no missed-call row".
 
-## Start here (v0.4.0-rc.2)
+## Start here (v0.5.0-rc.1)
 
-These cover the riskiest and most important changes in v0.4.0-rc.2. Run them first, in this order. The rc.1 checks still await confirmation too, with their own [Start here](#start-here-v040-rc1) list at the top of the rc.1 section.
+These cover the riskiest and most important changes in v0.5.0-rc.1. Run them first, in this order. The v0.4.0 checks still await confirmation too, with their own Start here lists for [rc.2](#start-here-v040-rc2) and [rc.1](#start-here-v040-rc1).
 
-1. [W9](#w9-re-pairing-recovers-history) and [W10](#w10-first-messages-to-and-from-someone-new) Re-pair WhatsApp to recover history, then check that first messages to and from someone new appear
-2. [U6](#u6-lightos-layout-parity) LightOS layout parity: scroll bar, text size and margins, side by side with LightOS Messages and Settings
-3. [NM1](#nm1-the-to-field-and-the-keyboard)–[NM4](#nm4-a-new-chat-on-each-platform) New message
-4. [AT1](#at1-the-attachment-sheet) and [AT2](#at2-camera-photos-and-files-send) The attachment sheet, including whether Camera shows
-5. [M1](#m1-what-a-long-press-offers) and [M2](#m2-the-action-pages) The long-press menu
+Use **throwaway chats** for anything with disappearing messages: a timer deletes messages on every device in the chat. Send only to yourself or a willing contact.
+
+1. [A8](#a8-upgrade-in-place-over-v040) Upgrade in place over v0.4.0: migrations, and unread counts, mutes, names, document names and archive state survive
+2. [T1](#t1-signal-a-timer-set-without-a-version-stays-on) Signal: a timer set without a version stays on when Photon sends
+3. [T2](#t2-whatsapp-timers-in-both-directions) and [T3](#t3-signal-timers-in-both-directions) Disappearing timers in both directions, on each platform
+4. [T4](#t4-signal-an-incoming-messages-clock-starts-when-its-read) Signal: an incoming message's clock starts only when it's read
+5. [V1](#v1-view-once-media) View-once media from each platform
+6. [N6](#n6-messages-and-calls) The Messages and Calls settings, insistent ringing and Signal group calls
+7. [AR1](#ar1-archived-chats-follow-the-phone) Archived chats follow the phone
 
 ## Tools
 
@@ -38,7 +42,184 @@ sqlite3 /tmp/photon/app.db
 
 "Other phone" means your primary phone or a contact's phone, whichever the step needs.
 
+## v0.5.0-rc.1
+
+Settings › Chat › Notifications is now Messages, so the v0.4.0 checks that cycle Notifications (N5, U1, U9) mean the Messages row. Received Signal documents now show their names, so AT3's caveat no longer holds (A8 and U12 check them).
+
+### Install & App
+
+#### A8. Upgrade in place over v0.4.0
+- **Do:** with v0.4.0 installed and WhatsApp and Signal linked, run `adb install -r` with the rc.1 APK and open Photon, watching logcat (see Tools). Keep the primary phones online for a few minutes. Afterwards, open both databases (see Tools) and Settings › Chat.
+- **Expect:**
+  - No re-pair is needed. Every chat, unread badge, mute and name is as it was.
+  - `GoBridge` logs `Applied message DB migration 4`, `5`, `6` and `7`, once each and on the first start only. Along the way it logs `Backfilled disappearing timers for N chats`, `Marked N stored messages view-once`, `Gave N stored places their name and map link` and `Backfilled archive state for N chats`. `PRAGMA user_version;` on `messages.db` returns 7.
+  - `PRAGMA user_version;` on `signal_messages.db` returns 8. If you had received Signal documents, `SignalRepository` logs `Named N received documents from their pointers`, and they show `[ document: <name> ]`.
+  - On the next Signal connect, `SignalMessageReceiver` logs `Refreshing metadata for N Signal group(s)` (each group once, for its timer), and a `Storage manifest v…: read R chat records, … A archived` line that reads every chat record again, without a new keys request.
+  - Once that read and the WhatsApp backfill are done, chats archived on the phone leave the list for the Archived page (AR1). WhatsApp view-once media stored before the upgrade is now a view-once placeholder, and its files are gone.
+  - Settings › Chat shows Messages with your old Notifications value, and Calls with the same value.
+- **Caveats:** the Signal re-read uses the storage key Photon got in 0.4.0. If it never got one, logcat shows `Requested keys sync from primary` and the read waits for the primary to come online. Going back to v0.4.0 breaks Signal, because it can't open a v8 database.
+
+### Disappearing messages
+
+Throwaway chats only, with yourself or a willing contact.
+
+#### T1. Signal: a timer set without a version stays on
+- **Was:** in a 1:1 chat whose timer an older client had set (timer version 1), a message from Photon turned disappearing messages off for both people.
+- **Do:** in a Signal DM, set a timer from an older Signal client, or anything that sends no timer version. Wait for Photon to show the change. Then send a text from Photon.
+- **Expect:**
+  - Photon shows the line `Disappearing messages · <timer>`, and the chat's title has `disappearing · <timer>` under it.
+  - After Photon's send the timer is still on, on both phones. No "off" line appears anywhere.
+  - Photon's message shows the timer on the other phone and disappears for the other person when it runs out.
+
+#### T2. WhatsApp timers in both directions
+- **Do:** in a DM and in a group, turn on 24 hours from the phone. From Photon send a text and a photo, then a text in airplane mode that fails, and retry it. Have the other person send a message and react to one. After 24 hours, turn the timer off from the phone and send again from Photon.
+- **Expect:**
+  - Each chat gets the line `Disappearing messages · 1 day` and the title line `disappearing · 1 day`. `GoBridge` logs `Disappearing timer of <chat> is now 86400s`.
+  - The phone treats Photon's text, photo and retried text as disappearing messages.
+  - 24 hours after each message was sent, it goes from Photon and the phone, with its reactions and any downloaded media, within a minute of its time. `GoBridge` logs `Deleting N disappeared messages`. An unread one takes its notification and badge with it.
+  - Turning the timer off adds `Disappearing messages off`, the title line goes, and new messages stay.
+- **Caveats:** status updates, broadcasts and channels never have a timer.
+
+#### T3. Signal timers in both directions
+- **Do:** in a DM and in a group, turn on 30 seconds from the phone, then 1 week. From Photon send a text and a photo after each change. Read the other person's messages. Then turn the timer off and send again.
+- **Expect:**
+  - Each change adds its line (`Disappearing messages · 30 seconds`, `… · 1 week`) and updates the title line. In the group the line appears once Photon has fetched the group's new state.
+  - Photon's messages show the timer on the phone. At 30 seconds they go from Photon 30 seconds after sending, and from the other phone 30 seconds after it reads them. `SignalMessageReceiver` logs `Disappearing messages: deleted N (and M media files)`.
+  - A message sent right after a group timer change carries the new timer.
+  - Turning the timer off adds `Disappearing messages off`, the title line goes, and new messages stay.
+
+#### T4. Signal: an incoming message's clock starts when it's read
+- **Do:** with a 30-second timer in a DM, have the other person send a message while Photon is in the background, and leave it unread for over a minute. Then open the chat in Photon. Have them send another and read it on the primary instead. Finally, read one in Photon, then turn the LP3's screen off for a minute.
+- **Expect:**
+  - The unread message stays, with its badge and notification, for as long as it's unread.
+  - Opened in Photon, it goes about 30 seconds later, and its notification goes.
+  - Read on the primary (`Sync message kinds: read[1]`), it goes about 30 seconds later.
+  - With the screen off past its time, it's gone as soon as the screen comes back on.
+
+#### T5. Signal: a timer Photon hasn't learned yet
+- **Do:** straight after the upgrade (A8), pick a DM that has a timer on the phone and no messages since. Send a message from Photon. Then have the other person send one, and send again from Photon. For another such DM, force-stop and reopen Photon to get a contact sync (`Sync message kinds: contacts`) before sending.
+- **Expect:**
+  - Before Photon learns the timer, the title has no disappearing line, and Photon's first message goes without a timer. The chat's timer stays on on both phones, and that message doesn't disappear (see README Limitations).
+  - The other person's message teaches Photon the timer without adding a line, and the title line appears. Photon's next message disappears on both sides.
+  - After the contact sync, the second DM's title shows its timer, and Photon's first send there disappears.
+
+### View-once and placeholders
+
+#### V1. View-once media
+- **Was:** WhatsApp dropped view-once media without a trace, and Signal kept it as an ordinary photo you could save.
+- **Do:** from the other phone, send a view-once photo, then a view-once video, on WhatsApp and on Signal. Tap and long-press each. Open the Signal one on the primary.
+- **Expect:**
+  - Each reads `[ view-once photo · open on your phone ]` (or `video`), faint. It counts as unread and notifies as "view-once photo".
+  - Tapping does nothing, and long-press offers only Delete. Nothing downloads: no thumbnail, no viewer, no Save.
+  - `GoBridge` logs `Message <id> in <chat> couldn't be decrypted (unavailable=true, type "view_once"); stored as view_once`.
+  - Opening it on the primary clears the Signal row's badge and notification (`Sync message kinds: viewOnceOpen`).
+- **Caveats:** Signal view-once media received before 0.5.0 stays an ordinary photo (see README Limitations).
+
+#### V2. A WhatsApp message the phone resends replaces its placeholder
+- **Do:** when a `[ waiting for this message · open on your phone ]` row appears (a message this device couldn't decrypt, common after a re-pair or when a contact reinstalls), leave the phone online and wait. Long-press the row while it's there.
+- **Expect:**
+  - `GoBridge` logs `Message <id> in <chat> couldn't be decrypted (…); stored as unavailable`. The row counts as unread, notifies as "waiting for this message", and offers only Delete.
+  - When the phone resends it, the row becomes the real message in the same place. A notification still showing it changes to the real text without alerting again.
+  - In a group, only the original sender's copy replaces it. A resend with nothing to show (a reaction, say) removes the placeholder.
+- **Caveats:** this can't be triggered on demand. Check it when one comes up.
+
+### Signal messages
+
+#### S14. Several photos, a poll, a shared contact and a long message
+- **Was:** Signal kept only a message's first attachment, and dropped polls and shared contacts.
+- **Do:** from the other phone, send three photos with a caption in one message, a poll, a shared contact, and a text over 2,000 characters.
+- **Expect:**
+  - Three photo rows, with the caption on the first (`[ image ] <caption>`). The badge goes up by 3 but there's one notification. Each photo opens when tapped.
+  - The poll is one row: `Poll: <question>` and a `• <option>` line per option. Votes don't show.
+  - The contact reads `[ contact: <Name> · <number> ]`.
+  - The long text is one row, cut short, with no extra document row.
+
+#### S15. Edits
+- **Was:** Signal edits were dropped, so the old text stayed.
+- **Do:** have the other person send a message, edit it, then edit it again. React to it from their phone after the second edit, and reply to it in Photon. Then edit a message on the primary that you sent from there.
+- **Expect:**
+  - Each edit replaces the text in place. The message keeps its position, read state and disappearing clock. An unread one's notification updates without alerting again.
+  - The reaction lands on the edited message, and the reply quotes it.
+  - The primary's edit shows in Photon (`Sync message kinds: sent,sentEdit`).
+- **Caveats:** Photon can't send edits itself.
+
+#### S16. A reply on the primary reads only what came before it
+- **Was:** any sent transcript from the primary marked the whole chat read, including messages that arrived after it, and so did transcripts with nothing to show.
+- **Do:**
+  1. In a DM, have the other person send message A, and let it reach the primary and Photon. Turn on the primary's airplane mode and reply to A there, so the reply waits. Have them send B, and let Photon show it. Turn the primary's airplane mode off so the reply goes.
+  2. Have them send C, then vote in a poll in that chat on the primary (S14's, for example) without replying.
+- **Expect:**
+  1. A turns read with your reply (its disappearing clock starts, if the chat has a timer). B stays unread, with its notification.
+  2. C stays unread.
+
+### Thread and media
+
+#### U11. Locations
+- **Was:** WhatsApp locations read `[ location ]`, with no way to open them.
+- **Do:** from the other phone, share a named place, your current location and a live location on WhatsApp. Tap each.
+- **Expect:**
+  - A named place reads `Location · <name or address>`, with its coordinates beneath (`51.5007, -0.1246`). A location without a name reads `Location`. A live location reads `Location · Live location` (or its caption), at its starting point.
+  - A tap opens Organic Maps at the point, labelled with the place's name.
+  - Locations stored before the upgrade read the same (A8).
+- **Caveats:** WhatsApp only. Live locations don't update (see README Limitations).
+
+#### U12. Saving documents
+- **Was:** Save used Photon's download name, and Office files were saved as `.bin`.
+- **Do:** receive a `.docx`, an `.odt` and an `.epub` on WhatsApp and on Signal. Open each and tap Save. Then save a received photo and video.
+- **Expect:**
+  - The thread shows `[ document: <name> ]`, and the viewer reads `Downloaded: <name>`.
+  - The documents land in Download/Photon under their real names, with one extension (no `.docx.docx`, no `.bin`).
+  - The photo lands in Pictures/Photon and the video in Movies/Photon, under Photon's own name with the right extension.
+
+#### U13. The disappearing line under a long title
+- **Do:** open a chat with a very long name and a timer on.
+- **Expect:** the name ends in `…` with `disappearing · <timer>` in small lower case under it, both clear of the Back icon. Tapping a DM's title still opens the contact editor.
+
+### Notifications
+
+#### N6. Messages and Calls
+- **Was:** one Notifications setting covered messages and calls, so turning messages off silenced calls too.
+- **Do:** in Settings › Chat, set Messages to Off and Calls to Vibrate. Receive a WhatsApp and a Signal message. Have someone call on WhatsApp and on Signal: let one ring out, and hang up another after 10 seconds. Have someone start a Signal group call in a group, and another in a muted group. Then try Calls at Silent and Off.
+- **Expect:**
+  - The rows read Messages and Calls, each cycling Sound, Vibrate, Silent and Off. Changing Messages doesn't move Calls.
+  - Messages: nothing is posted, with no sound or buzz.
+  - Calls: each ringing call shows heads-up and buzzes again and again until the caller hangs up or 60 seconds pass. A missed call then buzzes once.
+  - The group call posts `<Name> started a group call` once, buzzing once. The muted group posts nothing.
+  - At Silent a call shows heads-up with no sound or buzz. At Off nothing is posted.
+  - Android's notification settings for Photon list "Calls", "Calls (vibrate)" and "Calls (silent)" beside the Messages channels.
+- **Caveats:** Calls at Sound uses the default notification sound, not a ringtone. A group-call start that reaches Photon more than about 2 minutes late is recorded without alerting (`… arrived late; recorded without alerting`).
+
+#### N7. Ringing on LightOS
+- **Do:** with Calls at Sound, then Vibrate, take a WhatsApp call with the LP3 locked, then with Photon open.
+- **Expect:** report what LightOS does: whether the sound or buzz repeats, whether it stops when the call ends, and whether the call shows heads-up.
+- **Caveats:** this is an observation. LightOS may treat insistent and heads-up notifications its own way.
+
+### Archived chats
+
+#### AR1. Archived chats follow the phone
+- **Do:**
+  1. On the phone, archive a WhatsApp DM and a Signal DM, then unarchive one of them.
+  2. Tap the filter in the bottom bar, then Archived. Open a chat and go back, then press Back on the Archived page.
+  3. With WhatsApp's "Keep chats archived" off, have someone message the archived WhatsApp chat. Turn the setting on and repeat.
+  4. On Signal, have someone message an archived chat. Then mute another archived chat, with "Keep muted chats archived" on, and have them message it.
+- **Expect:**
+  1. Within seconds archived chats leave All Chats and their platform's list, and an unarchived one comes back. WhatsApp logs `Chat <chat> archived=true`; Signal logs a `Storage manifest v…` line counting it archived.
+  2. Archived is the last row of the picker. Its page lists archived chats from every platform, with platform icons, under Back and an "Archived" title (or "no archived chats"). Back returns to the chat list.
+  3. With the setting off, the message brings the chat back (`Chat <chat> unarchived by a new message`). With it on, the chat stays archived, but still counts unread and notifies.
+  4. The unmuted Signal chat comes back. The muted one stays archived and silent.
+- **Caveats:** Photon can't archive or unarchive a chat itself. WhatsApp's "Keep chats archived" counts as on until WhatsApp syncs it (see README Limitations).
+
 ## v0.4.0-rc.2
+
+### Start here (v0.4.0-rc.2)
+
+These cover the riskiest and most important changes in v0.4.0-rc.2. Run them after the v0.5.0-rc.1 list, in this order. The rc.1 checks still await confirmation too, with their own [Start here](#start-here-v040-rc1) list at the top of the rc.1 section.
+
+1. [W9](#w9-re-pairing-recovers-history) and [W10](#w10-first-messages-to-and-from-someone-new) Re-pair WhatsApp to recover history, then check that first messages to and from someone new appear
+2. [U6](#u6-lightos-layout-parity) LightOS layout parity: scroll bar, text size and margins, side by side with LightOS Messages and Settings
+3. [NM1](#nm1-the-to-field-and-the-keyboard)–[NM4](#nm4-a-new-chat-on-each-platform) New message
+4. [AT1](#at1-the-attachment-sheet) and [AT2](#at2-camera-photos-and-files-send) The attachment sheet, including whether Camera shows
+5. [M1](#m1-what-a-long-press-offers) and [M2](#m2-the-action-pages) The long-press menu
 
 ### WhatsApp
 
