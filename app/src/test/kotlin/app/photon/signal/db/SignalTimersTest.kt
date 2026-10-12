@@ -157,6 +157,25 @@ class SignalTimersTest {
         assertEquals(ChatTimer(3_600, 1), db.chatTimer(group))
     }
 
+    /** A group the account can't read (not a member, or gone) stops being fetched until a later revision. */
+    @Test
+    fun aGroupThatCantBeFetchedStopsBeingFetched() {
+        val mk = ByteArray(32) { 1 }
+        db.updateGroupMeta(group, mk, 6)
+        db.upsertParticipant(group, alice)
+        assertEquals(listOf(group), db.getGroupsNeedingMetadataRefresh().map { it.first })
+
+        db.markGroupStateUnavailable(group)
+
+        assertEquals(emptyList(), db.getGroupsNeedingMetadataRefresh().map { it.first })
+        // Still unknown, so a send goes at version 0.
+        assertNull(db.chatTimer(group))
+
+        // Added back: a message at a later revision makes it worth fetching again.
+        db.updateGroupMeta(group, mk, 7)
+        assertEquals(listOf(group), db.getGroupsNeedingMetadataRefresh().map { it.first })
+    }
+
     /** A fetch that answered for an older revision than one already read changes nothing. */
     @Test
     fun anOlderGroupStateIsIgnored() {

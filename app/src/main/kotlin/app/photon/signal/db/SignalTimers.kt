@@ -144,6 +144,22 @@ fun SignalMessageDatabase.updateGroupTimer(
 }
 
 /**
+ * Group [jid]'s state can't be fetched at all (the server says the account
+ * isn't a member, or the group is gone): stop fetching it for its timer
+ * until a later revision arrives (a message from it again, say, after the
+ * user is added back). Its timer stays as last read, or unknown (a send at
+ * version 0) if it never was.
+ */
+fun SignalMessageDatabase.markGroupStateUnavailable(jid: String) {
+    writableDatabase.execSQL(
+        "UPDATE conversations SET timer_revision = MAX(group_revision, 0) " +
+            "WHERE jid = ? AND is_group = 1 AND (timer_revision < group_revision OR timer_revision < 0)",
+        arrayOf(jid),
+    )
+    notifyChanged()
+}
+
+/**
  * The timer the primary's contact sync gives [aci], at [version] (a timer
  * without one is ignored, as it can't be ordered against what messages
  * said). Only a strictly higher version than the one stored applies

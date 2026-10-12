@@ -13,8 +13,27 @@ import org.whispersystems.signalservice.api.groupsv2.GroupsV2AuthorizationString
 import org.whispersystems.signalservice.api.groupsv2.GroupsV2Operations
 import org.whispersystems.signalservice.api.websocket.SignalWebSocket
 import org.whispersystems.signalservice.internal.configuration.SignalServiceConfiguration
+import org.whispersystems.signalservice.internal.push.exceptions.GroupNotFoundException
+import org.whispersystems.signalservice.internal.push.exceptions.NotInGroupException
 import org.whispersystems.signalservice.internal.push.PushServiceSocket
 import java.util.concurrent.ConcurrentHashMap
+
+/** What fetching a group's state came to. */
+sealed interface GroupFetch {
+    data class Fetched(val group: DecryptedGroup) : GroupFetch
+
+    /** The server won't give it to this account: not a member (403), or the group is gone (404). */
+    data object Unavailable : GroupFetch
+
+    /** It might work later: network, credentials, a server error. */
+    data object Failed : GroupFetch
+}
+
+/** What a failed group fetch means; see [SignalGroupV2Manager.fetchGroupState]. */
+internal fun groupFetchFailure(e: Throwable): GroupFetch = when (e) {
+    is NotInGroupException, is GroupNotFoundException -> GroupFetch.Unavailable
+    else -> GroupFetch.Failed
+}
 
 /**
  * GroupV2 helper that wraps libsignal-service's GroupsV2Api with the
@@ -104,7 +123,15 @@ class SignalGroupV2Manager(
      * treat the absence of a result as "try again on the next message" —
      * it's not fatal to a message-receive flow.
      */
-    fun fetchGroup(masterKey: ByteArray): DecryptedGroup? {
+    fun fetchGroup(masterKey: ByteArray): DecryptedGroup? = (fetchGroupState(masterKey) as? GroupFetch.Fetched)?.group
+
+    /**
+     * [fetchGroup], saying why it failed: the server answering 403 (the
+     * account isn't a member: it left or was removed) or 404 (the group is
+     * gone) can't succeed by trying again ([GroupFetch.Unavailable]); any
+     * other failure (network, credentials) might.
+     */
+    fun fetchGroupState(masterKey: ByteArray): GroupFetch {
         return try {
             val mk = GroupMasterKey(masterKey)
             val params = GroupSecretParams.deriveFromMasterKey(mk)
@@ -112,17 +139,17 @@ class SignalGroupV2Manager(
             val today = todaySeconds()
             val cred = getOrFetchCredentials(today) ?: run {
                 Log.w(TAG, "No credential for today; aborting group fetch")
-                return null
+                return GroupFetch.Failed
             }
-            val aci = credentials.aci ?: return null
-            val pni = credentials.pni ?: return null
+            val aci = credentials.aci ?: return GroupFetch.Failed
+            val pni = credentials.pni ?: return GroupFetch.Failed
             val auth: GroupsV2AuthorizationString =
                 groupsApi.getGroupsV2AuthorizationString(aci, pni, today, params, cred)
 
-            groupsApi.getGroup(params, auth).group
+            GroupFetch.Fetched(groupsApi.getGroup(params, auth).group)
         } catch (e: Exception) {
             Log.w(TAG, "fetchGroup failed: ${e.javaClass.simpleName}: ${e.message}")
-            null
+            groupFetchFailure(e)
         }
     }
 

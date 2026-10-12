@@ -3,12 +3,14 @@ package app.photon.signal.receiver
 import android.util.Log
 import app.photon.data.model.Platform
 import app.photon.data.names.DisplayNames
+import app.photon.signal.GroupFetch
 import app.photon.signal.SignalGroupV2Manager
 import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.db.getConversation
 import app.photon.signal.db.getGroupMeta
 import app.photon.signal.db.getGroupsNeedingMetadataRefresh
+import app.photon.signal.db.markGroupStateUnavailable
 import app.photon.signal.db.updateGroupMeta
 import app.photon.signal.db.updateGroupTimer
 import app.photon.signal.db.upsertConversation
@@ -85,12 +87,30 @@ internal class GroupMetadata(
             Log.w(TAG, "Group fetch skipped: manager not ready for ${conversationJid.take(12)}…")
             return
         }
-        val group = gm.fetchGroup(masterKey) ?: run {
-            Log.w(TAG, "Group fetch returned null for ${conversationJid.take(12)}… — see GroupV2Manager warnings")
-            return
+        if (applyGroupFetch(conversationJid, gm.fetchGroupState(masterKey))) sessionPings.scheduleActiveContactPing()
+    }
+
+    /**
+     * Store what a group fetch came to. A group the server won't give this
+     * account (it left or was removed, or the group is gone) isn't fetched
+     * again for its timer until a later revision shows up; any other
+     * failure is tried again on the next connect. Returns whether the state
+     * was read.
+     */
+    internal fun applyGroupFetch(conversationJid: String, fetch: GroupFetch): Boolean = when (fetch) {
+        is GroupFetch.Fetched -> {
+            applyGroupState(conversationJid, fetch.group)
+            true
         }
-        applyGroupState(conversationJid, group)
-        sessionPings.scheduleActiveContactPing()
+        GroupFetch.Unavailable -> {
+            Log.i(TAG, "Group ${conversationJid.take(12)}… isn't readable by this account; not fetching it again until it changes")
+            messageDb.markGroupStateUnavailable(conversationJid)
+            false
+        }
+        GroupFetch.Failed -> {
+            Log.w(TAG, "Group fetch failed for ${conversationJid.take(12)}… — see GroupV2Manager warnings")
+            false
+        }
     }
 
     /** Store what a fetched group state says: title, disappearing-messages timer and members. */

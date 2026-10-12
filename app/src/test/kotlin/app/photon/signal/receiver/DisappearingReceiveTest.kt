@@ -3,11 +3,16 @@ package app.photon.signal.receiver
 import app.photon.data.model.ContentTypes
 import app.photon.data.model.MessageStatus
 import app.photon.signal.ChatTimer
+import app.photon.signal.GroupFetch
 import app.photon.signal.SignalGroupV2Manager
 import app.photon.signal.db.chatTimer
 import app.photon.signal.db.getConversation
+import app.photon.signal.db.getGroupsNeedingMetadataRefresh
 import app.photon.signal.db.getMessages
+import app.photon.signal.db.updateGroupMeta
 import app.photon.signal.db.upsertConversation
+import app.photon.signal.db.upsertParticipant
+import app.photon.signal.groupFetchFailure
 import okio.ByteString.Companion.toByteString
 import org.junit.After
 import org.junit.Before
@@ -21,9 +26,12 @@ import org.signal.storageservice.storage.protos.groups.local.DecryptedTimer
 import org.whispersystems.signalservice.internal.push.DataMessage
 import org.whispersystems.signalservice.internal.push.GroupContextV2
 import org.whispersystems.signalservice.internal.push.SyncMessage
+import org.whispersystems.signalservice.internal.push.exceptions.GroupNotFoundException
+import org.whispersystems.signalservice.internal.push.exceptions.NotInGroupException
 import java.nio.ByteBuffer
 import java.util.UUID
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -243,6 +251,31 @@ class DisappearingReceiveTest {
         fx.groupMetadata.applyGroupState(group, DecryptedGroup(title = "Climbing", revision = 4))
         assertEquals(ChatTimer(0, 1), fx.db.chatTimer(group))
         assertEquals(listOf(ContentTypes.SYSTEM to "Disappearing messages off"), thread(group))
+    }
+
+    /**
+     * A group the server won't give this account (403: it left or was
+     * removed; 404: gone) isn't fetched again on every connect; a fetch that
+     * might work later is.
+     */
+    @Test
+    fun aGroupThatCantBeReadStopsBeingFetched() {
+        fx.db.upsertConversation(jid = group, name = "Climbing", isGroup = true)
+        fx.db.updateGroupMeta(group, masterKey, 3)
+        fx.db.upsertParticipant(group, alice)
+        val refreshing = { fx.db.getGroupsNeedingMetadataRefresh().map { it.first } }
+        assertEquals(listOf(group), refreshing())
+
+        assertFalse(fx.groupMetadata.applyGroupFetch(group, GroupFetch.Failed))
+        assertEquals(listOf(group), refreshing())
+
+        assertFalse(fx.groupMetadata.applyGroupFetch(group, GroupFetch.Unavailable))
+        assertEquals(emptyList(), refreshing())
+        assertEquals(null, fx.db.chatTimer(group))
+
+        assertEquals(GroupFetch.Unavailable, groupFetchFailure(NotInGroupException()))
+        assertEquals(GroupFetch.Unavailable, groupFetchFailure(GroupNotFoundException()))
+        assertEquals(GroupFetch.Failed, groupFetchFailure(java.io.IOException("offline")))
     }
 
     // ── The user's own messages from other devices ──
