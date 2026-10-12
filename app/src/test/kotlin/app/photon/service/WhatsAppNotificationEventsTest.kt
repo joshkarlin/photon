@@ -88,6 +88,16 @@ class WhatsAppNotificationEventsTest {
         """"conversation_jid":"$chat","message_id":"$id","is_group":false,"conversation_name":"Alice",""" +
             """"sender_jid":"$chat","sender_name":"Alice","text_body":"$text","content_type":"text","is_from_me":false"""
 
+    /** Archiving doesn't silence a chat, as in WhatsApp; muting does. */
+    @Test
+    fun archivedChatsStillNotify() {
+        writeWhatsAppDb(File(context.filesDir, "messages.db")) { db ->
+            db.execSQL("UPDATE conversations SET is_archived = 1 WHERE jid = ?", arrayOf(chat))
+        }
+        bridgeSays("""{"type":"new_message","payload":{${newMessage("m1", "hello")}}}""")
+        awaitNotifications { it.singleOrNull()?.text == "hello" }
+    }
+
     @Test
     fun aReplacedPlaceholderUpdatesTheNotificationQuietly() {
         NotificationHelper.showMessageNotification(context, "Alice", "[ unavailable ]", Platform.WHATSAPP, chat)
