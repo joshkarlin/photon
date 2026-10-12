@@ -26,9 +26,9 @@ adb install -r app-release.apk
 
 `-r` upgrades an existing install in place and keeps your chats and links. Downgrading isn't supported: an older build can't open the newer Signal database.
 
-### Upgrading to 0.4.0-rc.2
+### Upgrading to 0.4.0
 
-After installing, re-pair WhatsApp: Settings → Connections → WhatsApp → Reset, confirm with RESET, then link again. Since June (v0.3.0), Photon dropped the first message of every new WhatsApp chat, sent or received, and a re-pair brought back no messages. rc.2 fixes this, but WhatsApp only sends history when you pair, so re-pairing is how you get those messages back. You get what WhatsApp sends at pairing, within your Storage settings (default 50 messages per chat, 7 days).
+After installing, re-pair WhatsApp: Settings → Connections → WhatsApp → Reset, confirm with RESET, then link again. Since June (v0.3.0), Photon dropped the first message of every new WhatsApp chat, sent or received, and a re-pair brought back no messages. 0.4.0 fixes this, but WhatsApp only sends history when you pair, so re-pairing is how you get those messages back. You get what WhatsApp sends at pairing, within your Storage settings (default 50 messages per chat, 7 days).
 
 ## Building from source
 
