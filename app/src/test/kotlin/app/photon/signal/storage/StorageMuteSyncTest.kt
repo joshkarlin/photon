@@ -1,8 +1,9 @@
 package app.photon.signal.storage
 
 import app.photon.signal.SignalGroupV2Manager
-import app.photon.signal.db.getConversation
 import app.photon.signal.db.getContact
+import app.photon.signal.db.getConversation
+import app.photon.signal.db.keepMutedChatsArchived
 import app.photon.signal.db.storageManifestVersion
 import app.photon.signal.db.storageRecordIds
 import app.photon.signal.db.updateContactPhone
@@ -20,6 +21,7 @@ import org.signal.core.models.storageservice.StorageKey
 import org.whispersystems.signalservice.api.storage.SignalStorageManifest
 import org.whispersystems.signalservice.api.storage.SignalStorageRecord
 import org.whispersystems.signalservice.api.storage.StorageId
+import org.whispersystems.signalservice.internal.storage.protos.AccountRecord
 import org.whispersystems.signalservice.internal.storage.protos.ContactRecord
 import org.whispersystems.signalservice.internal.storage.protos.GroupV2Record
 import org.whispersystems.signalservice.internal.storage.protos.StorageRecord
@@ -214,17 +216,18 @@ class StorageMuteSyncTest {
     }
 
     @Test
-    fun onlyContactAndGroupRecordsAreRequested() {
+    fun onlyContactGroupAndAccountRecordsAreRequested() {
         giveKey()
         val aliceMuted = contact(ContactRecord(aci = alice, mutedUntilTimestamp = forever))
+        val account = StorageId.forAccount(byteArrayOf(99))
         storage.manifest = SignalStorageManifest(
-            1, 1, null, listOf(aliceMuted.id, StorageId.forAccount(byteArrayOf(99)), StorageId.forStoryDistributionList(byteArrayOf(98))),
+            1, 1, null, listOf(aliceMuted.id, account, StorageId.forStoryDistributionList(byteArrayOf(98))),
         )
         storage.records = mapOf(aliceMuted.id to aliceMuted)
 
         sync.read()
 
-        assertEquals(listOf(listOf(aliceMuted.id)), storage.recordCalls)
+        assertEquals(listOf(listOf(aliceMuted.id, account)), storage.recordCalls)
     }
 
     /** The group's jid comes from its master key exactly as for an incoming group message. */
@@ -355,5 +358,36 @@ class StorageMuteSyncTest {
 
         // The first read, then one per read that was announced over.
         assertEquals(4, storage.manifestCalls.size)
+    }
+
+    /** Archived contact and group records archive their chats; the account record carries "keep muted chats archived". */
+    @Test
+    fun archivedRecordsArchiveTheirChats() {
+        giveKey()
+        val masterKey = ByteArray(32) { (it * 5).toByte() }
+        val groupJid = SignalGroupV2Manager.jidFromMasterKey(masterKey)
+        fx.db.upsertConversation(jid = groupJid, name = "Climbing", isGroup = true)
+        val aliceArchived = contact(ContactRecord(aci = alice, archived = true))
+        val groupArchived = SignalStorageRecord(
+            StorageId.forGroupV2(byteArrayOf((++nextId).toByte())),
+            StorageRecord(groupV2 = GroupV2Record(masterKey = masterKey.toByteString(), archived = true)),
+        )
+        val account = SignalStorageRecord(
+            StorageId.forAccount(byteArrayOf((++nextId).toByte())),
+            StorageRecord(account = AccountRecord(keepMutedChatsArchived = true)),
+        )
+        storage.publish(1, aliceArchived, groupArchived, account, contact(ContactRecord(aci = bob)))
+
+        assertEquals(StorageMuteSync.Outcome.UPDATED, sync.read())
+
+        assertEquals(true, fx.db.getConversation(alice)?.isArchived)
+        assertEquals(true, fx.db.getConversation(groupJid)?.isArchived)
+        assertEquals(false, fx.db.getConversation(bob)?.isArchived)
+        assertEquals(true, fx.db.keepMutedChatsArchived())
+
+        // The primary unarchives Alice: her record is replaced by a new one.
+        storage.publish(2, contact(ContactRecord(aci = alice)), groupArchived, account)
+        sync.read()
+        assertEquals(false, fx.db.getConversation(alice)?.isArchived)
     }
 }

@@ -10,8 +10,9 @@ import org.whispersystems.signalservice.internal.storage.protos.ContactRecord
 import org.whispersystems.signalservice.internal.storage.protos.ManifestRecord
 import java.util.Base64
 
-// What Photon takes from the storage service: each chat's mute. Pure
-// mapping, so it can be tested without a network or the library's crypto.
+// What Photon takes from the storage service: each chat's mute and archive
+// state, and the account's "keep muted chats archived". Pure mapping, so it
+// can be tested without a network or the library's crypto.
 
 /**
  * The storage service key for [accountEntropyPool] (from the provisioning
@@ -27,10 +28,15 @@ internal fun storageKeyFrom(accountEntropyPool: String?): ByteArray? {
     }
 }
 
-/** The record types that carry a chat's mute: contacts (DMs) and GroupV2 groups. */
-internal fun carriesMute(id: StorageId): Boolean =
+/**
+ * The record types that carry a chat's state: contacts (DMs), GroupV2
+ * groups, and the account (Note to Self's archive, and "keep muted chats
+ * archived").
+ */
+internal fun carriesChatState(id: StorageId): Boolean =
     id.type == ManifestRecord.Identifier.Type.CONTACT.value ||
-        id.type == ManifestRecord.Identifier.Type.GROUPV2.value
+        id.type == ManifestRecord.Identifier.Type.GROUPV2.value ||
+        id.type == ManifestRecord.Identifier.Type.ACCOUNT.value
 
 /** A storage id as storage_records keys it. */
 internal fun storageIdKey(id: StorageId): String = Base64.getEncoder().encodeToString(id.raw)
@@ -79,21 +85,34 @@ private fun serviceId(string: String, binary: ByteString, pni: Boolean = false):
 }
 
 /**
- * The mute [record] gives a chat. [contactJid] maps a contact record to its
- * conversation ([contactConversationJid]); [groupJid] a GroupV2 master key to
- * the group's jid. A record that maps to no chat keeps a null jid.
+ * The mute and archive state [record] gives a chat. [contactJid] maps a
+ * contact record to its conversation ([contactConversationJid]); [groupJid]
+ * a GroupV2 master key to the group's jid. The account record is Note to
+ * Self's ([selfJid], the account's ACI): it's never muted, and it carries
+ * "keep muted chats archived". A record that maps to no chat keeps a null
+ * jid.
  */
 internal fun storageMuteOf(
     record: SignalStorageRecord,
     contactJid: (ContactRecord) -> String?,
     groupJid: (ByteArray) -> String?,
+    selfJid: String?,
 ): StorageMute {
+    val id = storageIdKey(record.id)
     val contact = record.proto.contact
     val group = record.proto.groupV2
-    val (jid, mutedUntilMs) = when {
-        contact != null -> contactJid(contact) to contact.mutedUntilTimestamp
-        group != null -> group.masterKey.toByteArray().takeIf { it.size == 32 }?.let(groupJid) to group.mutedUntilTimestamp
-        else -> null to 0L
+    val account = record.proto.account
+    return when {
+        contact != null ->
+            StorageMute(id, contactJid(contact), muteEndSeconds(contact.mutedUntilTimestamp), archived = contact.archived)
+        group != null -> StorageMute(
+            id, group.masterKey.toByteArray().takeIf { it.size == 32 }?.let(groupJid),
+            muteEndSeconds(group.mutedUntilTimestamp), archived = group.archived,
+        )
+        account != null -> StorageMute(
+            id, selfJid, 0, archived = account.noteToSelfArchived,
+            keepMutedChatsArchived = account.keepMutedChatsArchived,
+        )
+        else -> StorageMute(id, null, 0)
     }
-    return StorageMute(storageIdKey(record.id), jid, muteEndSeconds(mutedUntilMs))
 }
