@@ -75,3 +75,31 @@ internal class ReceiverFixture(localAci: String, localDeviceId: Int = 3) {
         protocolDb.close()
     }
 }
+
+/**
+ * The data and sync handlers over one [ReceiverFixture], with no network, as
+ * the receiver wires them: what arrives from other people and from the
+ * user's other devices.
+ */
+internal class Handlers(val fx: ReceiverFixture, clock: () -> Long = System::currentTimeMillis) {
+    val earlyReads = app.photon.signal.EarlyReadCache()
+    val notifications = MessageNotifications(fx.db, fx.names, fx.notifier, clock)
+    val remoteEdits = RemoteEdits(fx.db, notifications)
+    val calls = CallHandler(fx.credentials, fx.db, fx.contactNames, fx.names, fx.notifier, schedule = { _, _ -> }, clock = clock)
+    val data = DataMessageHandler(
+        fx.db, fx.contactNames, fx.groupMetadata, calls, remoteEdits,
+        Attachments(fx.context, fx.db) { null }, earlyReads, notifications, fx.scope,
+    )
+    val sync = SyncMessageHandler(
+        fx.credentials, app.photon.signal.store.PhotonIdentityKeyStore(fx.protocolDb), fx.db, fx.contactNames,
+        fx.groupMetadata, calls, remoteEdits, ContactsSync(fx.context, fx.db, { null }, {}), earlyReads, fx.notifier,
+        app.photon.signal.storage.StorageMuteSync(fx.credentials, fx.db, fx.scope, { null }, { false }),
+        fx.scope,
+    )
+
+    /** Envelope metadata for a message from [aci] (in [groupId]'s group, if given). */
+    fun from(aci: String, groupId: ByteArray? = null) = org.whispersystems.signalservice.api.crypto.EnvelopeMetadata(
+        org.signal.core.models.ServiceId.ACI.parseOrNull(aci)!!, null, 1, true, groupId,
+        org.signal.core.models.ServiceId.ACI.parseOrNull(fx.credentials.aciString!!)!!, 0,
+    )
+}

@@ -3,14 +3,18 @@ package app.photon.signal.receiver
 import android.util.Base64
 import android.util.Log
 import app.photon.signal.EarlyReadCache
+import app.photon.signal.MessageKeys
 import app.photon.signal.SignalGroupV2Manager
 import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.db.SignalMessageDatabase
-import app.photon.signal.db.insertIncomingMessage
+import app.photon.signal.db.insertIncomingRows
+import app.photon.signal.db.isMessageStored
 import app.photon.signal.db.updateContactPhone
 import app.photon.signal.db.updateContactProfileKey
 import app.photon.signal.db.upsertConversation
 import app.photon.signal.db.upsertParticipant
+import app.photon.signal.notificationContent
+import app.photon.signal.plannedRows
 import app.photon.signal.replyPrefix
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
@@ -20,7 +24,10 @@ import org.whispersystems.signalservice.internal.push.DataMessage
 
 private const val TAG = SignalMessageReceiver.TAG
 
-/** Incoming DataMessages: text, media, reactions, deletes and group-call announcements. */
+/**
+ * Incoming DataMessages: text, media, contacts, polls, view-once media,
+ * reactions, deletes and group-call announcements.
+ */
 internal class DataMessageHandler(
     private val messageDb: SignalMessageDatabase,
     private val contactNames: ContactNames,
@@ -33,13 +40,47 @@ internal class DataMessageHandler(
     private val messageNotifications: MessageNotifications,
     private val scope: CoroutineScope,
 ) {
+    /** Who sent an envelope, keyed as their conversation is (their ACI). */
+    private fun senderOf(metadata: EnvelopeMetadata): String = contactNames.normalizeServiceIdForConversation(
+        serviceId = metadata.sourceServiceId,
+        e164 = metadata.sourceE164,
+        context = "Incoming data source",
+    )
+
+    /**
+     * The conversation a message from [senderAci] belongs to. Two sources
+     * of "this is a group": (a) libsignal extracted `metadata.groupId`
+     * during decryption (the 16-byte stable identifier), or (b) the
+     * DataMessage carries `groupV2.masterKey`, from which we can derive the
+     * same identifier ourselves. The masterKey path is preferred because it
+     * gives us the material needed to fetch + decrypt the group's title and
+     * members.
+     *
+     * Seeds the group's metadata whatever the message carries: many in-group
+     * messages have no body (sender-key distribution prelude, group state
+     * changes, typing indicators with no payload, etc.) but DO carry
+     * `groupV2.masterKey`, the only material needed to fetch the group's
+     * name and members. Bailing out without storing it leaves the
+     * group permanently unnamed and unable to receive outgoing sends.
+     */
+    private fun conversationOf(data: DataMessage, metadata: EnvelopeMetadata, senderAci: String): Pair<String, Boolean> {
+        val groupV2 = data.groupV2
+        val groupMasterKey = groupV2?.masterKey?.toByteArray()?.takeIf { it.size == 32 }
+        val derivedGroupId = groupMasterKey?.let { mk ->
+            try { SignalGroupV2Manager.groupIdFromMasterKey(mk) } catch (_: Exception) { null }
+        }
+        val groupIdBytes = derivedGroupId ?: metadata.groupId
+        if (groupIdBytes == null || groupIdBytes.isEmpty()) return senderAci to false
+        val conversationJid = Base64.encodeToString(groupIdBytes, Base64.NO_WRAP or Base64.URL_SAFE)
+        if (groupMasterKey != null) {
+            groupMetadata.seedGroupConversation(conversationJid, groupMasterKey, groupV2.revision ?: 0)
+        }
+        return conversationJid to true
+    }
+
     fun processDataMessage(data: DataMessage, metadata: EnvelopeMetadata) {
         val senderE164 = metadata.sourceE164
-        val senderAci = contactNames.normalizeServiceIdForConversation(
-            serviceId = metadata.sourceServiceId,
-            e164 = senderE164,
-            context = "Incoming data source",
-        )
+        val senderAci = senderOf(metadata)
         val timestamp = data.timestamp ?: System.currentTimeMillis()
 
         // Phone number is the cheapest fallback name; profile fetch (below) may upgrade it.
@@ -56,29 +97,7 @@ internal class DataMessageHandler(
         // Kick off an async profile fetch whenever we haven't resolved a display name yet.
         contactNames.maybeFetchProfile(senderAci)
 
-        // Determine conversation JID. Two sources of "this is a group":
-        // (a) libsignal extracted `metadata.groupId` during decryption (the
-        //     16-byte stable identifier), or
-        // (b) the DataMessage carries `groupV2.masterKey`, from which we
-        //     can derive the same identifier ourselves.
-        // We prefer the masterKey path because it gives us the material
-        // needed to fetch + decrypt the group's title and members.
-        val groupV2 = data.groupV2
-        val groupMasterKey = groupV2?.masterKey?.toByteArray()?.takeIf { it.size == 32 }
-        val groupRevision = groupV2?.revision ?: 0
-
-        val metaGroupId = metadata.groupId
-        val derivedGroupId = groupMasterKey?.let { mk ->
-            try { SignalGroupV2Manager.groupIdFromMasterKey(mk) } catch (_: Exception) { null }
-        }
-
-        val groupIdBytes = derivedGroupId ?: metaGroupId
-        val isGroup = groupIdBytes != null && groupIdBytes.isNotEmpty()
-        val conversationJid = if (isGroup) {
-            Base64.encodeToString(groupIdBytes, Base64.NO_WRAP or Base64.URL_SAFE)
-        } else {
-            senderAci
-        }
+        val (conversationJid, isGroup) = conversationOf(data, metadata, senderAci)
 
         // Stable identity of a Signal message is (author, sentTimestamp); the
         // "_{rand}" suffix only makes the local PK unique. The same message can
@@ -89,17 +108,6 @@ internal class DataMessageHandler(
         // duplicate row (one group message arrived 36 times).
         val messagePrefix = "${senderAci}_${timestamp}"
         val messageId = "${messagePrefix}_${UUID.randomUUID().toString().take(8)}"
-
-        // Seed group metadata BEFORE the body-vs-sticker early-return below.
-        // Many in-group messages have no body or sticker (sender-key
-        // distribution prelude, group state changes, typing indicators with
-        // no payload, etc.) — but they often DO carry `groupV2.masterKey`,
-        // which is the only material we need to fetch the group's name and
-        // member list. Bailing out without storing it leaves the group
-        // permanently unnamed and unable to receive outgoing sends.
-        if (isGroup && groupMasterKey != null) {
-            groupMetadata.seedGroupConversation(conversationJid, groupMasterKey, groupRevision)
-        }
 
         // Handle reactions (and reaction removals)
         data.reaction?.let { reaction ->
@@ -124,20 +132,17 @@ internal class DataMessageHandler(
             return
         }
 
-        // Regular message
-        val body = data.body
-        val attachment = data.attachments.firstOrNull()
-        if (body == null && data.sticker == null && attachment == null) {
+        // Everything else that shows: one row per attachment, contact, poll
+        // or body (plannedRows).
+        val rows = plannedRows(data)
+        if (rows.isEmpty()) {
             // No displayable content (could be key update, profile key, etc.)
             return
         }
-
-        // Media beats text: a photo with a caption is an "image" row whose
-        // text_body carries the caption, mirroring the WhatsApp model.
-        val contentType = when {
-            attachment != null -> contentTypeForMime(attachment.contentType)
-            body != null -> "text"
-            else -> "sticker"
+        // A redelivery changes nothing.
+        if (messageDb.isMessageStored(messagePrefix)) {
+            Log.d(TAG, "Skipping duplicate incoming message $messagePrefix")
+            return
         }
 
         if (isGroup) {
@@ -154,23 +159,16 @@ internal class DataMessageHandler(
         // read: store it without counting it unread or notifying.
         val readElsewhere = earlyReads.consume(messagePrefix)
 
-        // Redeliveries are dropped inside the insert (same author+timestamp
+        // Redeliveries are dropped inside the insert too (same author+timestamp
         // prefix), skipping every side effect below so a resent message
         // doesn't appear N times, inflate the unread count, or re-notify.
-        val inserted = messageDb.insertIncomingMessage(
-            id = messageId,
+        val inserted = messageDb.insertIncomingRows(
+            messageId = messageId,
+            rows = rows,
             conversationJid = conversationJid,
             senderJid = senderAci,
             timestamp = timestamp / 1000,
-            contentType = contentType,
-            textBody = body,
-            mediaMime = attachment?.contentType,
-            mediaSize = attachment?.size?.toLong(),
             replyToId = replyPrefix(data.quote),
-            // Serialized pointer so the blob can be fetched on demand later
-            // (tap-to-view); images/videos aren't auto-downloaded.
-            rawProto = attachment?.encode(),
-            dedupePrefix = messagePrefix,
             alreadyRead = readElsewhere,
         )
         if (!inserted) {
@@ -180,8 +178,11 @@ internal class DataMessageHandler(
 
         // Voice notes auto-download (small, and the UI autoplays them on
         // open) — mirrors the WhatsApp bridge's auto-download policy.
-        if (attachment != null && contentType == "audio") {
-            scope.launch { attachments.downloadAttachment(messageId) }
+        rows.forEachIndexed { index, row ->
+            if (row.attachment != null && row.contentType == "audio") {
+                val partId = MessageKeys.partId(messageId, index)
+                scope.launch { attachments.downloadAttachment(partId) }
+            }
         }
 
         if (readElsewhere) {
@@ -189,6 +190,7 @@ internal class DataMessageHandler(
             return
         }
 
-        messageNotifications.showMessage(conversationJid, isGroup, senderAci, body, contentType)
+        val (previewText, previewType) = notificationContent(rows, data.body)
+        messageNotifications.showMessage(conversationJid, isGroup, senderAci, previewText, previewType)
     }
 }
