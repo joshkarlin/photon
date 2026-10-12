@@ -320,13 +320,27 @@ fun SignalMessageDatabase.clearMediaUrlByPath(path: String) {
     notifyChanged()
 }
 
-fun SignalMessageDatabase.getMessages(conversationJid: String, limit: Int = 50): List<Message> {
+/**
+ * SQL for a row whose disappearing clock hasn't run out at [nowMs], for the
+ * queries the UI reads: the expiry sweep deletes it soon, but its timer
+ * can't wake it from deep sleep, so a row can outlive its time until then.
+ */
+internal fun notExpired(column: String = "expires_at", nowMs: Long = System.currentTimeMillis()): String =
+    "($column = 0 OR $column > $nowMs)"
+
+/** A conversation's messages, newest first, leaving out any whose time is up. */
+fun SignalMessageDatabase.getMessages(
+    conversationJid: String,
+    limit: Int = 50,
+    nowMs: Long = System.currentTimeMillis(),
+): List<Message> {
     return readableDatabase.rawQuery(
         // Tiebreak on _rowid_ so two messages sent in the same wall-clock
         // second still render in insertion order. Without this, sending
         // two messages back-to-back occasionally swaps them in the chat
         // (storage is in seconds; the wire timestamp is sub-second).
-        "SELECT * FROM messages WHERE conversation_jid = ? ORDER BY timestamp DESC, _rowid_ DESC LIMIT ?",
+        "SELECT * FROM messages WHERE conversation_jid = ? AND ${notExpired(nowMs = nowMs)} " +
+            "ORDER BY timestamp DESC, _rowid_ DESC LIMIT ?",
         arrayOf(conversationJid, limit.toString()),
     ).use { it.toMessages(::signalStatus) }
 }
@@ -342,15 +356,22 @@ fun SignalMessageDatabase.getMessage(id: String): Message? {
  * IDs get a random suffix when stored locally so reply quotes (which only know the
  * original sent timestamp + author) can't look up by exact ID.
  */
-fun SignalMessageDatabase.findMessageByPrefix(prefix: String): Message? {
+fun SignalMessageDatabase.findMessageByPrefix(prefix: String): Message? = findMessageByPrefix(prefix, liveOnly = false)
+
+/**
+ * [findMessageByPrefix] for the UI (a reply's quote): with [liveOnly], a
+ * message whose disappearing time is up isn't found.
+ */
+fun SignalMessageDatabase.findMessageByPrefix(prefix: String, liveOnly: Boolean): Message? {
     // Range scan instead of LIKE — LIKE is case-insensitive in SQLite so
     // it can't use the PK index. IDs are ASCII "{aci}_{tsMs}_{rand}", so
     // ["prefix_", "prefix_\uFFFF") covers every suffix. The first row of a
     // message stored as several sorts first. A quote of an edited message
     // may name the edit (see resolveMessagePrefix).
     val resolved = resolveMessagePrefix(prefix)
+    val live = if (liveOnly) " AND ${notExpired()}" else ""
     return readableDatabase.rawQuery(
-        "SELECT * FROM messages WHERE id >= ? AND id < ? ORDER BY id LIMIT 1",
+        "SELECT * FROM messages WHERE id >= ? AND id < ?$live ORDER BY id LIMIT 1",
         arrayOf("${resolved}_", "${resolved}_\uFFFF"),
     ).use { if (it.moveToFirst()) it.toMessage(::signalStatus) else null }
 }

@@ -62,7 +62,7 @@ class SignalRepository(
             changes = db.changes,
             load = { db.getMessages(conversationJid, limit) },
             loadReactions = { db.getReactions(it) },
-            lookupReply = { db.findMessageByPrefix(it) },
+            lookupReply = { db.findMessageByPrefix(it, liveOnly = true) },
         )
 
     /** The conversation, its name resolved. */

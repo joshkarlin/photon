@@ -1,7 +1,9 @@
 package app.photon.signal.receiver
 
 import app.photon.signal.PlannedRow
+import app.photon.signal.db.findMessageByPrefix
 import app.photon.signal.db.getConversation
+import app.photon.signal.db.getConversationsWithContacts
 import app.photon.signal.db.getMessages
 import app.photon.signal.db.insertIncomingRows
 import app.photon.signal.db.insertMessage
@@ -103,6 +105,27 @@ class ExpiryTest {
 
         assertEquals(listOf("update:$alice:Signal contact:older, unread"), fx.notifier.events)
         assertEquals(1, fx.db.getConversation(alice)?.unreadCount)
+    }
+
+    /**
+     * The sweep's timer can't wake the LP3 from deep sleep, so a message can
+     * outlive its time until the next sweep: the thread, the chat list and
+     * reply quotes leave it out meanwhile.
+     */
+    @Test
+    fun aMessageWhoseTimeIsUpIsHiddenBeforeTheSweep() {
+        receive("${alice}_1_a", 30, "gone soon")
+        fx.db.markConversationSeen(alice, nowMs = now)
+        val due = now + 30_000
+
+        assertEquals(1, fx.db.getMessages(alice, nowMs = due - 1).size)
+        assertEquals(0, fx.db.getMessages(alice, nowMs = due).size)
+        fx.db.writableDatabase.execSQL("UPDATE messages SET expires_at = ? WHERE id = ?", arrayOf<Any?>(System.currentTimeMillis() - 1, "${alice}_1_a"))
+        assertEquals(emptyList(), fx.db.getMessages(alice))
+        assertEquals(emptyList(), fx.db.getConversationsWithContacts())
+        assertNull(fx.db.findMessageByPrefix("${alice}_1", liveOnly = true))
+        // Still there for the sweep (and anything else that needs the row).
+        assertEquals("gone soon", fx.db.findMessageByPrefix("${alice}_1")?.textBody)
     }
 
     @Test

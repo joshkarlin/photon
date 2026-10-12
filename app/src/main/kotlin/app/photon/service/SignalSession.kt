@@ -1,6 +1,9 @@
 package app.photon.service
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.util.Log
 import app.photon.chat.ChatBackend
 import app.photon.chat.SignalBackend
@@ -22,7 +25,10 @@ import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -75,6 +81,7 @@ class SignalSession(private val context: Context, private val scope: CoroutineSc
         }
         if (pruneJob?.isActive != true) pruneJob = scope.launch { pruneEvery5Minutes() }
         if (expiryJob?.isActive != true) expiryJob = scope.launch { expireOnTime() }
+        listenForScreenOn()
     }
 
     @Synchronized
@@ -83,6 +90,7 @@ class SignalSession(private val context: Context, private val scope: CoroutineSc
         pruneJob = null
         expiryJob?.cancel()
         expiryJob = null
+        stopListeningForScreenOn()
         receiver.stop()
         sender.shutdown()
     }
@@ -146,7 +154,7 @@ class SignalSession(private val context: Context, private val scope: CoroutineSc
      */
     private suspend fun expireOnTime() {
         while (true) {
-            val seen = messageDb.expiryScheduled.value
+            val seen = messageDb.expiryScheduled.value to screenWakes.value
             val next = try {
                 receiver.expireMessages()
             } catch (e: Exception) {
@@ -154,9 +162,38 @@ class SignalSession(private val context: Context, private val scope: CoroutineSc
                 null
             }
             withTimeoutOrNull(expiryWaitMs(next, System.currentTimeMillis())) {
-                messageDb.expiryScheduled.first { it != seen }
+                combine(messageDb.expiryScheduled, screenWakes) { scheduled, woken -> scheduled to woken }
+                    .first { it != seen }
             }
         }
+    }
+
+    // The sweep's wait runs on a clock that stops in deep sleep, so a timer
+    // can come due while the LP3 sleeps and not be noticed until the wait
+    // ends. The screen turning on wakes it at once (the UI also hides rows
+    // whose time is up, until they're deleted).
+    private val screenWakes = MutableStateFlow(0L)
+    private val screenOn = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            screenWakes.update { it + 1 }
+        }
+    }
+    private var listeningForScreenOn = false
+
+    private fun listenForScreenOn() {
+        if (listeningForScreenOn) return
+        context.registerReceiver(screenOn, IntentFilter(Intent.ACTION_SCREEN_ON), Context.RECEIVER_NOT_EXPORTED)
+        listeningForScreenOn = true
+    }
+
+    private fun stopListeningForScreenOn() {
+        if (!listeningForScreenOn) return
+        try {
+            context.unregisterReceiver(screenOn)
+        } catch (_: IllegalArgumentException) {
+            // Already gone.
+        }
+        listeningForScreenOn = false
     }
 
     private companion object {

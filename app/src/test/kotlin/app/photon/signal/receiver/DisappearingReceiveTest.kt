@@ -89,7 +89,7 @@ class DisappearingReceiveTest {
             h.from(local),
         )
 
-    private fun thread(jid: String = alice) = fx.db.getMessages(jid).reversed().map { it.contentType to it.textBody }
+    private fun thread(jid: String = alice) = fx.db.getMessages(jid, nowMs = now).reversed().map { it.contentType to it.textBody }
 
     private fun expiry(id: String): Pair<Long, Long> =
         fx.db.readableDatabase.rawQuery("SELECT expires_in, expires_at FROM messages WHERE id = ?", arrayOf(id))
@@ -113,7 +113,7 @@ class DisappearingReceiveTest {
 
         assertEquals(ChatTimer(week, 2), fx.db.chatTimer(alice))
         assertEquals(listOf("text" to "this one disappears"), thread())
-        assertEquals(week.toLong() to 0L, expiry(fx.db.getMessages(alice).first().id))
+        assertEquals(week.toLong() to 0L, expiry(fx.db.getMessages(alice, nowMs = now).first().id))
     }
 
     /** A message from a client that sends version 0 (as Photon does while it doesn't know) teaches nothing. */
@@ -141,7 +141,7 @@ class DisappearingReceiveTest {
         assertEquals(2, fx.db.getConversation(alice)?.unreadCount)
         assertEquals("message:$alice:Signal contact:this one disappears", fx.notifier.events.last())
         // Unread: its clock hasn't started.
-        val message = fx.db.getMessages(alice).first()
+        val message = fx.db.getMessages(alice, nowMs = now).first()
         assertEquals(week.toLong() to 0L, expiry(message.id))
     }
 
@@ -153,7 +153,7 @@ class DisappearingReceiveTest {
         assertEquals(ChatTimer(week, 3), fx.db.chatTimer(alice))
         assertEquals(0, thread().count { it.first == ContentTypes.SYSTEM })
         // The message itself keeps its own timer: none.
-        assertEquals(0L, expiry(fx.db.getMessages(alice).first().id).first)
+        assertEquals(0L, expiry(fx.db.getMessages(alice, nowMs = now).first().id).first)
     }
 
     @Test
@@ -193,7 +193,7 @@ class DisappearingReceiveTest {
         receive("old client, a week", week, null, ts = first)
 
         assertEquals(0, fx.db.chatTimer(alice)?.seconds)
-        assertEquals(2, fx.db.getMessages(alice).count { it.contentType == "text" })
+        assertEquals(2, fx.db.getMessages(alice, nowMs = now).count { it.contentType == "text" })
     }
 
     /**
@@ -237,14 +237,14 @@ class DisappearingReceiveTest {
     @Test
     fun aReadSyncStartsTheClock() {
         receive("a week", week, 2)
-        val message = fx.db.getMessages(alice).first()
+        val message = fx.db.getMessages(alice, nowMs = now).first()
 
         h.sync.processSyncMessage(SyncMessage(read = listOf(SyncMessage.Read(senderAci = alice, timestamp = now))), h.from(local))
 
         val (expiresIn, expiresAt) = expiry(message.id)
         assertEquals(week.toLong(), expiresIn)
         assertTrue(expiresAt > 0)
-        assertEquals(MessageStatus.READ, fx.db.getMessages(alice).first().status)
+        assertEquals(MessageStatus.READ, fx.db.getMessages(alice, nowMs = now).first().status)
     }
 
     // ── Groups ──
@@ -256,7 +256,7 @@ class DisappearingReceiveTest {
 
         assertEquals(null, fx.db.chatTimer(group))
         assertEquals(listOf("text" to "in the group"), thread(group))
-        assertEquals(week.toLong(), expiry(fx.db.getMessages(group).first().id).first)
+        assertEquals(week.toLong(), expiry(fx.db.getMessages(group, nowMs = now).first().id).first)
     }
 
     @Test
@@ -312,7 +312,7 @@ class DisappearingReceiveTest {
         assertEquals(ChatTimer(week, 3), fx.db.chatTimer(alice))
         // The first timer learned is silent.
         assertEquals(listOf("text" to "sent on my phone"), thread())
-        val mine = fx.db.getMessages(alice).first()
+        val mine = fx.db.getMessages(alice, nowMs = now).first()
         assertTrue(mine.isFromMe)
         assertEquals(week.toLong() to ts + 500 + week * 1000L, expiry(mine.id))
     }

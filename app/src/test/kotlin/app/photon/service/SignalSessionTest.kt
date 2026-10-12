@@ -1,6 +1,8 @@
 package app.photon.service
 
 import android.content.Context
+import android.content.Intent
+import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.db.upsertConversation
@@ -13,6 +15,7 @@ import org.junit.After
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -42,6 +45,45 @@ class SignalSessionTest {
         session.stop()
         session.stop()
         assertEquals("disconnected", session.receiver.state.value)
+    }
+
+    /**
+     * The expiry sweep's wait stops in deep sleep; the screen turning on
+     * wakes it, so a message whose time came while the LP3 slept goes at once.
+     */
+    @Test
+    fun theScreenTurningOnRunsTheExpirySweep() {
+        val written = SignalMessageDatabase(context)
+        fun expiredRow(id: String) {
+            written.upsertConversation(jid = "aci", name = null, isGroup = false)
+            written.writableDatabase.execSQL(
+                "INSERT INTO messages (id, conversation_jid, sender_jid, timestamp, content_type, text_body, is_from_me, " +
+                    "status, expires_in, expires_at) VALUES (?, 'aci', 'aci', 1, 'text', 'x', 0, 'read', 30, ?)",
+                arrayOf<Any?>(id, System.currentTimeMillis() - 1_000),
+            )
+        }
+        fun gone(id: String) = written.readableDatabase.rawQuery("SELECT 1 FROM messages WHERE id = ?", arrayOf(id)).use { !it.moveToFirst() }
+        fun waitFor(what: String, check: () -> Boolean) {
+            val deadline = System.currentTimeMillis() + 5_000
+            while (!check()) {
+                if (System.currentTimeMillis() > deadline) error("timed out waiting for $what")
+                Thread.sleep(20)
+            }
+        }
+        try {
+            // The first sweep, as the session starts.
+            expiredRow("aci_1_a")
+            session.start()
+            waitFor("the first sweep") { gone("aci_1_a") }
+
+            // Written through another handle, so nothing wakes the sweep but the screen.
+            expiredRow("aci_2_b")
+            context.sendBroadcast(Intent(Intent.ACTION_SCREEN_ON))
+            shadowOf(Looper.getMainLooper()).idle()
+            waitFor("the sweep the screen woke") { gone("aci_2_b") }
+        } finally {
+            written.close()
+        }
     }
 
     @Test

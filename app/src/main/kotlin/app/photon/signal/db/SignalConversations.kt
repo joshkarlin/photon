@@ -125,13 +125,13 @@ private fun Cursor.conversationWithContact(): Pair<Conversation, Contact?> =
  * The conversation list, each with its name sources, newest first. Only
  * conversations with a message (call rows included) are listed, as on
  * WhatsApp: rows also exist for groups whose messages have all aged out
- * (they keep the master key and members) and, from older builds, for
- * contacts that never wrote.
+ * or disappeared (they keep the master key and members) and, from older
+ * builds, for contacts that never wrote.
  */
 fun SignalMessageDatabase.getConversationsWithContacts(): List<Pair<Conversation, Contact?>> =
     readableDatabase.rawQuery(
-        "$CONVERSATION_WITH_CONTACT WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_jid = c.jid) " +
-            "ORDER BY c.last_timestamp DESC",
+        "$CONVERSATION_WITH_CONTACT WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_jid = c.jid " +
+            "AND ${notExpired("m.expires_at")}) ORDER BY c.last_timestamp DESC",
         null,
     ).use { c ->
         buildList { while (c.moveToNext()) add(c.conversationWithContact()) }
