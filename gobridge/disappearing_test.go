@@ -105,8 +105,8 @@ func TestTimerReport_supersedes(t *testing.T) {
 func TestTimerText(t *testing.T) {
 	for seconds, want := range map[uint32]string{
 		0:          "Disappearing messages off",
-		day:        "Disappearing messages · 24 hours",
-		week:       "Disappearing messages · 7 days",
+		day:        "Disappearing messages · 1 day",
+		week:       "Disappearing messages · 1 week",
 		90 * day:   "Disappearing messages · 90 days",
 		2 * day:    "Disappearing messages · 2 days",
 		3600:       "Disappearing messages · 1 hour",
@@ -138,7 +138,7 @@ func TestHandleMessage_settingMessageSetsTheTimer(t *testing.T) {
 	if got := storedTimer(t, b, alice.String()); got != (timerSetting{0, now - 30}) {
 		t.Errorf("timer = %+v, want off as of the newer setting", got)
 	}
-	want := []string{"Disappearing messages · 7 days", "Disappearing messages off"}
+	want := []string{"Disappearing messages · 1 week", "Disappearing messages off"}
 	if got := systemLines(t, b, alice.String()); !equalStrings(got, want) {
 		t.Errorf("lines = %q, want %q", got, want)
 	}
@@ -325,7 +325,7 @@ func TestHandleHistorySync_timers(t *testing.T) {
 	if got := storedTimer(t, b, alice.String()); got != (timerSetting{week, now - day}) {
 		t.Errorf("alice's timer = %+v", got)
 	}
-	if got := systemLines(t, b, alice.String()); !equalStrings(got, []string{"Disappearing messages · 7 days"}) {
+	if got := systemLines(t, b, alice.String()); !equalStrings(got, []string{"Disappearing messages · 1 week"}) {
 		t.Errorf("alice's lines = %q", got)
 	}
 	if got := expiresAt(t, b, "h1"); got != now-100+week {

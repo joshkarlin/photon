@@ -117,21 +117,22 @@ func timerText(seconds uint32) string {
 }
 
 func durationText(s uint32) string {
+	// The largest whole unit, as the chat header shows it (Kotlin's
+	// formatTimerDuration), so a chat's line and header always agree:
+	// "1 day", "1 week", "90 days", and "25 hours" for an uneven timer.
 	unit := func(n uint32, name string) string {
 		if n == 1 {
 			return "1 " + name
 		}
 		return fmt.Sprintf("%d %ss", n, name)
 	}
-	switch {
-	case s == 86400:
-		return "24 hours"
-	case s%86400 == 0:
-		return unit(s/86400, "day")
-	case s%3600 == 0:
-		return unit(s/3600, "hour")
-	case s%60 == 0:
-		return unit(s/60, "minute")
+	for _, u := range []struct {
+		size uint32
+		name string
+	}{{7 * 86400, "week"}, {86400, "day"}, {3600, "hour"}, {60, "minute"}} {
+		if s >= u.size && s%u.size == 0 {
+			return unit(s/u.size, u.name)
+		}
 	}
 	return unit(s, "second")
 }
