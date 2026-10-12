@@ -9,12 +9,12 @@ Photon connects to WhatsApp, Signal, and SMS and presents your messages in a mon
 - **WhatsApp**: Native protocol via [whatsmeow](https://github.com/tulir/whatsmeow): text, reactions, replies, media send/receive, group chats, business chats, call notifications
 - **Signal**: Native protocol via [libsignal-service-java](https://github.com/AsamK/signal-cli) as a linked device: text, reactions, replies, media, GroupV2 chats, call notifications
 - **SMS**: Reads from Android's SMS store: view and send text messages
-- **All Chats**: Default view, merges all platforms by recency. Tap ALL CHATS in the bottom bar to switch to one platform.
+- **All Chats**: Default view, merges all platforms by recency. Tap ALL CHATS in the bottom bar to switch to one platform, or to see your archived chats.
 - **New message**: Find anyone by name or number across your LP3 contacts and every platform's chats, then open their chat or start one on WhatsApp, Signal or SMS.
 
 ### Ephemeral by design
 
-Messages don't live forever. Photon keeps a configurable rolling window of recent messages (default: 50 per chat or 7 days) and prunes the rest. Media downloads are temporary — viewed then auto-deleted after 5 minutes unless explicitly saved to the device.
+Messages don't live forever. Photon keeps a configurable rolling window of recent messages (default: 50 per chat or 7 days) and prunes the rest. Chats with disappearing messages also follow their own timer. Media downloads are temporary — viewed then auto-deleted after 5 minutes unless explicitly saved to the device.
 
 ## Installation
 
@@ -25,6 +25,14 @@ adb install -r app-release.apk
 ```
 
 `-r` upgrades an existing install in place and keeps your chats and links. Downgrading isn't supported: an older build can't open the newer Signal database.
+
+### Upgrading to 0.5.0
+
+No re-pair is needed.
+
+- **Signal reads your mutes and archived chats again** on its next connect, with the storage key Photon already has. Your primary phone only needs to come online if Photon never got that key.
+- **Signal learns each chat's disappearing-messages timer as messages arrive** (or from your primary's contact sync), and fetches each group's state once. Until Photon knows a chat's timer, its own messages there don't disappear. WhatsApp reads timers from the messages it already has, so only a DM with no stored sign of its timer waits for the next message.
+- **Calls** (Settings › Chat) starts at your old Notifications value. Notifications is now called Messages.
 
 ### Upgrading to 0.4.0
 
@@ -117,10 +125,12 @@ Threads follow the LightOS look: no bubbles, received messages on the left, your
 
 - **DMs** use the LP3 thread style. A timestamp sits above the first message of each run (a change of sender, or a gap of more than 15 minutes). Tap any other message to see its time and delivery status.
 - **Groups** use the LP2 style: a "Name  12:36" line above each run of incoming messages. Your own messages are right-aligned without a name.
-- **Calls** show as one centred line, e.g. "Missed voice call · 14:02".
-- **Long-press** a WhatsApp or Signal message for its actions, whichever apply: Reply, React (not on your own messages), Retry, Delete (in Photon only) or Delete for Everyone (after a confirm page).
+- **Calls and timer changes** show as one centred line, e.g. "Missed voice call · 14:02" or "Disappearing messages · 1 week". While a chat's messages disappear, its title has "disappearing · 1 week" under it.
+- **View-once media** reads "[ view-once photo · open on your phone ]", and a WhatsApp message your phone hasn't passed on yet reads "[ waiting for this message · open on your phone ]" until it arrives. Both count as unread. Photon never downloads view-once media.
+- **Locations** (WhatsApp) show the place's name or address with its coordinates beneath. Tap one to open it in a map app (Organic Maps on the LP3).
+- **Long-press** a WhatsApp or Signal message for its actions, whichever apply: Reply, React (not on your own messages), Retry, Delete (in Photon only) or Delete for Everyone (after a confirm page). View-once and waiting messages offer only Delete.
 - **Attach (+)** opens a sheet with Camera (when an app on the phone can take photos), Photos and Files. The voice-note mic stays beside the text field.
-- **Photos and videos** open full screen when tapped. Save is at the top right.
+- **Photos, videos and documents** open full screen when tapped. Save is at the top right: photos go to Pictures/Photon, videos to Movies/Photon and everything else to Download/Photon. Documents keep their real name.
 
 ## Settings
 
@@ -129,13 +139,15 @@ Organized into sub-pages:
 ### Chat
 | Setting | Options | Default |
 |---|---|---|
-| Notifications | Sound / Vibrate / Silent / Off | Sound |
+| Messages | Sound / Vibrate / Silent / Off | Sound |
+| Calls | Sound / Vibrate / Silent / Off | Your Messages level |
 | Thumbnails | On / Off | On |
 | Scroll Dial | Off / Slow / Medium / Fast | Medium |
 | Compose | Inline / Full screen | Inline |
 | Keyboard | System / Light | System |
 
-- **Notifications** sets how messages and calls alert. Sound, Vibrate and Silent each post through their own Android channel ("Messages", "Messages (vibrate)", "Messages (silent)"), so any system settings you made for "Messages" still apply. Upgrading turns On into Sound.
+- **Messages** sets how message notifications alert. Sound, Vibrate and Silent each post through their own Android channel ("Messages", "Messages (vibrate)", "Messages (silent)"), so any system settings you made for "Messages" still apply.
+- **Calls** sets how ringing, missed and group calls alert, through the "Calls", "Calls (vibrate)" and "Calls (silent)" channels. At Sound or Vibrate a ringing call keeps ringing or buzzing until it ends or 60 seconds pass. Every level but Off shows a call heads-up, even Silent. With Messages Off and Calls on Vibrate, messages stay quiet but you still know when someone calls.
 - **Scroll Dial** sets how far one turn of the dial scrolls chats and menus. Off hands the dial back to LightOS, which uses it for brightness.
 - **Compose: Full screen** follows LightOS Messages: the thread has a bottom bar with attach (+), voice note and compose, and compose opens a full-screen editor. Inline keeps a text field under the thread.
 - **Keyboard: Light** is the LP3 keyboard from the Light SDK. System is the phone's installed keyboard (Gboard, for example). Tap the text field to show the keyboard; tap the thread or turn the dial to hide it.
@@ -154,21 +166,27 @@ Per-platform status, Refresh Connection, and Reset (clear data + re-pair). Reset
 - [x] WhatsApp: text, reactions, replies, media viewing + sending, group chats, contact names, history sync, mute sync from primary device (timed mutes expire)
 - [x] WhatsApp business chats and the rest of WhatsApp's message types (templates, interactive messages, lists, polls, …). Anything Photon can't show reads `[ unsupported message ]`.
 - [x] WhatsApp edits and delete-for-everyone are applied, only when they come from the sender (a group admin can also delete for everyone)
+- [x] WhatsApp messages this device couldn't decrypt show a placeholder, replaced when your phone resends them
 - [x] Signal: text messaging (DM + GroupV2), send/receive, device linking, sync transcripts from primary, reply-to-message, reactions, media, contact book sync
+- [x] Signal edits are applied in place, every attachment of a message is shown, and polls and shared contacts show as text
 - [x] Signal GroupV2: incoming + outgoing fan-out send, group title + member resolution, locally-cached state refreshed on revision bumps
 - [x] SMS: read conversations, send messages (shown as sending, then sent or failed), per-conversation read tracking (local)
-- [x] Calls (WhatsApp + Signal): notifications and call rows for incoming, missed, and answered or declined on another device, including group calls. Photon can't answer calls.
+- [x] Disappearing messages (WhatsApp + Signal): Photon follows each chat's timer, sends with it, and deletes messages when their time is up. Timer changes show in the thread, and the chat's title shows the timer. Photon never changes a timer.
+- [x] View-once media (WhatsApp + Signal) shows as a placeholder to open on your phone, and is never downloaded or saved
+- [x] Locations (WhatsApp): the place's name and coordinates, opened in a map app with a tap
+- [x] Archived chats (WhatsApp + Signal) follow your phone, and open from Archived in the platform picker
+- [x] Calls (WhatsApp + Signal): notifications and call rows for incoming, missed, and answered or declined on another device, including group calls, with their own Calls setting. Photon can't answer calls.
 - [x] Display names follow one policy everywhere: LP3 contact, then the platform's address book (WhatsApp's synced contact name, or the Signal primary's contact name), then a verified business name, then the profile or push name, then the formatted number. Raw ids are never shown, and edits in the LP3 Contacts app show within seconds.
 - [x] All Chats: default home view; tap the filter in the bottom bar to switch between All / SMS / WhatsApp / Signal
 - [x] Reply-to-message: swipe right on a WhatsApp or Signal message, or long-press → Reply. Quote tap scrolls to the original.
 - [x] Failed-send recovery (WhatsApp, Signal, SMS): a failed message reads "failed · tap to retry". WhatsApp and Signal retries preserve the wire id/timestamp so recipients dedupe, and WhatsApp retry re-uploads media too.
 - [x] Message actions (WhatsApp + Signal): long-press a message for a LightOS menu of Reply, React, Retry, Delete and Delete for Everyone, offering only what applies. Delete removes it from Photon. Your own sent messages offer Delete for Everyone (WhatsApp revoke / Signal remote delete) after a confirm page. Reactions go on other people's messages only.
 - [x] New message: find anyone by name or number across LP3 contacts and every platform's chats, then open their chat or start one on WhatsApp, Signal or SMS
-- [x] Attachments (WhatsApp + Signal): Camera (when a camera app is available), Photos (the system photo picker) and Files (documents such as PDFs, sent under their own file name)
+- [x] Attachments (WhatsApp + Signal): Camera (when a camera app is available), Photos (the system photo picker) and Files (documents such as PDFs, sent under their own file name). Saved documents keep their real name, and every saved file gets its proper extension.
 - [x] Voice notes: record and send on WhatsApp and Signal; incoming voice notes autoplay on open
 - [x] In-app contact editor: tap a DM's title → save/update directly via `ContactsContract` (no AOSP handoff)
 - [x] Ephemeral retention (configurable count + days) on WhatsApp and Signal, kept across bridge restarts
-- [x] Message notifications (WhatsApp + Signal; Sound, Vibrate, Silent or Off). Chats muted on your primary stay silent on both platforms, with a muted mark in the chat list. Tapping one opens that chat, and the chat on screen never gets one.
+- [x] Notifications (WhatsApp + Signal): Messages and Calls each Sound, Vibrate, Silent or Off. Chats muted on your primary stay silent on both platforms, with a muted mark in the chat list. Tapping one opens that chat, and the chat on screen never gets one.
 - [x] Connection status in settings
 - [x] Reset/refresh per connection
 - [x] Light SDK look: Akkurat font, LightOS menus, top and bottom bars, margins and type sizes measured against LightOS, haptics, monochrome
@@ -190,8 +208,20 @@ This section lists open bugs and by-design limitations, one line each. Fixes wai
 
 - **Calls can't be answered**: Photon has no voice or video stack, so calls only show as notifications and call rows.
 - **Signal call edge cases**: a hangup that arrives without its offer is ignored, outgoing calls placed on the primary aren't recorded, and clearing the call log on the primary doesn't clear Photon's call rows.
-- **Mutes are read-only**: Photon follows mutes set on your primary (WhatsApp and Signal) but can't mute a chat itself. Calls still ring and missed calls still show in muted chats, and an @-mention doesn't break through a muted Signal group.
-- **Signal mutes need the primary online once after upgrading**: Photon asks the primary for the storage key it needs to read mutes, and the primary answers when it's online.
+- **Mutes and archives are read-only**: Photon follows mutes and archived chats set on your primary (WhatsApp and Signal) but can't mute or archive a chat itself. Calls still ring and missed calls still show in muted chats, and an @-mention doesn't break through a muted Signal group.
+- **Signal mutes and archives need the storage key**: if Photon never got it, it asks the primary once, and the primary answers when it's online.
+- **Unread Signal disappearing messages never expire**: as on Signal, a received message's timer only starts once it's read, in Photon or on another device.
+- **A Signal read can be lost offline**: a message read in Photon starts its timer at once, and if it disappears before Photon can send the read sync, your other devices never learn it was read.
+- **Signal timers are unknown until Photon learns them**: a DM's from its next message, transcript or contact sync (every DM after upgrading to 0.5.0), and a group's once Photon can fetch the group. Until then, Photon's messages there carry no timer and don't disappear.
+- **Signal contact-sync timers without a version are ignored**, because they can't be ordered against what messages said.
+- **Signal poll votes and poll endings aren't shown**: a poll shows as its question and options only.
+- **Long Signal messages are cut short**: a message over 2,000 characters shows only its first part, and the rest isn't downloaded.
+- **Signal view-once media from before 0.5.0 can still be saved**: those rows don't record that they were view-once, so they stay ordinary photos and videos.
+- **A WhatsApp DM's timer can be unknown after upgrading to 0.5.0**: if none of its stored messages showed one, Photon learns it from the next message that does, and until then Photon's messages there don't disappear.
+- **WhatsApp "disappear after read" isn't followed**: Photon doesn't handle `afterReadDuration` timers or `EPHEMERAL_SYNC_RESPONSE` messages.
+- **WhatsApp "Keep chats archived" is assumed on** until WhatsApp syncs the setting, so until then a new message leaves an archived chat archived.
+- **Live locations show only their starting point**: Photon doesn't follow a WhatsApp live location's updates.
+- **The LP3's clock affects disappearing messages**: expiry is checked against it, and some start times come from other devices (a WhatsApp message's send time, a Signal transcript's), so a wrong clock deletes messages early or late.
 - **Signal held envelopes are memory-only**: if Photon is killed after a message fails to process, the redelivered copy can't be decrypted again.
 - **Signal message ids keep their random suffix**: Photon matches Signal messages by author and timestamp, and the rewrite of stored ids that would drop the suffix was deferred.
 - **Signal chats drop off the list when all their messages age out**, as on WhatsApp.
@@ -201,7 +231,6 @@ This section lists open bugs and by-design limitations, one line each. Fixes wai
 - **Signal group admin**: Photon sends and receives in GroupV2 groups but can't create groups, add or remove members, rename, or leave. Changes made on other devices are picked up through the revision check on the next message.
 - **Signal group sends fan out per recipient**: Photon doesn't use sender-key distribution, so sends to large groups are slower and `GroupSendEndorsements` are skipped.
 - **Signal can only start chats with people it already knows**: New message reaches a number on Signal only when Photon already has its Signal account from the primary's contact sync or an earlier chat, because Photon doesn't use Signal's contact discovery.
-- **Received Signal documents show no file name**, because Photon doesn't store an incoming attachment's name. Sent ones keep theirs.
 - **No Signal history**: only messages received after linking appear. Importing history needs backup/restore support.
 - **No Signal read receipts to senders**: Photon syncs read state to your own devices but never sends read receipts to message authors, because it can't see the account's read-receipt privacy setting.
 - **Partial Signal verification state**: Photon only learns verified status from verification syncs received after linking. Accepting a changed safety number in Photon doesn't mark it verified on your other devices.
