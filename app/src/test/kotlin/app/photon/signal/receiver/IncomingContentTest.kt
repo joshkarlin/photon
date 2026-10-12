@@ -175,6 +175,15 @@ class IncomingContentTest {
         assertEquals(listOf("message:$alice:Signal contact:view-once photo"), fx.notifier.events)
     }
 
+    /** A view-once voice note notifies as the thread words it. */
+    @Test
+    fun aViewOnceVoiceNoteNotifiesAsAVoiceMessage() {
+        receive(DataMessage(timestamp = ++now, isViewOnce = true, attachments = listOf(pointer("audio/aac"))))
+
+        assertEquals("voice", thread().single().textBody)
+        assertEquals(listOf("message:$alice:Signal contact:view-once voice message"), fx.notifier.events)
+    }
+
     /** Opened on the primary: read here too, and its notification goes. */
     @Test
     fun viewOnceOpenedOnThePrimaryIsRead() {

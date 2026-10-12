@@ -1,6 +1,5 @@
 package app.photon.signal.receiver
 
-import app.photon.data.model.ContentTypes
 import app.photon.data.model.Message
 import app.photon.service.messageNotificationText
 import app.photon.service.notificationPreview
@@ -39,15 +38,6 @@ internal fun notificationAfterRemoteDelete(
 }
 
 /**
- * What a Signal message's notification says of it: "view-once photo" for
- * view-once media (whose row names only the kind), else the shared preview.
- */
-internal fun signalNotificationPreview(text: String?, contentType: String): String? = when (contentType) {
-    ContentTypes.VIEW_ONCE -> "view-once ${text?.takeIf { it.isNotBlank() } ?: "photo"}"
-    else -> notificationPreview(text, contentType)
-}
-
-/**
  * Signal message notifications: titles and previews, posted and corrected.
  * A chat muted on the primary (storage service) posts none; its messages
  * still count as unread. An archived chat notifies as any other.
@@ -77,7 +67,9 @@ internal class MessageNotifications(
             conversationTitle = names.title(conversationJid, isGroup),
             isGroup = isGroup,
             senderName = if (isGroup) names.person(senderAci) else null,
-            preview = signalNotificationPreview(text, contentType),
+            // View-once media by its kind ("view-once voice message"), as
+            // the thread and WhatsApp word it (viewOnceLabel).
+            preview = notificationPreview(text, contentType),
         )
         notifier.showMessage(notification.title, notification.body, conversationJid, update)
     }

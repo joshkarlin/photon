@@ -3,6 +3,7 @@ package app.photon.signal
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import app.photon.data.model.ContentTypes
+import app.photon.service.notificationPreview
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.db.StorageMute
 import app.photon.signal.db.applyStorageManifest
@@ -11,7 +12,6 @@ import app.photon.signal.db.getConversationsWithContacts
 import app.photon.signal.db.insertMessage
 import app.photon.signal.db.updateDmTimer
 import app.photon.signal.db.upsertConversation
-import app.photon.signal.receiver.signalNotificationPreview
 import org.junit.After
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -56,10 +56,10 @@ class SignalConversationStateTest {
 
     @Test
     fun aViewOnceNotificationNamesItsKind() {
-        assertEquals("view-once photo", signalNotificationPreview("photo", ContentTypes.VIEW_ONCE))
-        assertEquals("view-once video", signalNotificationPreview("video", ContentTypes.VIEW_ONCE))
-        assertEquals("view-once photo", signalNotificationPreview(null, ContentTypes.VIEW_ONCE))
-        assertEquals("hi", signalNotificationPreview("hi", "text"))
-        assertEquals("[ image ]", signalNotificationPreview(null, "image"))
+        assertEquals("view-once photo", notificationPreview("photo", ContentTypes.VIEW_ONCE))
+        assertEquals("view-once video", notificationPreview("video", ContentTypes.VIEW_ONCE))
+        assertEquals("view-once voice message", notificationPreview("voice", ContentTypes.VIEW_ONCE))
+        assertEquals("hi", notificationPreview("hi", "text"))
+        assertEquals("[ image ]", notificationPreview(null, "image"))
     }
 }
