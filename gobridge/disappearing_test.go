@@ -91,8 +91,9 @@ func TestTimerReport_supersedes(t *testing.T) {
 		{"the same setting again", timerReport{timerSetting: timerSetting{week, 100}}, timerSetting{week, 100}, false},
 		{"an untimed report fills in nothing known", timerReport{timerSetting: timerSetting{week, 0}}, timerSetting{}, true},
 		{"an untimed report never beats a timed one", timerReport{timerSetting: timerSetting{day, 0}}, timerSetting{week, 100}, false},
-		{"the server's current state always stands", timerReport{timerSetting: timerSetting{day, 0}, current: true}, timerSetting{week, 100}, true},
-		{"the current state, unchanged", timerReport{timerSetting: timerSetting{week, 0}, current: true}, timerSetting{week, 100}, false},
+		{"the server's current state stands", timerReport{timerSetting: timerSetting{day, 0}, current: true, fetchedAt: 200}, timerSetting{week, 100}, true},
+		{"the current state, unchanged", timerReport{timerSetting: timerSetting{week, 0}, current: true, fetchedAt: 200}, timerSetting{week, 100}, false},
+		{"a fetch begun before a change doesn't undo it", timerReport{timerSetting: timerSetting{day, 0}, current: true, fetchedAt: 50}, timerSetting{week, 100}, false},
 	}
 	for _, c := range cases {
 		if got := c.r.supersedes(c.cur); got != c.want {
@@ -268,9 +269,20 @@ func TestGroupTimerFromInfo(t *testing.T) {
 	if got := b.chatTimer(grp.String()).seconds; got != day {
 		t.Errorf("timer = %d, want the group's current one", got)
 	}
-	b.applyGroupTimer(grp, &types.GroupInfo{JID: grp})
+	b.applyGroupTimer(grp, &types.GroupInfo{JID: grp}, now.Unix()+60)
 	if got := b.chatTimer(grp.String()).seconds; got != 0 {
 		t.Errorf("timer = %d, want off as the server has it", got)
+	}
+	// Lines for what a fetch found don't move the chat up.
+	if last := lastMessageOf(t, b, grp.String()); last != "timer_"+itoa(now.Unix())+"_604800_"+grp.String() {
+		t.Errorf("preview = %q, want the line of the change itself", last)
+	}
+
+	// A fetch that began before a change landed doesn't undo it.
+	b.HandleEvent(&events.GroupInfo{JID: grp, Timestamp: now.Add(2 * time.Minute), Ephemeral: &types.GroupEphemeral{IsEphemeral: true, DisappearingTimer: week}})
+	b.applyGroupTimer(grp, &types.GroupInfo{JID: grp}, now.Unix()+90)
+	if got := b.chatTimer(grp.String()).seconds; got != week {
+		t.Errorf("timer = %d: a stale fetch undid a newer change", got)
 	}
 }
 
@@ -645,4 +657,76 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// The unread count can exceed the unread messages ("mark as unread", calls):
+// when the message the notification shows disappears with none left to
+// show, Kotlin is told it went, so the notification can go too.
+func TestExpireMessages_shownMessageGoneWithNothingToShow(t *testing.T) {
+	b := newFKClientBridge(t)
+	events := captureEvents(b)
+	now := time.Now().Unix()
+	b.handleMessage(messageEvent(alice, alice, "m1", now-100, disappearingText("secret", 3600, 0)))
+	b.MarkChatUnread(alice.String())
+	b.msgDB.Exec(`UPDATE conversations SET unread_count = 2 WHERE jid = ?`, alice.String())
+
+	b.expireMessages(now + 3600)
+	got := events.ofType("messages_removed")
+	if len(got) != 1 || got[0]["newest_removed"] != true || got[0]["unread_count"] != float64(1) || got[0]["newest_unread"] != nil {
+		t.Errorf("messages_removed = %v, want newest_removed with nothing to show", got)
+	}
+}
+
+// A timer change recorded under both a DM's LID and its phone JID shows
+// once after the merge.
+func TestMergeConversation_oneLinePerChange(t *testing.T) {
+	b := newFKClientBridge(t)
+	now := time.Now().Unix()
+	lid := types.NewJID("11223344", types.HiddenUserServer)
+	b.handleMessage(settingEvent(lid, lid, "s1", now, week, now))
+	b.handleMessage(settingEvent(alice, alice, "s1b", now, week, now))
+	if _, err := b.mergeConversation(lid.String(), alice.String()); err != nil {
+		t.Fatal(err)
+	}
+	if got := systemLines(t, b, alice.String()); len(got) != 1 {
+		t.Errorf("lines = %q, want one", got)
+	}
+}
+
+// A reply's stored proto keeps no copy of what it quotes: it would outlive
+// a message that disappears, or hold a view-once photo's keys.
+func TestReplies_storeNoQuotedCopy(t *testing.T) {
+	b := newFKClientBridge(t)
+	b.handleMessage(messageEvent(alice, alice, "r1", time.Now().Unix(), &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+		Text: s("that one"),
+		ContextInfo: &waE2E.ContextInfo{
+			StanzaID:      s("q1"),
+			QuotedMessage: &waE2E.Message{ImageMessage: &waE2E.ImageMessage{MediaKey: []byte("key"), JPEGThumbnail: []byte("jpg")}},
+		},
+	}}))
+	raw, _ := b.GetMessageRawProto("r1")
+	var msg waE2E.Message
+	proto.Unmarshal(raw, &msg)
+	if ctx := getContextInfo(&msg); ctx.GetQuotedMessage() != nil || ctx.GetStanzaID() != "q1" {
+		t.Errorf("stored context = %v, want the quote's ID only", ctx)
+	}
+	var reply string
+	b.msgDB.QueryRow(`SELECT reply_to_id FROM messages WHERE id = 'r1'`).Scan(&reply)
+	if reply != "q1" {
+		t.Errorf("reply_to_id = %q", reply)
+	}
+}
+
+func TestPruneMessages_dropsEmptyChatsWhoseMuteEnded(t *testing.T) {
+	b := newFKClientBridge(t)
+	now := time.Now().Unix()
+	b.UpdateMute(alice.String(), now-10)
+	b.UpdateMute(bob.String(), now+3600)
+	b.pruneMessages()
+	if n := rowCount(t, b, `SELECT COUNT(*) FROM conversations WHERE jid = ?`, alice.String()); n != 0 {
+		t.Errorf("an empty chat whose mute ended was kept")
+	}
+	if n := rowCount(t, b, `SELECT COUNT(*) FROM conversations WHERE jid = ?`, bob.String()); n != 1 {
+		t.Errorf("an empty chat still muted was removed")
+	}
 }

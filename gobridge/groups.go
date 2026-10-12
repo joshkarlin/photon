@@ -96,6 +96,7 @@ func (b *Bridge) groupEntry(jid types.JID, needAdmins bool) cachedGroupName {
 		return cached
 	}
 
+	fetchedAt := time.Now().Unix()
 	groupInfo, err := b.client.GetGroupInfo(context.Background(), jid)
 	if err != nil {
 		b.log.Warnf("GetGroupInfo failed for %s: %v", key, err)
@@ -104,7 +105,7 @@ func (b *Bridge) groupEntry(jid types.JID, needAdmins bool) cachedGroupName {
 	if groupInfo.Name == "" {
 		b.log.Warnf("GetGroupInfo returned empty name for %s", key)
 	}
-	b.applyGroupTimer(jid, groupInfo)
+	b.applyGroupTimer(jid, groupInfo, fetchedAt)
 	entry := cachedGroupName{name: groupInfo.Name, admins: map[string]bool{}, fetched: time.Now()}
 	for _, p := range groupInfo.Participants {
 		if p.IsAdmin || p.IsSuperAdmin {
@@ -197,5 +198,5 @@ func (b *Bridge) resolveGroupParticipants(groupJID string) (changed bool) {
 // handleJoinedGroup records the timer of a group the user joined (or was
 // added to): its info is the server's current state.
 func (b *Bridge) handleJoinedGroup(evt *events.JoinedGroup) {
-	b.applyGroupTimer(evt.JID, &evt.GroupInfo)
+	b.applyGroupTimer(evt.JID, &evt.GroupInfo, time.Now().Unix())
 }

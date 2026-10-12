@@ -199,6 +199,7 @@ func (b *Bridge) handleEditMessage(ctx context.Context, raw json.RawMessage) (js
 	targetJID := b.resolveLIDJID(parsedJID)
 
 	// The new text carries the chat's timer, as every message Photon sends.
+	b.refreshGroupTimer(targetJID)
 	ctxInfo, _ := b.outgoingContext(targetJID.String(), "")
 	editMsg := b.client.BuildEdit(targetJID, p.MessageID, buildTextMessage(p.NewText, ctxInfo))
 	if _, err = b.sendMessage(ctx, targetJID, editMsg); err != nil {

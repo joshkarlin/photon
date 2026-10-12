@@ -51,8 +51,10 @@ type timerSetting struct {
 type timerReport struct {
 	timerSetting
 	// current marks the server's present state (a group's fetched info),
-	// which stands whatever the stored setting time.
-	current bool
+	// which stands over any setting made before fetchedAt, when the fetch
+	// began: a change that lands while it's under way is newer.
+	current   bool
+	fetchedAt int64
 	// at is when the change happened in the chat, where its line goes; 0
 	// records the timer without a line.
 	at int64
@@ -62,7 +64,7 @@ type timerReport struct {
 func (r timerReport) supersedes(cur timerSetting) bool {
 	switch {
 	case r.current:
-		return r.seconds != cur.seconds
+		return r.seconds != cur.seconds && r.fetchedAt >= cur.setAt
 	case r.setAt > cur.setAt:
 		return true
 	case r.setAt == 0 && cur.setAt == 0:
@@ -236,6 +238,10 @@ func (b *Bridge) applyTimerTx(tx *sql.Tx, chatJID string, r timerReport) (change
 	if n, _ := res.RowsAffected(); n == 0 {
 		return true, nil, nil
 	}
+	if r.current {
+		// Found out now, not changed now: the chat doesn't move up for it.
+		return true, line, nil
+	}
 	return true, line, b.upsertConversation(tx, chatJID, rankedName{}, line.ID, line.Timestamp)
 }
 
@@ -266,13 +272,18 @@ func (b *Bridge) retentionCutoff() int64 {
 }
 
 // applyGroupTimer records a group's timer from its info as the server
-// holds it now (a fetch, or joining the group).
-func (b *Bridge) applyGroupTimer(group types.JID, info *types.GroupInfo) {
+// held it at fetchedAt (a fetch begun then, or joining the group).
+func (b *Bridge) applyGroupTimer(group types.JID, info *types.GroupInfo, fetchedAt int64) {
 	seconds := uint32(0)
 	if info.IsEphemeral {
 		seconds = info.DisappearingTimer
 	}
-	b.applyTimer(group.String(), timerReport{timerSetting: timerSetting{seconds: seconds}, current: true, at: time.Now().Unix()})
+	b.applyTimer(group.String(), timerReport{
+		timerSetting: timerSetting{seconds: seconds},
+		current:      true,
+		fetchedAt:    fetchedAt,
+		at:           time.Now().Unix(),
+	})
 }
 
 // outgoingContext is the ContextInfo a message Photon sends to jid carries:
@@ -309,15 +320,18 @@ func (b *Bridge) refreshGroupTimer(jid types.JID) {
 // MessagesRemovedEvent: messages were deleted outright — they disappeared
 // (reason "expired"), or were placeholders for something that turned out
 // to have nothing to show ("placeholder"). When WasUnread, the chat's
-// notification may have shown one: with UnreadCount 0 it should go, and
-// NewestUnread, when set, is what it should show instead (the newest
-// unread message was among those removed).
+// notification may have shown one: with UnreadCount 0 it should go. When
+// NewestRemoved, the newest unread message, which the notification shows,
+// was among them: it should show NewestUnread instead, or go when that's
+// unset (the count can include calls and "mark as unread", which leave no
+// message to show).
 type MessagesRemovedEvent struct {
 	ConversationJID string           `json:"conversation_jid"`
 	MessageIDs      []string         `json:"message_ids"`
 	Reason          string           `json:"reason"`
 	WasUnread       bool             `json:"was_unread"`
 	UnreadCount     int              `json:"unread_count"`
+	NewestRemoved   bool             `json:"newest_removed"`
 	NewestUnread    *NewMessageEvent `json:"newest_unread,omitempty"`
 }
 
@@ -338,7 +352,7 @@ func (b *Bridge) expireMessages(now int64) {
 	rows.Close()
 	if len(ids) > 0 {
 		b.log.Infof("Deleting %d disappeared messages", len(ids))
-		b.removeMessages(ids, "expired")
+		b.removeMessages(ids, "expired", now)
 	}
 }
 
@@ -358,8 +372,10 @@ type removal struct {
 // removeMessages deletes messages outright, with their reactions and the
 // media the bridge downloaded for them, takes the unread ones out of their
 // chats' counts, moves each chat's preview back to its newest message left,
-// and tells Kotlin per chat (messages_removed).
-func (b *Bridge) removeMessages(ids []string, reason string) {
+// and tells Kotlin per chat (messages_removed). With expiredBy set, only
+// those still past their expiry then go (a resend may have replaced one
+// since they were picked).
+func (b *Bridge) removeMessages(ids []string, reason string, expiredBy int64) {
 	chats := map[string]*removal{}
 	var files []string
 	unreadAfter := map[string]int{}
@@ -369,7 +385,8 @@ func (b *Bridge) removeMessages(ids []string, reason string) {
 			var chat, status string
 			var fromMe int
 			var mediaURL, thumb sql.NullString
-			err := tx.QueryRow(`SELECT conversation_jid, is_from_me, status, media_url, thumbnail_path FROM messages WHERE id = ?`, id).
+			err := tx.QueryRow(`SELECT conversation_jid, is_from_me, status, media_url, thumbnail_path FROM messages
+				WHERE id = ? AND (? = 0 OR (expires_at > 0 AND expires_at <= ?))`, id, expiredBy, expiredBy).
 				Scan(&chat, &fromMe, &status, &mediaURL, &thumb)
 			if err == sql.ErrNoRows {
 				continue
@@ -438,7 +455,8 @@ func (b *Bridge) removeMessages(ids []string, reason string) {
 		}
 		// The notification shows the newest unread message; if that went
 		// and others are left, it should show the newest of those.
-		if evt.WasUnread && evt.UnreadCount > 0 && r.newestBefore != nil && containsID(r.ids, r.newestBefore.id) {
+		evt.NewestRemoved = r.newestBefore != nil && containsID(r.ids, r.newestBefore.id)
+		if evt.NewestRemoved && evt.UnreadCount > 0 {
 			if n := newestAfter[chat]; n != nil {
 				ne := b.newMessageEvent(chat, n.id, n.sender, n.text, n.contentType, false)
 				evt.NewestUnread = &ne

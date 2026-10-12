@@ -126,30 +126,35 @@ func applyViewOnce(row *MessageRow, wrapped bool, content *waE2E.Message) bool {
 }
 
 // replacePlaceholder turns a stored placeholder into the message it stood
-// for, keeping its place, unread state and expiry. Only its sender's
-// message in the same chat replaces it (message IDs are visible to every
-// group member), and, unless it's the phone's own resend (fromPhone, which
-// may upgrade any row it was asked for), only a placeholder. Returns
-// whether a row changed.
+// for, keeping its place and unread state. Only its sender's message in
+// the same chat replaces it (message IDs are visible to every group
+// member), and, unless it's the phone's own resend (fromPhone, which may
+// upgrade any row it was asked for), only a placeholder; view-once media
+// stays a notice whatever comes. The chat may be stored under the other
+// JID of a DM (LID or phone number) than the copy resolves to; m's
+// ConversationJID becomes the stored one. Returns whether a row changed.
 func (b *Bridge) replacePlaceholder(m *MessageRow, info types.MessageInfo, fromPhone bool) bool {
 	// Almost every message is new: nothing to replace, and no need to take
 	// the write lock to find that out.
-	var exists int
-	if b.msgDB.QueryRow(`SELECT 1 FROM messages WHERE id = ?`, m.ID).Scan(&exists) != nil {
+	storedChat, ok := b.storedChatOf(m.ID, m.ConversationJID)
+	if !ok {
 		return false
 	}
 	cond := placeholderCondition
 	if fromPhone {
 		cond = "1"
 	}
-	// A copy identical to what's stored (a redelivery) changes nothing.
-	query := `UPDATE messages SET content_type = ?, text_body = ?, media_url = ?, media_mime = ?, reply_to_id = ?, raw_proto = ?,
-		expires_at = CASE WHEN ? > 0 THEN ? ELSE expires_at END
+	// A copy identical to what's stored (a redelivery) changes nothing. The
+	// expiry is the message's own, not the chat timer the placeholder took.
+	query := `UPDATE messages SET content_type = ?, text_body = ?, media_url = COALESCE(?, media_url), media_mime = ?,
+		reply_to_id = ?, raw_proto = ?, expires_at = ?
 		WHERE id = ? AND conversation_jid = ? AND status <> 'deleted' AND ` + cond + `
+		AND NOT (content_type = '` + contentViewOnce + `' AND ? <> '` + contentViewOnce + `')
 		AND (content_type IS NOT ? OR text_body IS NOT ? OR raw_proto IS NOT ?)`
 	args := []interface{}{
-		m.ContentType, m.TextBody, m.MediaURL, m.MediaMime, m.ReplyToID, m.RawProto, m.ExpiresAt, m.ExpiresAt,
-		m.ID, m.ConversationJID,
+		m.ContentType, m.TextBody, m.MediaURL, m.MediaMime, m.ReplyToID, m.RawProto, m.ExpiresAt,
+		m.ID, storedChat,
+		m.ContentType,
 		m.ContentType, m.TextBody, m.RawProto,
 	}
 	if info.Chat.Server == types.GroupServer {
@@ -162,16 +167,36 @@ func (b *Bridge) replacePlaceholder(m *MessageRow, info types.MessageInfo, fromP
 		b.log.Errorf("Failed to replace placeholder %s: %v", m.ID, err)
 		return false
 	}
-	n, _ := res.RowsAffected()
-	return n > 0
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false
+	}
+	m.ConversationJID = storedChat
+	return true
+}
+
+// storedChatOf is the chat a stored message with this ID is in, if it's
+// chatJID under either of a DM's JIDs.
+func (b *Bridge) storedChatOf(id, chatJID string) (string, bool) {
+	var stored string
+	if b.msgDB.QueryRow(`SELECT conversation_jid FROM messages WHERE id = ?`, id).Scan(&stored) != nil {
+		return "", false
+	}
+	if stored != chatJID && b.resolveLIDString(stored) != b.resolveLIDString(chatJID) {
+		return "", false
+	}
+	return stored, true
 }
 
 // dropPlaceholder deletes the placeholder stored under a message's ID when
 // the message, resent, turns out to have nothing to show (a reaction, a
 // setting, a message already past its timer…).
 func (b *Bridge) dropPlaceholder(chatJID string, info types.MessageInfo) {
+	storedChat, ok := b.storedChatOf(info.ID, chatJID)
+	if !ok {
+		return
+	}
 	query := `SELECT id FROM messages WHERE id = ? AND conversation_jid = ? AND ` + placeholderCondition
-	args := []interface{}{info.ID, chatJID}
+	args := []interface{}{info.ID, storedChat}
 	if info.Chat.Server == types.GroupServer {
 		clause, extra := b.authorOf(info).sqlClause()
 		query += " AND " + clause
@@ -181,7 +206,7 @@ func (b *Bridge) dropPlaceholder(chatJID string, info types.MessageInfo) {
 	if b.msgDB.QueryRow(query, args...).Scan(&id) != nil {
 		return
 	}
-	b.removeMessages([]string{id}, "placeholder")
+	b.removeMessages([]string{id}, "placeholder", 0)
 }
 
 // MessageReplacedEvent: a placeholder became the message it stood for (see
@@ -206,10 +231,14 @@ func (b *Bridge) messageReplacedEvent(m *MessageRow) MessageReplacedEvent {
 
 // migrateViewOnce turns view-once media earlier builds stored as ordinary
 // photos, videos and voice notes into VIEW_ONCE notices, and deletes the
-// media and previews they downloaded.
+// media and previews they downloaded. It also drops the copy of the quoted
+// message every stored reply kept (see withoutQuote).
 func (b *Bridge) migrateViewOnce(ctx context.Context, tx *sql.Tx) error {
+	if err := stripStoredQuotes(ctx, tx); err != nil {
+		return err
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT id, raw_proto, COALESCE(media_url, ''), COALESCE(thumbnail_path, '') FROM messages
-		WHERE content_type IN ('image', 'video', 'audio') AND raw_proto IS NOT NULL AND is_from_me = 0`)
+		WHERE content_type IN ('image', 'video', 'audio') AND raw_proto IS NOT NULL`)
 	if err != nil {
 		return err
 	}
@@ -252,5 +281,38 @@ func (b *Bridge) migrateViewOnce(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	b.log.Infof("Marked %d stored messages view-once", len(views))
+	return nil
+}
+
+// stripStoredQuotes removes the quoted copies from stored protos.
+func stripStoredQuotes(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT id, raw_proto FROM messages WHERE raw_proto IS NOT NULL`)
+	if err != nil {
+		return err
+	}
+	stripped := map[string][]byte{}
+	for rows.Next() {
+		var id string
+		var raw []byte
+		if rows.Scan(&id, &raw) != nil {
+			continue
+		}
+		var msg waE2E.Message
+		if proto.Unmarshal(raw, &msg) != nil || getContextInfo(&msg).GetQuotedMessage() == nil {
+			continue
+		}
+		if out, err := proto.Marshal(withoutQuote(&msg)); err == nil {
+			stripped[id] = out
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for id, raw := range stripped {
+		if _, err := tx.ExecContext(ctx, `UPDATE messages SET raw_proto = ? WHERE id = ?`, raw, id); err != nil {
+			return err
+		}
+	}
 	return nil
 }

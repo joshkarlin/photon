@@ -90,10 +90,10 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 		// The message a placeholder stood for (resent by its sender after a
 		// decryption failure, or by the phone): the row becomes it in place.
 		// It was counted and announced as the placeholder.
-		if !viewOnce {
+		if !viewOnce && row.ContentType != contentViewOnce {
 			b.fetchMediaExtras(msgID, row.ContentType, content)
 		}
-		b.BroadcastEvent("message_updated", MessageUpdatedEvent{ConversationJID: chatJID, MessageID: msgID})
+		b.BroadcastEvent("message_updated", MessageUpdatedEvent{ConversationJID: row.ConversationJID, MessageID: msgID})
 		b.BroadcastEvent("message_replaced", b.messageReplacedEvent(row))
 		return
 	}
@@ -309,7 +309,7 @@ func (a author) sqlClause() (string, []interface{}) {
 func (b *Bridge) buildMessageRow(msg *waE2E.Message, id, convJID, senderJID string, ts int64, isFromMe bool, status string) *MessageRow {
 	contentType, textBody, _ := extractContent(msg)
 	textBody = b.resolveMentions(msg, convJID, textBody)
-	rawProto, _ := proto.Marshal(msg)
+	rawProto, _ := proto.Marshal(withoutQuote(msg))
 
 	var replyToID sql.NullString
 	if ctx := getContextInfo(msg); ctx != nil && ctx.GetStanzaID() != "" {
@@ -341,6 +341,19 @@ func (b *Bridge) buildMessageRow(msg *waE2E.Message, id, convJID, senderJID stri
 		RawProto:        rawProto,
 		ExpiresAt:       messageExpiry(msg, ts),
 	}
+}
+
+// withoutQuote is msg without the copy of the message it replies to that its
+// ContextInfo carries. Nothing reads it (a reply finds its quote by ID),
+// and it would outlive what it copies: a view-once photo's keys and
+// preview, or a message that has disappeared.
+func withoutQuote(msg *waE2E.Message) *waE2E.Message {
+	if getContextInfo(msg).GetQuotedMessage() == nil {
+		return msg
+	}
+	clone := proto.Clone(msg).(*waE2E.Message)
+	getContextInfo(clone).QuotedMessage = nil
+	return clone
 }
 
 func getMediaMime(msg *waE2E.Message) string {

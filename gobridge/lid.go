@@ -124,6 +124,12 @@ func (b *Bridge) mergeConversation(from, to string) (bool, error) {
 	// upsertConversation moves the target's last message only forward, and
 	// the source's name, as it may be the older of the two, only fills a
 	// missing or weaker one — exactly the merge we want.
+	// A timer change both JIDs recorded shows once.
+	if _, err := tx.Exec(`DELETE FROM messages WHERE conversation_jid = ? AND content_type = ? AND EXISTS (
+			SELECT 1 FROM messages t WHERE t.conversation_jid = ? AND t.content_type = messages.content_type
+			AND t.timestamp = messages.timestamp AND t.text_body IS messages.text_body)`, from, contentSystem, to); err != nil {
+		return false, err
+	}
 	for _, q := range []string{
 		`UPDATE messages SET conversation_jid = ? WHERE conversation_jid = ?`,
 		`UPDATE OR IGNORE participants SET conversation_jid = ? WHERE conversation_jid = ?`,

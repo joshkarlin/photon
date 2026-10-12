@@ -269,8 +269,13 @@ func TestMigrateViewOnce(t *testing.T) {
 	flagged.ImageMessage.ViewOnce = proto.Bool(true)
 	v3Message(t, b, "v1", alice.String(), 100, flagged)
 	v3Message(t, b, "p1", alice.String(), 101, viewOnceImage())
+	v3Message(t, b, "own", alice.String(), 102, flagged) // sent from the user's phone
+	v3Message(t, b, "r1", alice.String(), 103, &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+		Text: s("that one"), ContextInfo: &waE2E.ContextInfo{StanzaID: s("v1"), QuotedMessage: flagged},
+	}})
 	b.msgDB.Exec(`UPDATE messages SET content_type = 'image', media_url = ? WHERE id = 'v1'`, media)
-	b.msgDB.Exec(`UPDATE messages SET content_type = 'image' WHERE id = 'p1'`)
+	b.msgDB.Exec(`UPDATE messages SET content_type = 'image' WHERE id IN ('p1', 'own')`)
+	b.msgDB.Exec(`UPDATE messages SET is_from_me = 1 WHERE id = 'own'`)
 
 	if err := b.InitMessageDB(context.Background()); err != nil {
 		t.Fatal(err)
@@ -283,5 +288,62 @@ func TestMigrateViewOnce(t *testing.T) {
 	}
 	if _, err := os.Stat(media); !os.IsNotExist(err) {
 		t.Errorf("the downloaded view-once photo is still on disk")
+	}
+	if ct, _ := contentOf(t, b, "own"); ct != contentViewOnce {
+		t.Errorf("the user's own view-once photo stayed %q", ct)
+	}
+	raw, _ := b.GetMessageRawProto("r1")
+	var reply waE2E.Message
+	proto.Unmarshal(raw, &reply)
+	if getContextInfo(&reply).GetQuotedMessage() != nil || getContextInfo(&reply).GetStanzaID() != "v1" {
+		t.Errorf("a stored reply still holds its quoted copy")
+	}
+}
+
+// A placeholder stored under a DM's LID (its number unknown then) is still
+// replaced by a resend that resolves to the phone JID.
+func TestUndecryptable_resendUnderTheOtherJID(t *testing.T) {
+	b := newFKClientBridge(t)
+	now := time.Now().Unix()
+	lid := types.NewJID("11223344", types.HiddenUserServer)
+	b.HandleEvent(undecryptable(lid, lid, "u1", now))
+	b.client.Store.LIDs.PutLIDMapping(context.Background(), lid, alice)
+
+	b.HandleEvent(textEvent(lid, lid, "u1", "here it is", now))
+	if ct, text := contentOf(t, b, "u1"); ct != "text" || text != "here it is" {
+		t.Errorf("stored %q %q", ct, text)
+	}
+}
+
+// View-once media stays a notice even if a copy without its view-once
+// markers turns up (from the phone, say).
+func TestUndecryptable_viewOnceIsNeverUpgraded(t *testing.T) {
+	b := newFKClientBridge(t)
+	now := time.Now().Unix()
+	evt := undecryptable(alice, alice, "v1", now)
+	evt.IsUnavailable, evt.UnavailableType = true, events.UnavailableTypeViewOnce
+	b.HandleEvent(evt)
+
+	resend := messageEvent(alice, alice, "v1", now, viewOnceImage())
+	resend.UnavailableRequestID = "req1"
+	b.HandleEvent(resend)
+	if ct, _ := contentOf(t, b, "v1"); ct != contentViewOnce {
+		t.Errorf("stored %q", ct)
+	}
+	if n := rowCount(t, b, `SELECT COUNT(*) FROM messages WHERE raw_proto IS NOT NULL`); n != 0 {
+		t.Errorf("the media's keys were stored")
+	}
+}
+
+// A resend that doesn't disappear doesn't take the chat timer the
+// placeholder guessed.
+func TestUndecryptable_resendKeepsItsOwnExpiry(t *testing.T) {
+	b := newFKClientBridge(t)
+	now := time.Now().Unix()
+	fakeTimerChat(t, b, alice.String(), day, 0)
+	b.HandleEvent(undecryptable(alice, alice, "u1", now))
+	b.HandleEvent(textEvent(alice, alice, "u1", "kept", now))
+	if got := expiresAt(t, b, "u1"); got != 0 {
+		t.Errorf("expires_at = %d", got)
 	}
 }
