@@ -303,10 +303,6 @@ internal class CallHandler(
         )
         if (!inserted) return
         if (messageDb.isConversationMuted(groupJid, clock() / 1000)) return
-        notifier.showMessage(
-            names.title(groupJid, isGroup = true),
-            "${names.person(senderAci)} started a group call",
-            groupJid,
-        )
+        notifier.showGroupCallStarted(names.title(groupJid, isGroup = true), names.person(senderAci), groupJid)
     }
 }

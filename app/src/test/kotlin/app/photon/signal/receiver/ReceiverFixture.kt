@@ -45,6 +45,10 @@ internal class RecordingNotifier : SignalNotifier {
     override fun cancelConversation(conversationJid: String) {
         events += "cancel:$conversationJid"
     }
+
+    override fun showGroupCallStarted(groupTitle: String, starterName: String, conversationJid: String) {
+        events += "groupCall:$conversationJid:$groupTitle:$starterName"
+    }
 }
 
 /**

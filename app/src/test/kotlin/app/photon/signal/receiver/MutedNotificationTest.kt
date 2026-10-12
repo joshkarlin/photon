@@ -20,6 +20,7 @@ import org.whispersystems.signalservice.internal.push.DataMessage
 import org.whispersystems.signalservice.internal.push.Envelope
 import org.whispersystems.signalservice.internal.websocket.WebSocketRequestMessage
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 /**
  * A chat muted on the primary posts no message or group-call notification
@@ -94,6 +95,18 @@ class MutedNotificationTest {
 
         assertEquals(emptyList(), fx.notifier.events)
         assertEquals(2, fx.db.getConversation(group)?.unreadCount)
+    }
+
+    /** A group call starting is announced at the Calls level, not as a message. */
+    @Test
+    fun aGroupCallStartingAlertsAsACall() {
+        handler.processDataMessage(
+            DataMessage(timestamp = now, groupCallUpdate = DataMessage.GroupCallUpdate(eraId = "era-2")),
+            metadata(groupId),
+        )
+
+        assertEquals(1, fx.notifier.events.size)
+        assertTrue(fx.notifier.events.single().startsWith("groupCall:$group:Climbing:"))
     }
 
     @Test

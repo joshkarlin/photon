@@ -24,6 +24,9 @@ internal interface SignalNotifier {
 
     /** Clears the conversation's message and missed-call notifications. */
     fun cancelConversation(conversationJid: String)
+
+    /** Someone started a group call: a call, at the Calls level, that alerts once. */
+    fun showGroupCallStarted(groupTitle: String, starterName: String, conversationJid: String)
 }
 
 internal class AndroidSignalNotifier(private val context: Context) : SignalNotifier {
@@ -52,4 +55,7 @@ internal class AndroidSignalNotifier(private val context: Context) : SignalNotif
 
     override fun cancelConversation(conversationJid: String) =
         NotificationHelper.cancelForConversation(context, conversationJid)
+
+    override fun showGroupCallStarted(groupTitle: String, starterName: String, conversationJid: String) =
+        NotificationHelper.showGroupCallStarted(context, groupTitle, starterName, Platform.SIGNAL, conversationJid)
 }
