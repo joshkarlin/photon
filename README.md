@@ -203,6 +203,7 @@ This section lists open bugs and by-design limitations, one line each. Fixes wai
 
 - **WhatsApp received images may not load**: tapping a received image can still fail to show it. The stale-cache cause is fixed, but real download failures (expired CDN media, bridge errors) need on-device logs to diagnose.
 - **Signal sent-transcript results unchecked**: the sync transcript to your own devices ignores per-device results, so a sync failure that doesn't throw can leave a sent message missing from your other linked devices.
+- **Replying from your phone can break a Signal contact's name**: a sent transcript's profile key is your own, but Photon stores it as the recipient's, so their profile name can fail to resolve until they next message you.
 
 ### Limitations
 

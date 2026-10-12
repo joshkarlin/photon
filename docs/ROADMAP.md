@@ -15,7 +15,12 @@ Some things are out of scope for Photon on purpose: setting a chat's disappearin
 
 ## Later
 
-- **Loose ends from 0.5.0 (S each).** Download a long Signal message's full text, and follow WhatsApp's "disappear after read" timers.
+- **Loose ends from 0.5.0 (S each).**
+  - Download a long Signal message's full text.
+  - Follow WhatsApp's "disappear after read" timers.
+  - Stop storing a sent transcript's profile key (yours) as the recipient's.
+  - Before the final 0.5.0: test that a group transcript with no rows reads nothing, and that one leaves an unknown timer unknown. Test version 0 on media sends and retries.
+  - Compare the transcript read cutoff against receive time, as Signal-Android does, not the sender's timestamp.
 - **Polls (M per platform).** Both libraries support them. Both platforms show a poll as text for now.
   - WhatsApp: `DecryptPollVote` / `BuildPollVote`. Options are SHA-256 hashes; the latest vote per voter counts.
   - Signal: `pollCreate` / `pollVote` / `pollTerminate`, at protocol version 8.
