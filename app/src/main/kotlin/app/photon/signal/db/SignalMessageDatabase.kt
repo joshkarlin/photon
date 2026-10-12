@@ -21,7 +21,7 @@ import org.whispersystems.signalservice.internal.push.AttachmentPointer
  * SignalStorageMutes, SignalTimers and SignalEdits.
  */
 class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
-    context, DATABASE_NAME, null, 7,
+    context, DATABASE_NAME, null, 8,
 ) {
     companion object {
         const val DATABASE_NAME = "signal_messages.db"
@@ -44,9 +44,10 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         private const val TAG = "SignalRepository"
     }
 
-    override fun onCreate(db: SQLiteDatabase) {
+    /** The conversations table as it is now, under [name] (a rebuild makes it under another first). */
+    private fun createConversationsTable(db: SQLiteDatabase, name: String = "conversations") {
         db.execSQL("""
-            CREATE TABLE IF NOT EXISTS conversations (
+            CREATE TABLE IF NOT EXISTS $name (
                 jid             TEXT PRIMARY KEY,
                 name            TEXT,
                 is_group        INTEGER NOT NULL DEFAULT 0,
@@ -60,11 +61,15 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
                 group_revision  INTEGER NOT NULL DEFAULT 0,
                 muted_until     INTEGER NOT NULL DEFAULT 0,
                 archived        INTEGER NOT NULL DEFAULT 0,
-                expire_timer    INTEGER NOT NULL DEFAULT 0,
-                expire_timer_version INTEGER NOT NULL DEFAULT 1,
+                expire_timer    INTEGER,
+                expire_timer_version INTEGER,
                 timer_revision  INTEGER NOT NULL DEFAULT -1
             )
         """)
+    }
+
+    override fun onCreate(db: SQLiteDatabase) {
+        createConversationsTable(db)
         db.execSQL("""
             CREATE TABLE IF NOT EXISTS messages (
                 id              TEXT PRIMARY KEY,
@@ -176,6 +181,9 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         if (oldVersion < 7) {
             upgradeToV7(db)
         }
+        if (oldVersion < 8) {
+            upgradeToV8(db)
+        }
     }
 
     /**
@@ -183,8 +191,9 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
      * be dropped or shown without their names.
      *
      *  - conversations: `archived` (from the primary's storage service),
-     *    `expire_timer` / `expire_timer_version` (the chat's timer, 0 = off),
-     *    and `timer_revision` (for a group, the group revision its timer was
+     *    `expire_timer` / `expire_timer_version` (the chat's timer, 0 = off;
+     *    NULL until Photon learns it, so every chat starts unknown), and
+     *    `timer_revision` (for a group, the group revision its timer was
      *    read at; -1 = never, so every group's state is fetched once).
      *  - messages: `expires_in` (seconds) and `expires_at` (epoch ms when the
      *    message goes; 0 = its clock hasn't started).
@@ -201,8 +210,8 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
     private fun upgradeToV7(db: SQLiteDatabase) {
         for ((table, col) in listOf(
             "conversations" to "archived INTEGER NOT NULL DEFAULT 0",
-            "conversations" to "expire_timer INTEGER NOT NULL DEFAULT 0",
-            "conversations" to "expire_timer_version INTEGER NOT NULL DEFAULT 1",
+            "conversations" to "expire_timer INTEGER",
+            "conversations" to "expire_timer_version INTEGER",
             "conversations" to "timer_revision INTEGER NOT NULL DEFAULT -1",
             "messages" to "expires_in INTEGER NOT NULL DEFAULT 0",
             "messages" to "expires_at INTEGER NOT NULL DEFAULT 0",
@@ -221,6 +230,37 @@ class SignalMessageDatabase(context: Context) : SQLiteOpenHelper(
         db.execSQL("DELETE FROM storage_records")
         db.execSQL("DELETE FROM storage_manifest")
         backfillDocumentNames(db)
+    }
+
+    /**
+     * v8: a chat's timer is unknown (NULL) until Photon learns it. The first
+     * v7 (never released) stored every chat as off at version 1, which a
+     * send then carried and turned a version-1 timer off for everyone. A
+     * database made by it gets the columns again, nullable and empty: every
+     * DM's timer is learned again (from its next message, transcript or
+     * contact sync) and every group's state is fetched again. A database
+     * that came through the current v7 already has them nullable.
+     *
+     * SQLite can't drop NOT NULL from a column in place (and DROP COLUMN
+     * isn't everywhere), so the table is rebuilt as SQLite documents it:
+     * a new table, every other column copied, the old one dropped and the
+     * new one renamed. Nothing else refers to it but the messages' foreign
+     * key, which names it and so holds.
+     */
+    private fun upgradeToV8(db: SQLiteDatabase) {
+        val columns = db.rawQuery("PRAGMA table_info(conversations)", null).use { c ->
+            buildMap { while (c.moveToNext()) put(c.getString(1), c.getInt(c.getColumnIndexOrThrow("notnull")) == 1) }
+        }
+        if (columns["expire_timer"] != true && columns["expire_timer_version"] != true) return
+        createConversationsTable(db, "conversations_v8")
+        val kept = db.rawQuery("PRAGMA table_info(conversations_v8)", null).use { c ->
+            buildList { while (c.moveToNext()) add(c.getString(1)) }
+        }.filter { it in columns && it != "expire_timer" && it != "expire_timer_version" }.joinToString(", ")
+        db.execSQL("INSERT INTO conversations_v8 ($kept) SELECT $kept FROM conversations")
+        db.execSQL("DROP TABLE conversations")
+        db.execSQL("ALTER TABLE conversations_v8 RENAME TO conversations")
+        db.execSQL("UPDATE conversations SET timer_revision = -1")
+        Log.i(TAG, "Signal chat timers reset to unknown")
     }
 
     private fun createV7Tables(db: SQLiteDatabase) {

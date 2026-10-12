@@ -63,8 +63,9 @@ internal fun parseSignalAttachmentUploadForm(response: String): AttachmentUpload
  * recipient's copy disappears as the chat's do, and a send can't turn the
  * timer off (a message with no timer at the chat's version would). The
  * library's builder sends version 1 unless told otherwise, which is the
- * case the roadmap flagged. Reactions and deletes carry no timer, as
- * Signal-Android sends them.
+ * case the roadmap flagged; it always encodes the version, 0 included,
+ * which is what a chat whose timer isn't known sends. Reactions and
+ * deletes carry no timer, as Signal-Android sends them.
  */
 internal fun outgoingDataMessage(
     content: OutgoingContent,

@@ -24,13 +24,13 @@ internal sealed interface OutgoingContent {
      * Text and/or attachments, optionally quoting the message keyed
      * [replyPrefix], sent with the chat's disappearing-messages [timer] and
      * its version, so it disappears as the chat's messages do and can't
-     * change the chat's timer.
+     * change the chat's timer ([ChatTimer.UNKNOWN] while it isn't known).
      */
     data class Message(
         val text: String?,
         val replyPrefix: String?,
         val attachments: List<SignalServiceAttachment> = emptyList(),
-        val timer: ChatTimer = ChatTimer.DEFAULT,
+        val timer: ChatTimer = ChatTimer.UNKNOWN,
     ) : OutgoingContent
 
     /**

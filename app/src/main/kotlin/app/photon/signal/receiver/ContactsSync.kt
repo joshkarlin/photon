@@ -123,8 +123,10 @@ internal class ContactsSync(
     ) {
         val aci = contact.aci.orElse(null)?.toString() ?: return
         messageDb.updateContactFromSync(aci, phone = contact.e164.orElse(null), name = contact.name.orElse(null))
-        val timer = contact.expirationTimer.orElse(null)
-        val version = contact.expirationTimerVersion.orElse(null)
-        if (timer != null && version != null) messageDb.updateTimerFromContactSync(aci, timer.coerceAtLeast(0), version)
+        // Signal-Android leaves the timer out when it's off, so a version
+        // alone is "off at that version". A timer without a version can't
+        // be ordered against what messages said.
+        val version = contact.expirationTimerVersion.orElse(null) ?: return
+        messageDb.updateTimerFromContactSync(aci, contact.expirationTimer.orElse(0).coerceAtLeast(0), version)
     }
 }

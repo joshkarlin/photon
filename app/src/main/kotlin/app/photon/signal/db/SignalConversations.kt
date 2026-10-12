@@ -27,14 +27,14 @@ fun SignalMessageDatabase.upsertConversation(
     // the caller actually supplied. A new row takes the mute and archive
     // state the storage service gave its jid before it existed
     // (SignalStorageMutes), and the timer the contact sync gave the person
-    // (SignalTimers).
+    // (SignalTimers), else none: unknown until learned.
     writableDatabase.execSQL(
         """
         INSERT INTO conversations (jid, name, is_group, last_message_id, last_timestamp, updated_at, muted_until,
                                    archived, expire_timer, expire_timer_version)
           VALUES (?, ?, ?, ?, ?, ?, ${storageMuteOf("?")}, ${storageArchivedOf("?")},
-                  COALESCE((SELECT expire_timer FROM contacts WHERE jid = ? AND ? = 0), 0),
-                  COALESCE((SELECT expire_timer_version FROM contacts WHERE jid = ? AND ? = 0), 1))
+                  (SELECT expire_timer FROM contacts WHERE jid = ? AND ? = 0),
+                  (SELECT expire_timer_version FROM contacts WHERE jid = ? AND ? = 0))
         ON CONFLICT(jid) DO UPDATE SET
           name           = COALESCE(excluded.name, conversations.name),
           is_group       = excluded.is_group,

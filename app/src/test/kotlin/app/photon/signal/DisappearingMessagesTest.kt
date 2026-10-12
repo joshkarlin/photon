@@ -52,7 +52,64 @@ class DisappearingMessagesTest {
         assertNull(incomingTimerUpdate(ChatTimer(week, 1), week, 1))
     }
 
-    // ── The user's own messages from other devices, and contact sync (handleSynchronizeSentExpirationUpdate) ──
+    // ── A timer Photon hasn't learned ──
+
+    /** The first timer learned is taken as it is, version and all (0 when the client sent none). */
+    @Test
+    fun anUnknownTimerTakesTheFirstOneLearned() {
+        assertEquals(ChatTimer(week, 3), incomingTimerUpdate(null, week, 3))
+        assertEquals(ChatTimer(0, 2), incomingTimerUpdate(null, 0, 2))
+        assertEquals(ChatTimer(day, 0), incomingTimerUpdate(null, day, null))
+        assertEquals(ChatTimer(week, 4), syncedTimerUpdate(null, week, 4))
+        assertEquals(ChatTimer(day, 0), syncedTimerUpdate(null, day, null))
+    }
+
+    /** Version 0 is never a change, as on every Signal client: it's what Photon sends while it doesn't know. */
+    @Test
+    fun versionZeroIsNeverAChange() {
+        assertNull(incomingTimerUpdate(null, 0, 0))
+        assertNull(incomingTimerUpdate(ChatTimer(week, 2), 0, 0))
+        assertNull(syncedTimerUpdate(null, 0, 0))
+        assertNull(syncedTimerUpdate(ChatTimer(week, 2), 0, 0))
+        assertNull(contactSyncTimerUpdate(null, 0, 0))
+    }
+
+    /** While unknown, a send is off at version 0; once known, it's the stored timer at its version. */
+    @Test
+    fun aSendCarriesTheStoredTimerOrVersionZero() {
+        assertEquals(ChatTimer(0, 0), timerToSend(null))
+        assertEquals(ChatTimer.UNKNOWN, timerToSend(null))
+        assertEquals(ChatTimer(week, 1), timerToSend(ChatTimer(week, 1)))
+        // Learned from a client without versions: the timer, at version 0.
+        assertEquals(ChatTimer(day, 0), timerToSend(ChatTimer(day, 0)))
+    }
+
+    /**
+     * Every receiver ignores version 0, whatever it has stored: Signal-Android's
+     * versions start at 1 and a lower one is ignored, so Photon's unknown send
+     * can't turn a version-1 timer off.
+     */
+    @Test
+    fun anUnknownSendCantTurnAVersionOneTimerOff() {
+        val unknown = timerToSend(null)
+        assertNull(incomingTimerUpdate(ChatTimer(week, 1), unknown.seconds, unknown.version))
+        assertNull(syncedTimerUpdate(ChatTimer(week, 1), unknown.seconds, unknown.version))
+    }
+
+    // ── The primary's contact sync (MultiDeviceContactSyncJob) ──
+
+    @Test
+    fun aContactSyncNeedsAStrictlyHigherVersion() {
+        assertEquals(ChatTimer(week, 3), contactSyncTimerUpdate(ChatTimer(0, 2), week, 3))
+        // A snapshot at the same version may be older than what a message said.
+        assertNull(contactSyncTimerUpdate(ChatTimer(0, 2), week, 2))
+        assertNull(contactSyncTimerUpdate(ChatTimer(0, 2), week, 1))
+        assertEquals(ChatTimer(week, 1), contactSyncTimerUpdate(null, week, 1))
+        // A timer learned without a version (0) takes any real one.
+        assertEquals(ChatTimer(0, 1), contactSyncTimerUpdate(ChatTimer(day, 0), 0, 1))
+    }
+
+    // ── The user's own messages from other devices (handleSynchronizeSentExpirationUpdate) ──
 
     @Test
     fun aTranscriptAtTheSameOrAHigherVersionApplies() {

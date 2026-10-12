@@ -15,6 +15,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /** Upgrades in place, on databases holding real data. */
 @RunWith(RobolectricTestRunner::class)
@@ -129,7 +130,7 @@ class SignalMessageDatabaseUpgradeTest {
 
         val db = SignalMessageDatabase(context)
         try {
-            assertEquals(7, db.readableDatabase.version)
+            assertEquals(8, db.readableDatabase.version)
             val dm = db.getConversation("aci-dm")
             assertEquals(false, dm?.isMuted)
             assertEquals(2, dm?.unreadCount)
@@ -185,7 +186,7 @@ class SignalMessageDatabaseUpgradeTest {
 
         val db = SignalMessageDatabase(context)
         try {
-            assertEquals(7, db.readableDatabase.version)
+            assertEquals(8, db.readableDatabase.version)
             assertEquals("Minutes.pdf", db.getMessage("aci-dm_1_a")?.textBody)
             assertEquals("see attached", db.getMessage("aci-dm_2_b")?.textBody)
             assertNull(db.getMessage("aci-dm_3_c")?.textBody)
@@ -198,11 +199,12 @@ class SignalMessageDatabaseUpgradeTest {
             assertEquals(false, dm?.isArchived)
             assertEquals(0, dm?.disappearingSeconds)
             assertEquals(1, dm?.unreadCount)
-            assertEquals(ChatTimer.DEFAULT, db.chatTimer("aci-dm"))
+            // The DM's timer is unknown until learned: a send meanwhile goes at version 0.
+            assertNull(db.chatTimer("aci-dm"))
             assertEquals(MessageStatus.UNREAD, db.getMessage("aci-dm_1_a")?.status)
 
             // Every group's state (and so its timer) is fetched once.
-            assertFalse(db.groupTimerKnown("grp"))
+            assertFalse(db.groupTimerCurrent("grp"))
             assertEquals(listOf("grp"), db.getGroupsNeedingMetadataRefresh().map { it.first })
 
             // Storage is read again from scratch.
@@ -242,6 +244,86 @@ class SignalMessageDatabaseUpgradeTest {
         }
     }
 
-    private fun columns(db: SQLiteDatabase, table: String): Set<String> =
-        db.rawQuery("PRAGMA table_info($table)", null).use { c -> buildSet { while (c.moveToNext()) add(c.getString(1)) } }
+    /** A table's columns, each with whether it's NOT NULL. */
+    private fun columns(db: SQLiteDatabase, table: String): Set<Pair<String, Boolean>> =
+        db.rawQuery("PRAGMA table_info($table)", null).use { c ->
+            buildSet { while (c.moveToNext()) add(c.getString(1) to (c.getInt(c.getColumnIndexOrThrow("notnull")) == 1)) }
+        }
+
+    /**
+     * The first, unreleased v7 stored every chat's timer as off at version 1
+     * (NOT NULL columns), which a send carried and so turned a version-1
+     * timer off. Its databases get nullable, empty timer columns: every DM
+     * is unknown until learned, and every group's state is fetched again.
+     * Everything else stays.
+     */
+    @Test
+    fun upgradeFromTheFirstV7ForgetsItsGuessedTimers() {
+        context.openOrCreateDatabase(SignalMessageDatabase.DATABASE_NAME, Context.MODE_PRIVATE, null).use { v6 ->
+            createOldSchema(v6)
+            createV6StorageTables(v6)
+            for (col in listOf(
+                "archived INTEGER NOT NULL DEFAULT 0",
+                "expire_timer INTEGER NOT NULL DEFAULT 0",
+                "expire_timer_version INTEGER NOT NULL DEFAULT 1",
+                "timer_revision INTEGER NOT NULL DEFAULT -1",
+            )) v6.execSQL("ALTER TABLE conversations ADD COLUMN $col")
+            // As onCreate makes it, with the foreign key the rebuild must keep.
+            v6.execSQL("DROP TABLE messages")
+            v6.execSQL(
+                "CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_jid TEXT NOT NULL, sender_jid TEXT NOT NULL, " +
+                    "timestamp INTEGER NOT NULL, content_type TEXT NOT NULL, text_body TEXT, media_url TEXT, " +
+                    "media_mime TEXT, media_size INTEGER, thumbnail_path TEXT, sticker_pack_id TEXT, reply_to_id TEXT, " +
+                    "edit_version INTEGER NOT NULL DEFAULT 0, is_from_me INTEGER NOT NULL DEFAULT 0, " +
+                    "status TEXT NOT NULL DEFAULT 'sent', raw_proto BLOB, expires_in INTEGER NOT NULL DEFAULT 0, " +
+                    "expires_at INTEGER NOT NULL DEFAULT 0, FOREIGN KEY (conversation_jid) REFERENCES conversations(jid))",
+            )
+            v6.execSQL("ALTER TABLE contacts ADD COLUMN expire_timer INTEGER")
+            v6.execSQL("ALTER TABLE contacts ADD COLUMN expire_timer_version INTEGER")
+            v6.execSQL("ALTER TABLE storage_records ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+            v6.execSQL("ALTER TABLE storage_records ADD COLUMN keep_muted_archived INTEGER NOT NULL DEFAULT 0")
+            v6.execSQL("CREATE TABLE message_aliases (alias TEXT PRIMARY KEY, target_id TEXT NOT NULL)")
+            v6.execSQL(
+                "INSERT INTO conversations (jid, name, is_group, unread_count, archived, muted_until, expire_timer, " +
+                    "expire_timer_version, master_key, group_revision, timer_revision) VALUES " +
+                    "('aci-dm', NULL, 0, 2, 1, -1, 0, 1, NULL, 0, -1), ('grp', 'Climbing', 1, 0, 0, 0, 604800, 1, randomblob(32), 5, 5)",
+            )
+            v6.execSQL(
+                "INSERT INTO messages (id, conversation_jid, sender_jid, timestamp, content_type, text_body, is_from_me, status, expires_in) " +
+                    "VALUES ('aci-dm_1_a', 'aci-dm', 'aci-dm', 1, 'text', 'm', 0, 'received', 30)",
+            )
+            v6.version = 7
+        }
+
+        val db = SignalMessageDatabase(context)
+        try {
+            assertEquals(8, db.readableDatabase.version)
+            assertNull(db.chatTimer("aci-dm"))
+            assertFalse(db.groupTimerCurrent("grp"))
+            assertNull(db.chatTimer("grp"))
+            assertEquals(listOf("grp"), db.getGroupsNeedingMetadataRefresh().map { it.first })
+            val dm = db.getConversation("aci-dm")
+            assertEquals(true, dm?.isArchived)
+            assertEquals(true, dm?.isMuted)
+            assertEquals(2, dm?.unreadCount)
+            assertEquals("Climbing", db.getConversation("grp")?.name)
+            assertEquals("m", db.getMessage("aci-dm_1_a")?.textBody)
+            // Messages still name the rebuilt table.
+            val messagesSql = db.readableDatabase.rawQuery("SELECT sql FROM sqlite_master WHERE name = 'messages'", null)
+                .use { it.moveToFirst(); it.getString(0) }
+            assertTrue("REFERENCES conversations(jid)" in messagesSql)
+            val leftovers = db.readableDatabase.rawQuery("SELECT name FROM sqlite_master WHERE name LIKE '%_v8'", null)
+                .use { it.count }
+            assertEquals(0, leftovers)
+            // A new chat can be stored unknown.
+            db.upsertConversation(jid = "aci-new", name = null, isGroup = false)
+            assertNull(db.chatTimer("aci-new"))
+            assertEquals(
+                setOf("expire_timer" to false, "expire_timer_version" to false),
+                columns(db.readableDatabase, "conversations").filter { it.first.startsWith("expire_timer") }.toSet(),
+            )
+        } finally {
+            db.close()
+        }
+    }
 }

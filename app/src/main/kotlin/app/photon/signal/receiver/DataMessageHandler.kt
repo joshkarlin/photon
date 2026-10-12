@@ -171,7 +171,7 @@ internal class DataMessageHandler(
         // the message itself disappears after its own timer, once read.
         val expiresIn = (data.expireTimer ?: 0).coerceAtLeast(0)
         if (!isGroup) {
-            messageDb.updateDmTimer(conversationJid, lineTimestamp = timestamp / 1000) { stored ->
+            messageDb.updateDmTimer(conversationJid, lineTimestamp = timestamp / 1000, explicit = timerChange) { stored ->
                 incomingTimerUpdate(stored, expiresIn, data.expireTimerVersion)
             }
         }

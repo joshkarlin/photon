@@ -7,6 +7,7 @@ import app.photon.signal.db.getConversations
 import app.photon.signal.db.getMessages
 import app.photon.signal.db.updateContactPhone
 import app.photon.signal.db.updateContactProfileName
+import app.photon.signal.db.updateDmTimer
 import app.photon.signal.db.upsertConversation
 import java.util.Optional
 import org.junit.After
@@ -84,6 +85,22 @@ class ContactsSyncTest {
      * later begins with it. A timer without a version can't be ordered
      * against what messages said, so it's ignored.
      */
+    /** Signal-Android leaves the timer out when it's off: a version alone is "off at that version". */
+    @Test
+    fun aVersionWithoutATimerIsOff() {
+        fx.db.upsertConversation(jid = mum, name = null, isGroup = false)
+        fx.db.updateDmTimer(mum, 0) { ChatTimer(604_800, 2) }
+
+        sync.ingestDeviceContact(
+            DeviceContact(
+                Optional.of(ServiceId.ACI.parseOrNull(mum)!!), Optional.of(mumPhone), Optional.empty(),
+                Optional.empty(), Optional.empty(), Optional.of(3), Optional.empty(),
+            ),
+        )
+
+        assertEquals(ChatTimer(0, 3), fx.db.chatTimer(mum))
+    }
+
     @Test
     fun theDisappearingTimerComesWithTheContact() {
         val dad = "00000000-0000-4000-8000-0000000000d0"
@@ -105,6 +122,6 @@ class ContactsSyncTest {
         assertEquals(ChatTimer(604_800, 2), fx.db.chatTimer(mum))
         assertEquals(emptyList(), fx.db.getMessages(mum))
         fx.db.upsertConversation(jid = dad, name = null, isGroup = false)
-        assertEquals(ChatTimer.DEFAULT, fx.db.chatTimer(dad))
+        assertEquals(null, fx.db.chatTimer(dad))
     }
 }

@@ -58,16 +58,35 @@ class SignalTimersTest {
 
     // ── Chat timers ──
 
+    /** Photon doesn't guess a chat's timer: until it learns it, it's unknown (and shows as off). */
     @Test
-    fun aNewChatIsOffAtVersionOne() {
-        assertEquals(ChatTimer.DEFAULT, db.chatTimer(alice))
-        assertEquals(ChatTimer.DEFAULT, db.chatTimer("no-such-chat"))
+    fun aNewChatsTimerIsUnknown() {
+        assertNull(db.chatTimer(alice))
+        assertNull(db.chatTimer("no-such-chat"))
         assertEquals(0, db.getConversation(alice)?.disappearingSeconds)
     }
 
-    /** A change is stored and shows as a read, never-unread line in the thread. */
+    /** The first timer learned from a message is stored silently: nothing visibly changed. */
+    @Test
+    fun theFirstTimerLearnedAddsNoLine() {
+        db.updateDmTimer(alice, now / 1000) { incomingTimerUpdate(it, week, 2) }
+
+        assertEquals(ChatTimer(week, 2), db.chatTimer(alice))
+        assertEquals(week.toLong(), db.getConversation(alice)?.disappearingSeconds)
+        assertEquals(emptyList(), lines(alice))
+    }
+
+    /** An explicit timer change says the timer was set: its line shows even when the old one wasn't known. */
+    @Test
+    fun anExplicitChangeShowsItsLineEvenFromUnknown() {
+        db.updateDmTimer(alice, now / 1000, explicit = true) { incomingTimerUpdate(it, week, 2) }
+        assertEquals(listOf("Disappearing messages · 1 week"), lines(alice))
+    }
+
+    /** A change of a known timer is stored and shows as a read, never-unread line in the thread. */
     @Test
     fun aDmTimerChangeAddsItsLine() {
+        db.updateDmTimer(alice, now / 1000) { incomingTimerUpdate(it, 0, 2) }
         db.updateDmTimer(alice, now / 1000) { incomingTimerUpdate(it, week, 2) }
 
         assertEquals(ChatTimer(week, 2), db.chatTimer(alice))
@@ -89,12 +108,13 @@ class SignalTimersTest {
         db.updateDmTimer(alice, now / 1000) { incomingTimerUpdate(it, week, 3) }
         assertNull(db.updateDmTimer(alice, now / 1000) { incomingTimerUpdate(it, 0, 2) })
         assertEquals(ChatTimer(week, 3), db.chatTimer(alice))
-        assertEquals(1, lines(alice).size)
+        assertEquals(emptyList(), lines(alice))
     }
 
     /** Only the version moved: stored, but no line (the timer didn't change). */
     @Test
     fun aVersionOnlyChangeAddsNoLine() {
+        db.updateDmTimer(alice, now / 1000) { ChatTimer(0, 2) }
         db.updateDmTimer(alice, now / 1000) { ChatTimer(0, 5) }
         assertEquals(ChatTimer(0, 5), db.chatTimer(alice))
         assertEquals(emptyList(), lines(alice))
@@ -103,10 +123,11 @@ class SignalTimersTest {
     /** A group's first read is silent (a new group, or every group after the upgrade); a change after it shows. */
     @Test
     fun aGroupTimerComesFromItsStateAndOnlyAChangeShows() {
-        assertFalse(db.groupTimerKnown(group))
+        assertFalse(db.groupTimerCurrent(group))
+        assertNull(db.chatTimer(group))
 
         assertFalse(db.updateGroupTimer(group, week, revision = 3, nowSeconds = now / 1000))
-        assertTrue(db.groupTimerKnown(group))
+        assertTrue(db.groupTimerCurrent(group))
         assertEquals(ChatTimer(week, 1), db.chatTimer(group))
         assertEquals(emptyList(), lines(group))
 
@@ -115,24 +136,46 @@ class SignalTimersTest {
         assertEquals(0, db.getConversation(group)?.disappearingSeconds)
     }
 
+    /**
+     * A group change moves the revision: until the group is read at it, the
+     * timer may have changed, so it's worth reading again; meanwhile the
+     * last one read still stands.
+     */
+    @Test
+    fun aGroupTimerIsStaleOnceTheRevisionMoves() {
+        db.updateGroupMeta(group, ByteArray(32) { 1 }, 3)
+        db.updateGroupTimer(group, week, revision = 3)
+        assertTrue(db.groupTimerCurrent(group))
+        assertEquals(ChatTimer(week, 1), db.chatTimer(group))
+
+        db.updateGroupMeta(group, ByteArray(32) { 1 }, 4)
+        assertFalse(db.groupTimerCurrent(group))
+        assertEquals(ChatTimer(week, 1), db.chatTimer(group))
+
+        db.updateGroupTimer(group, 3_600, revision = 4)
+        assertTrue(db.groupTimerCurrent(group))
+        assertEquals(ChatTimer(3_600, 1), db.chatTimer(group))
+    }
+
     /** A fetch that answered for an older revision than one already read changes nothing. */
     @Test
     fun anOlderGroupStateIsIgnored() {
         db.updateGroupTimer(group, week, revision = 5)
         assertFalse(db.updateGroupTimer(group, 0, revision = 4))
-        assertEquals(week, db.chatTimer(group).seconds)
+        assertEquals(week, db.chatTimer(group)?.seconds)
     }
 
     @Test
     fun aChatThatIsntAGroupNeedsNoGroupTimer() {
-        assertTrue(db.groupTimerKnown(alice))
-        assertTrue(db.groupTimerKnown("no-such-chat"))
+        assertTrue(db.groupTimerCurrent(alice))
+        assertTrue(db.groupTimerCurrent("no-such-chat"))
     }
 
     /**
      * The primary's contact sync gives the timer of a chat Photon may not
-     * have seen a message in: it follows the transcript rule, adds no line,
-     * and seeds a chat started later.
+     * have seen a message in. It applies to an unknown timer or at a
+     * strictly higher version (a snapshot may be older than what a message
+     * said), adds no line, and seeds a chat started later.
      */
     @Test
     fun aContactSyncTimerAppliesSilentlyAndSeedsNewChats() {
@@ -141,17 +184,27 @@ class SignalTimersTest {
         assertEquals(ChatTimer(week, 1), db.chatTimer(alice))
         assertEquals(emptyList(), lines(alice))
 
-        // A lower version doesn't apply.
         db.updateDmTimer(alice, now / 1000) { ChatTimer(0, 3) }
+        // Lower, or the same version: a stale snapshot doesn't apply.
         db.updateTimerFromContactSync(alice, week, 2)
+        db.updateTimerFromContactSync(alice, week, 3)
         assertEquals(ChatTimer(0, 3), db.chatTimer(alice))
+        // Higher does.
+        db.updateTimerFromContactSync(alice, 3_600, 4)
+        assertEquals(ChatTimer(3_600, 4), db.chatTimer(alice))
 
         val bob = "00000000-0000-4000-8000-000000000b0b"
         db.updateContactFromSync(bob, null, "Bob")
         db.updateTimerFromContactSync(bob, 3_600, 2)
+        db.updateTimerFromContactSync(bob, week, 2)
         assertNull(db.getConversation(bob))
         db.upsertConversation(jid = bob, name = null, isGroup = false)
         assertEquals(ChatTimer(3_600, 2), db.chatTimer(bob))
+
+        // Someone the contact sync gave no timer starts unknown.
+        val carol = "00000000-0000-4000-8000-0000000000c0"
+        db.upsertConversation(jid = carol, name = null, isGroup = false)
+        assertNull(db.chatTimer(carol))
     }
 
     // ── Clocks ──

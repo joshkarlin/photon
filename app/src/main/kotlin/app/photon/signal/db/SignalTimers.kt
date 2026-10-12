@@ -8,8 +8,8 @@ import app.photon.signal.db.SignalMessageDatabase.Companion.CONTENT_CALL
 import app.photon.signal.db.SignalMessageDatabase.Companion.STATUS_READ
 import app.photon.signal.db.SignalMessageDatabase.Companion.STATUS_UNREAD
 import app.photon.signal.db.SignalMessageDatabase.RemoteDeleteChange
+import app.photon.signal.contactSyncTimerUpdate
 import app.photon.signal.disappearingMessagesLine
-import app.photon.signal.syncedTimerUpdate
 import java.util.UUID
 
 // Disappearing messages: each chat's timer (conversations.expire_timer and
@@ -23,38 +23,69 @@ import java.util.UUID
 // user has read them, here or on another device. An unread message never
 // disappears.
 
-/** [jid]'s timer, or [ChatTimer.DEFAULT] for a chat with no row. */
-fun SignalMessageDatabase.chatTimer(jid: String): ChatTimer = chatTimer(readableDatabase, jid)
+/**
+ * [jid]'s timer, or null when Photon doesn't know it: a chat with no row, a
+ * DM whose timer hasn't been learned, or a group whose state has never been
+ * read. A group read at an older revision gives the timer it had then
+ * ([groupTimerCurrent] says whether it's worth reading again first): groups
+ * ignore the timer on messages, so a stale one can't change the group's
+ * setting, and the message still disappears. A message to a chat with no
+ * known timer goes at version 0 (ChatTimer.UNKNOWN).
+ */
+fun SignalMessageDatabase.chatTimer(jid: String): ChatTimer? = chatTimer(readableDatabase, jid)
 
-private fun chatTimer(db: SQLiteDatabase, jid: String): ChatTimer = storedTimer(db, jid) ?: ChatTimer.DEFAULT
+private fun chatTimer(db: SQLiteDatabase, jid: String): ChatTimer? =
+    db.rawQuery(
+        "SELECT is_group, expire_timer, expire_timer_version, timer_revision, group_revision FROM conversations WHERE jid = ?",
+        arrayOf(jid),
+    ).use { c ->
+        if (!c.moveToFirst() || c.isNull(1)) return null
+        if (c.getInt(0) == 1) {
+            if (c.getInt(3) < 0) null else ChatTimer(c.getInt(1), 1)
+        } else {
+            ChatTimer(c.getInt(1), if (c.isNull(2)) 0 else c.getInt(2))
+        }
+    }
 
-private fun storedTimer(db: SQLiteDatabase, jid: String): ChatTimer? =
-    db.rawQuery("SELECT expire_timer, expire_timer_version FROM conversations WHERE jid = ?", arrayOf(jid))
-        .use { if (it.moveToFirst()) ChatTimer(it.getInt(0), it.getInt(1)) else null }
+/** A DM row's stored timer: null for no row, else the timer or null when not learned. */
+private fun storedDmTimer(db: SQLiteDatabase, jid: String): Pair<Boolean, ChatTimer?> =
+    db.rawQuery("SELECT expire_timer, expire_timer_version FROM conversations WHERE jid = ?", arrayOf(jid)).use { c ->
+        when {
+            !c.moveToFirst() -> false to null
+            c.isNull(0) -> true to null
+            else -> true to ChatTimer(c.getInt(0), if (c.isNull(1)) 0 else c.getInt(1))
+        }
+    }
 
 /**
  * Apply the timer a message in 1:1 chat [jid] carried: [update] says what
- * the stored timer becomes (incomingTimerUpdate or syncedTimerUpdate), or
- * null to leave it. A new timer value also adds its line to the thread, at
- * [lineTimestamp] (seconds), before the message that carried it. A chat
- * with no row is left alone. Returns the timer now stored when it changed.
+ * the stored timer (null: not learned yet) becomes (incomingTimerUpdate or
+ * syncedTimerUpdate), or null to leave it. A change of a timer Photon knew
+ * adds its line to the thread, at [lineTimestamp] (seconds), before the
+ * message that carried it. The first timer learned from an ordinary message
+ * is stored silently, since nothing visibly changed; an [explicit] timer
+ * change (the message says the timer was set) shows its line either way. A
+ * chat with no row is left alone. Returns the timer now stored when it
+ * changed.
  */
 fun SignalMessageDatabase.updateDmTimer(
     jid: String,
     lineTimestamp: Long,
-    update: (ChatTimer) -> ChatTimer?,
+    explicit: Boolean = false,
+    update: (ChatTimer?) -> ChatTimer?,
 ): ChatTimer? {
     val db = writableDatabase
     val updated: ChatTimer
     db.beginTransaction()
     try {
-        val stored = storedTimer(db, jid) ?: return null
+        val (exists, stored) = storedDmTimer(db, jid)
+        if (!exists) return null
         updated = update(stored) ?: return null
         db.execSQL(
             "UPDATE conversations SET expire_timer = ?, expire_timer_version = ? WHERE jid = ?",
             arrayOf<Any?>(updated.seconds, updated.version, jid),
         )
-        if (updated.seconds != stored.seconds) {
+        if ((stored != null || explicit) && updated.seconds != stored?.seconds) {
             insertSystemLine(db, jid, lineTimestamp, disappearingMessagesLine(updated.seconds))
         }
         db.setTransactionSuccessful()
@@ -65,10 +96,14 @@ fun SignalMessageDatabase.updateDmTimer(
     return updated
 }
 
-/** Whether group [jid]'s timer has been read from its state (always true for a chat that isn't a group). */
-fun SignalMessageDatabase.groupTimerKnown(jid: String): Boolean =
-    readableDatabase.rawQuery("SELECT is_group, timer_revision FROM conversations WHERE jid = ?", arrayOf(jid))
-        .use { !it.moveToFirst() || it.getInt(0) == 0 || it.getInt(1) >= 0 }
+/**
+ * Whether group [jid]'s timer has been read at its latest revision (always
+ * true for a chat that isn't a group). A group change bumps the revision,
+ * so after one the timer may be stale until the group is fetched again.
+ */
+fun SignalMessageDatabase.groupTimerCurrent(jid: String): Boolean =
+    readableDatabase.rawQuery("SELECT is_group, timer_revision, group_revision FROM conversations WHERE jid = ?", arrayOf(jid))
+        .use { !it.moveToFirst() || it.getInt(0) == 0 || (it.getInt(1) >= 0 && it.getInt(1) >= it.getInt(2)) }
 
 /**
  * A group's timer, read from its state at group [revision]. Groups ignore
@@ -90,13 +125,13 @@ fun SignalMessageDatabase.updateGroupTimer(
     try {
         val (stored, readAt) = db.rawQuery(
             "SELECT expire_timer, timer_revision FROM conversations WHERE jid = ?", arrayOf(jid),
-        ).use { if (it.moveToFirst()) it.getInt(0) to it.getInt(1) else return false }
+        ).use { if (it.moveToFirst()) (if (it.isNull(0)) null else it.getInt(0)) to it.getInt(1) else return false }
         if (revision < readAt) return false
         db.execSQL(
             "UPDATE conversations SET expire_timer = ?, expire_timer_version = 1, timer_revision = ? WHERE jid = ?",
             arrayOf<Any?>(seconds, revision, jid),
         )
-        if (readAt >= 0 && seconds != stored) {
+        if (readAt >= 0 && stored != null && seconds != stored) {
             insertSystemLine(db, jid, nowSeconds, disappearingMessagesLine(seconds))
             changed = true
         }
@@ -109,25 +144,27 @@ fun SignalMessageDatabase.updateGroupTimer(
 }
 
 /**
- * The timer the primary's contact sync gives [aci] (with its version; a
- * timer without one is ignored, as it can't be ordered against what
- * messages said). It follows the sent-transcript rule and adds no line.
- * Kept on the contact too, so a chat Photon starts with them later (New
- * message) sends with it from the first message.
+ * The timer the primary's contact sync gives [aci], at [version] (a timer
+ * without one is ignored, as it can't be ordered against what messages
+ * said). Only a strictly higher version than the one stored applies
+ * (contactSyncTimerUpdate), and no line is added. Kept on the contact too,
+ * so a chat Photon starts with them later (New message) sends with it from
+ * the first message.
  */
 fun SignalMessageDatabase.updateTimerFromContactSync(aci: String, seconds: Int, version: Int) {
+    if (version <= 0) return
     val db = writableDatabase
     db.beginTransaction()
     try {
         db.execSQL(
             "UPDATE contacts SET expire_timer = ?, expire_timer_version = ? " +
-                "WHERE jid = ? AND (expire_timer_version IS NULL OR expire_timer_version <= ?)",
+                "WHERE jid = ? AND (expire_timer IS NULL OR expire_timer_version IS NULL OR expire_timer_version < ?)",
             arrayOf<Any?>(seconds, version, aci, version),
         )
-        val exists = db.rawQuery("SELECT 1 FROM conversations WHERE jid = ? AND is_group = 0", arrayOf(aci))
+        val isDm = db.rawQuery("SELECT 1 FROM conversations WHERE jid = ? AND is_group = 0", arrayOf(aci))
             .use { it.moveToFirst() }
-        if (exists) {
-            syncedTimerUpdate(chatTimer(db, aci), seconds, version)?.let { updated ->
+        if (isDm) {
+            contactSyncTimerUpdate(storedDmTimer(db, aci).second, seconds, version)?.let { updated ->
                 db.execSQL(
                     "UPDATE conversations SET expire_timer = ?, expire_timer_version = ? WHERE jid = ?",
                     arrayOf<Any?>(updated.seconds, updated.version, aci),

@@ -23,11 +23,13 @@ import org.signal.libsignal.zkgroup.groups.GroupMasterKey
 import org.whispersystems.signalservice.api.messages.SignalServiceDataMessage
 import org.whispersystems.signalservice.api.messages.SignalServiceGroupV2
 import org.whispersystems.signalservice.api.push.SignalServiceAddress
+import org.whispersystems.signalservice.internal.push.DataMessage
 import java.io.File
 import java.util.Optional
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -119,11 +121,55 @@ class SignalSendTimerTest {
         assertEquals(ChatTimer(week, 1), sentTimer())
     }
 
-    /** No group state yet and no connection to fetch it: the send still goes, with what's stored. */
+    /**
+     * A DM whose timer Photon hasn't learned (every chat after the upgrade,
+     * until its next message) sends off at version 0, which no Signal client
+     * takes as a change: a version-1 timer set by an older client stays on.
+     */
     @Test
-    fun aGroupWhoseTimerIsUnknownStillSends() {
+    fun aDmWhoseTimerIsUnknownSendsVersionZero() {
+        sender.sendTextMessage(alice, "hello")
+
+        assertEquals(ChatTimer(0, 0), sentTimer())
+        assertEquals(0L to 0L, expiry(db.getMessages(alice).single().id))
+    }
+
+    /**
+     * A group never read and no connection to read it: the send still goes,
+     * without a timer and at version 0, never with a guessed timer at
+     * version 1.
+     */
+    @Test
+    fun aGroupWhoseTimerIsUnknownSendsVersionZero() {
         assertTrue(sender.sendTextMessage(group, "hi all"))
-        assertEquals(ChatTimer.DEFAULT, sentTimer())
+        assertEquals(ChatTimer.UNKNOWN, sentTimer())
+    }
+
+    /**
+     * Right after a group change (the revision moved) the group is read
+     * again first; without a connection to read it, the last timer read
+     * goes. Groups ignore message timers, so it can't change the group's
+     * setting, and the message still disappears.
+     */
+    @Test
+    fun aSendRightAfterAGroupChangeThatCantBeReadUsesTheLastTimer() {
+        db.updateGroupTimer(group, week, revision = 4)
+        db.updateGroupMeta(group, masterKey, 5)
+
+        sender.sendTextMessage(group, "hi all")
+
+        assertEquals(ChatTimer(week, 1), sentTimer())
+    }
+
+    /** The library encodes version 0 on the wire (proto2: a set field), so receivers see 0, not "no version". */
+    @Test
+    fun versionZeroIsEncoded() {
+        val message = outgoingDataMessage(OutgoingContent.Message("hello", null), 1_700_000_000_000, group = null) { null }
+        assertEquals(0, message.expireTimerVersion)
+
+        val wire = DataMessage(body = "hello", expireTimerVersion = 0).encode()
+        assertEquals(0, DataMessage.ADAPTER.decode(wire).expireTimerVersion)
+        assertNull(DataMessage.ADAPTER.decode(DataMessage(body = "hello").encode()).expireTimerVersion)
     }
 
     /** A failed message isn't counting down; its retry sends with the timer as it is by then. */

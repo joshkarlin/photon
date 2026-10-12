@@ -95,18 +95,43 @@ class DisappearingReceiveTest {
 
     // ── 1:1 chats ──
 
+    /**
+     * After the upgrade every chat's timer is unknown: the first message
+     * teaches it silently (nothing visibly changed), with no line.
+     */
+    @Test
+    fun theFirstMessageTeachesTheTimerSilently() {
+        receive("this one disappears", week, 2)
+
+        assertEquals(ChatTimer(week, 2), fx.db.chatTimer(alice))
+        assertEquals(listOf("text" to "this one disappears"), thread())
+        assertEquals(week.toLong() to 0L, expiry(fx.db.getMessages(alice).first().id))
+    }
+
+    /** A message from a client that sends version 0 (as Photon does while it doesn't know) teaches nothing. */
+    @Test
+    fun versionZeroTeachesNothing() {
+        receive("from another Photon", 0, 0)
+        assertEquals(null, fx.db.chatTimer(alice))
+        receive("a week", week, 2)
+        receive("version 0 again", 0, 0)
+        assertEquals(ChatTimer(week, 2), fx.db.chatTimer(alice))
+        assertEquals(0, thread().count { it.first == ContentTypes.SYSTEM })
+    }
+
     @Test
     fun aNewTimerIsStoredAndShownBeforeTheMessage() {
+        receive("before", 0, 2)
         receive("this one disappears", week, 2)
 
         assertEquals(ChatTimer(week, 2), fx.db.chatTimer(alice))
         assertEquals(
-            listOf(ContentTypes.SYSTEM to "Disappearing messages · 1 week", "text" to "this one disappears"),
+            listOf("text" to "before", ContentTypes.SYSTEM to "Disappearing messages · 1 week", "text" to "this one disappears"),
             thread(),
         )
         // The line is never unread and never notifies.
-        assertEquals(1, fx.db.getConversation(alice)?.unreadCount)
-        assertEquals(listOf("message:$alice:Signal contact:this one disappears"), fx.notifier.events)
+        assertEquals(2, fx.db.getConversation(alice)?.unreadCount)
+        assertEquals("message:$alice:Signal contact:this one disappears", fx.notifier.events.last())
         // Unread: its clock hasn't started.
         val message = fx.db.getMessages(alice).first()
         assertEquals(week.toLong() to 0L, expiry(message.id))
@@ -118,7 +143,7 @@ class DisappearingReceiveTest {
         receive("from an outdated device", 0, 2)
 
         assertEquals(ChatTimer(week, 3), fx.db.chatTimer(alice))
-        assertEquals(1, thread().count { it.first == ContentTypes.SYSTEM })
+        assertEquals(0, thread().count { it.first == ContentTypes.SYSTEM })
         // The message itself keeps its own timer: none.
         assertEquals(0L, expiry(fx.db.getMessages(alice).first().id).first)
     }
@@ -131,12 +156,16 @@ class DisappearingReceiveTest {
         receive("an hour at v4", 3_600, 4)
         assertEquals(ChatTimer(3_600, 4), fx.db.chatTimer(alice))
         assertEquals(
-            listOf("Disappearing messages · 1 week", "Disappearing messages off", "Disappearing messages · 1 hour"),
+            listOf("Disappearing messages off", "Disappearing messages · 1 hour"),
             thread().filter { it.first == ContentTypes.SYSTEM }.map { it.second },
         )
     }
 
-    /** An explicit timer change shows as its line only: nothing unread, no notification. */
+    /**
+     * An explicit timer change shows as its line only: nothing unread, no
+     * notification. It says the timer was set, so the line shows even when
+     * the old timer wasn't known.
+     */
     @Test
     fun anExplicitTimerChangeIsOnlyItsLine() {
         receive(null, week, 2, flags = DataMessage.Flags.EXPIRATION_TIMER_UPDATE.value)
@@ -155,7 +184,7 @@ class DisappearingReceiveTest {
         receive("old client, off", 0, null)
         receive("old client, a week", week, null, ts = first)
 
-        assertEquals(0, fx.db.chatTimer(alice).seconds)
+        assertEquals(0, fx.db.chatTimer(alice)?.seconds)
         assertEquals(2, fx.db.getMessages(alice).count { it.contentType == "text" })
     }
 
@@ -193,7 +222,7 @@ class DisappearingReceiveTest {
     fun aGroupMessageDoesntSetTheGroupTimer() {
         receiveInGroup("in the group", week)
 
-        assertEquals(0, fx.db.chatTimer(group).seconds)
+        assertEquals(null, fx.db.chatTimer(group))
         assertEquals(listOf("text" to "in the group"), thread(group))
         assertEquals(week.toLong(), expiry(fx.db.getMessages(group).first().id).first)
     }
@@ -224,7 +253,8 @@ class DisappearingReceiveTest {
         transcript(DataMessage(body = "sent on my phone", timestamp = ts, expireTimer = week, expireTimerVersion = 3), expirationStart = ts + 500)
 
         assertEquals(ChatTimer(week, 3), fx.db.chatTimer(alice))
-        assertEquals(listOf(ContentTypes.SYSTEM to "Disappearing messages · 1 week", "text" to "sent on my phone"), thread())
+        // The first timer learned is silent.
+        assertEquals(listOf("text" to "sent on my phone"), thread())
         val mine = fx.db.getMessages(alice).first()
         assertTrue(mine.isFromMe)
         assertEquals(week.toLong() to ts + 500 + week * 1000L, expiry(mine.id))
@@ -238,7 +268,9 @@ class DisappearingReceiveTest {
 
         transcript(DataMessage(body = "v5", timestamp = ++now, expireTimer = week, expireTimerVersion = 5))
         assertEquals(ChatTimer(week, 5), fx.db.chatTimer(alice))
-        assertEquals(1, thread().count { it.first == ContentTypes.SYSTEM })
+        assertEquals(0, thread().count { it.first == ContentTypes.SYSTEM })
+        transcript(DataMessage(body = "v6", timestamp = ++now, expireTimer = 0, expireTimerVersion = 6))
+        assertEquals(listOf("Disappearing messages off"), thread().filter { it.first == ContentTypes.SYSTEM }.map { it.second })
     }
 
     @Test
@@ -250,7 +282,7 @@ class DisappearingReceiveTest {
             ),
             destination = null,
         )
-        assertEquals(0, fx.db.chatTimer(group).seconds)
+        assertEquals(null, fx.db.chatTimer(group))
         assertEquals(listOf("text" to "to the group"), thread(group))
     }
 

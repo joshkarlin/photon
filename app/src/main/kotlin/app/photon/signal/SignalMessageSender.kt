@@ -8,7 +8,7 @@ import app.photon.signal.db.deleteMessagesByPrefix
 import app.photon.signal.db.getConversation
 import app.photon.signal.db.getGroupMeta
 import app.photon.signal.db.getMessage
-import app.photon.signal.db.groupTimerKnown
+import app.photon.signal.db.groupTimerCurrent
 import app.photon.signal.db.insertMessage
 import app.photon.signal.db.markOutgoingSent
 import app.photon.signal.db.setExpiresIn
@@ -165,19 +165,27 @@ class SignalMessageSender internal constructor(
      * The disappearing-messages timer [messageId] goes to [recipient] with:
      * the chat's, as stored now (a retry too: an older timer at the current
      * version could change the chat's timer). The row disappears after it
-     * once sent. A group whose timer hasn't been read since the v7 upgrade
-     * (its state is fetched after connecting) is read first, so a message
-     * sent meanwhile still disappears for everyone.
+     * once sent.
+     *
+     * A group whose timer wasn't read at its latest revision (never, or
+     * before a group change) is fetched first, so a message sent right
+     * after a timer change carries the new one; if it can't be fetched now,
+     * the last timer read goes (groups ignore message timers, so it can't
+     * change the group's setting). While a chat's timer isn't known at all
+     * (a DM Photon hasn't learned it for, a group never read) the message
+     * goes off at version 0, which no Signal client takes as a timer change
+     * (ChatTimer.UNKNOWN). Sends are never held back for it: the primary
+     * that could tell Photon is often offline.
      */
     private fun sendTimer(messageId: String, recipient: Recipient): ChatTimer {
-        if (recipient is Recipient.Group && !messageDb.groupTimerKnown(recipient.conversationJid)) {
+        if (recipient is Recipient.Group && !messageDb.groupTimerCurrent(recipient.conversationJid)) {
             groupManager()?.fetchGroup(recipient.meta.masterKey)?.let { group ->
                 messageDb.updateGroupTimer(
                     recipient.conversationJid, group.disappearingMessagesTimer?.duration ?: 0, group.revision,
                 )
             }
         }
-        val timer = messageDb.chatTimer(recipient.conversationJid)
+        val timer = timerToSend(messageDb.chatTimer(recipient.conversationJid))
         messageDb.setExpiresIn(messageId, timer.seconds)
         return timer
     }
