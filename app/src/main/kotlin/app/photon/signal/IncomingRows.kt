@@ -34,13 +34,19 @@ internal data class PlannedRow(
  *
  * View-once media is one [ContentTypes.VIEW_ONCE] row naming its kind. Its
  * pointer is dropped, so it can never be downloaded or saved here.
+ *
+ * A message over Signal's 2,000-character body limit comes as the first
+ * part in the body plus the whole text as a [LONG_TEXT_MIME] attachment.
+ * That attachment isn't a row of its own (it would show as a nameless
+ * document and count unread twice): the body shows, cut short.
  */
 internal fun plannedRows(data: DataMessage): List<PlannedRow> {
     if (data.isViewOnce == true) {
         return listOf(PlannedRow(ContentTypes.VIEW_ONCE, viewOnceKind(data.attachments.firstOrNull()?.contentType)))
     }
     val body = data.body?.takeIf { it.isNotBlank() }
-    val rows = data.attachments.map { attachmentRow(it) }.toMutableList()
+    val attachments = if (body != null) data.attachments.filterNot { it.contentType == LONG_TEXT_MIME } else data.attachments
+    val rows = attachments.map { attachmentRow(it) }.toMutableList()
     val captionRow = rows.indexOfFirst { it.contentType == "image" || it.contentType == "video" }
     if (body != null && captionRow >= 0) rows[captionRow] = rows[captionRow].copy(text = body)
     for (contact in data.contact) rows += PlannedRow("contact", contactText(contact))
@@ -49,6 +55,9 @@ internal fun plannedRows(data: DataMessage): List<PlannedRow> {
     if (rows.isEmpty() && data.sticker != null) rows += PlannedRow("sticker", null)
     return rows
 }
+
+/** The content type of the attachment that carries a long message's whole text. */
+internal const val LONG_TEXT_MIME = "text/x-signal-plain"
 
 /**
  * What a message's notification shows, as (text, content type) for

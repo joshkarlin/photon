@@ -40,6 +40,20 @@ class IncomingRowsTest {
         assertEquals(listOf("document" to "a.pdf", "text" to "see attached"), shape(rows))
     }
 
+    /**
+     * A long message: the body is its first part and the whole text comes as
+     * a text/x-signal-plain attachment, which isn't a row (no nameless
+     * document, no second unread). Photon shows the body.
+     */
+    @Test
+    fun aLongMessageIsItsBodyAlone() {
+        val rows = plannedRows(DataMessage(body = "a".repeat(2_000), attachments = listOf(pointer(LONG_TEXT_MIME))))
+        assertEquals(listOf("text" to "a".repeat(2_000)), shape(rows))
+
+        val withPhoto = plannedRows(DataMessage(body = "caption", attachments = listOf(pointer("image/jpeg"), pointer(LONG_TEXT_MIME))))
+        assertEquals(listOf("image" to "caption"), shape(withPhoto))
+    }
+
     @Test
     fun aPlainMessageIsOneTextRow() {
         assertEquals(listOf("text" to "hi"), shape(plannedRows(DataMessage(body = "hi"))))
