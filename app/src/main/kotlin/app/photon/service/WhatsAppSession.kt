@@ -208,6 +208,20 @@ class WhatsAppSession internal constructor(
                     NotificationHelper.cancelForConversation(context, convJid)
                 }
             }
+            "message_replaced" -> {
+                // A placeholder (a message that couldn't be decrypted) became
+                // the real message. If the notification showed the
+                // placeholder, it now shows the message, without alerting.
+                if (evt.boolean("newest_unread") != true || evt.boolean("is_from_me") == true) return
+                val convJid = evt.string("conversation_jid") ?: return
+                if (isPseudoWhatsAppJid(convJid)) return
+                val conversation = repository.storedConversation(convJid)
+                if (conversation?.isMuted == true) return
+                val text = repository.names.messageNotification(evt, conversation)
+                NotificationHelper.showMessageNotification(
+                    context, text.title, text.body, Platform.WHATSAPP, convJid, update = true,
+                )
+            }
             "messages_removed" -> {
                 // Messages disappeared (or were placeholders for nothing).
                 // The notification mustn't keep showing one.
@@ -267,7 +281,7 @@ class WhatsAppSession internal constructor(
 
         // Bridge events the notification layer acts on; delivered losslessly.
         val NOTIFIED_EVENTS = setOf(
-            "new_message", "read_self", "message_revoked", "messages_removed",
+            "new_message", "read_self", "message_revoked", "messages_removed", "message_replaced",
             "call_incoming", "call_ended", "call_missed",
         )
 
