@@ -14,7 +14,10 @@ import org.robolectric.annotation.Config
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
-/** Settings › Chat › NOTIFICATIONS, and its migration from the old ON / OFF switch. */
+/**
+ * Settings › Chat › Messages and Calls: Messages' migration from the old
+ * ON / OFF switch, and Calls starting from Messages.
+ */
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [34])
 class NotificationLevelTest {
@@ -50,19 +53,71 @@ class NotificationLevelTest {
         val legacy = booleanPreferencesKey("notifications_enabled")
         try {
             context.dataStore.edit { it[legacy] = false }
-            assertEquals(NotificationLevel.OFF, prefs.notificationLevel.first())
+            assertEquals(NotificationLevel.OFF, prefs.messageLevel.first())
 
             context.dataStore.edit { it[legacy] = true }
-            assertEquals(NotificationLevel.SOUND, prefs.notificationLevel.first())
+            assertEquals(NotificationLevel.SOUND, prefs.messageLevel.first())
 
-            prefs.setNotificationLevel(NotificationLevel.VIBRATE)
-            assertEquals(NotificationLevel.VIBRATE, prefs.notificationLevel.first())
+            prefs.setMessageLevel(NotificationLevel.VIBRATE)
+            assertEquals(NotificationLevel.VIBRATE, prefs.messageLevel.first())
             assertNull(context.dataStore.data.first()[legacy])
         } finally {
+            clear(context)
+        }
+    }
+
+    @Test
+    fun callsStartAtTheStoredMessagesLevel() {
+        assertEquals(NotificationLevel.SILENT, NotificationLevel.resolveCalls(null, NotificationLevel.SILENT))
+        assertEquals(NotificationLevel.OFF, NotificationLevel.resolveCalls(null, NotificationLevel.OFF))
+        assertEquals(NotificationLevel.VIBRATE, NotificationLevel.resolveCalls("VIBRATE", NotificationLevel.OFF))
+        assertEquals(NotificationLevel.SOUND, NotificationLevel.resolveCalls("LOUD", NotificationLevel.SOUND))
+    }
+
+    /** An install from before Calls existed: Calls is what NOTIFICATIONS was, old switch included. */
+    @Test
+    fun callsMigrateFromWhatNotificationsWas() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val prefs = PhotonPreferences(context)
+        try {
+            context.dataStore.edit { it[stringPreferencesKey("notification_level")] = "SILENT" }
+            assertEquals(NotificationLevel.SILENT, prefs.callLevel.first())
+
             context.dataStore.edit {
-                it.remove(legacy)
                 it.remove(stringPreferencesKey("notification_level"))
+                it[booleanPreferencesKey("notifications_enabled")] = false
             }
+            assertEquals(NotificationLevel.OFF, prefs.callLevel.first())
+        } finally {
+            clear(context)
+        }
+    }
+
+    /** Once Messages changes, Calls keeps the level it started from instead of following. */
+    @Test
+    fun changingMessagesLeavesCallsWhereTheyStarted() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val prefs = PhotonPreferences(context)
+        try {
+            context.dataStore.edit { it[stringPreferencesKey("notification_level")] = "VIBRATE" }
+            prefs.setMessageLevel(NotificationLevel.OFF)
+            assertEquals(NotificationLevel.OFF, prefs.messageLevel.first())
+            assertEquals(NotificationLevel.VIBRATE, prefs.callLevel.first())
+
+            prefs.setCallLevel(NotificationLevel.SOUND)
+            prefs.setMessageLevel(NotificationLevel.SILENT)
+            assertEquals(NotificationLevel.SOUND, prefs.callLevel.first())
+            assertEquals(NotificationLevel.SILENT, prefs.messageLevel.first())
+        } finally {
+            clear(context)
+        }
+    }
+
+    private suspend fun clear(context: Context) {
+        context.dataStore.edit {
+            it.remove(booleanPreferencesKey("notifications_enabled"))
+            it.remove(stringPreferencesKey("notification_level"))
+            it.remove(stringPreferencesKey("call_level"))
         }
     }
 }

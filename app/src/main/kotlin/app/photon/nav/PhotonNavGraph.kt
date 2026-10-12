@@ -11,6 +11,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import app.photon.data.model.Platform
 import app.photon.service.Sessions
+import app.photon.ui.chat.ArchivedChatsScreen
 import app.photon.ui.chat.ChatListScreen
 import app.photon.ui.chat.ChatScreen
 import app.photon.ui.contact.ContactScreen
@@ -88,6 +89,13 @@ fun PhotonNavGraph(
                         ),
                     )
                 },
+                onArchived = { navController.openArchived() },
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable(Routes.ARCHIVED) {
+            ArchivedChatsScreen(
+                onChat = ::openChat,
                 onBack = { navController.popBackStack() },
             )
         }

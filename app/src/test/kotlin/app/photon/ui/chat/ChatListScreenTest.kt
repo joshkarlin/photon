@@ -1,5 +1,7 @@
 package app.photon.ui.chat
 
+import android.app.NotificationManager
+import android.content.Context
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -11,9 +13,11 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.test.core.app.ApplicationProvider
 import app.photon.chat.FakeChatBackend
 import app.photon.chat.FakeChatBackend.Companion.conversation
 import app.photon.data.model.Platform
+import app.photon.service.NotificationHelper
 import app.photon.ui.RegisterComposeHostActivity
 import app.photon.ui.theme.PhotonTheme
 import org.junit.Rule
@@ -21,6 +25,7 @@ import org.junit.Test
 import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import kotlin.test.assertEquals
@@ -139,6 +144,44 @@ class ChatListScreenTest {
         signal.conversations.value = emptyList()
         show(Platform.SIGNAL)
         rule.onNodeWithText("no messages yet").assertExists()
+    }
+
+    @Test
+    fun archivedChatsLeaveAllChatsAndEachPlatformsList() {
+        whatsapp.conversations.value = listOf(
+            conversation("a@s.whatsapp.net", "Alice", lastTimestamp = 20).copy(isArchived = true),
+            conversation("b@s.whatsapp.net", "Bob", lastTimestamp = 10),
+        )
+        show(filter = null)
+        rule.onAllNodesWithText("Alice").assertCountEquals(0)
+        rule.onNodeWithText("Bob").assertExists()
+
+        filter = Platform.WHATSAPP
+        rule.waitForIdle()
+        rule.onAllNodesWithText("Alice").assertCountEquals(0)
+        rule.onNodeWithText("Bob").assertExists()
+    }
+
+    /** WhatsApp's sync status is for a list with no chats yet, not one whose chats are all archived. */
+    @Test
+    fun aListOfOnlyArchivedChatsSaysNoMessages() {
+        whatsapp.conversations.value = listOf(conversation("a@s.whatsapp.net", "Alice", lastTimestamp = 20).copy(isArchived = true))
+        show(Platform.WHATSAPP)
+        rule.onNodeWithText("no messages").assertExists()
+        rule.onAllNodesWithText("connecting").assertCountEquals(0)
+    }
+
+    /** Archived chats still notify, so the list still clears their notifications once they're read. */
+    @Test
+    fun theListStillClearsArchivedChatsNotifications() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        NotificationHelper.showMessageNotification(context, "Alice", "hi", Platform.WHATSAPP, "a@s.whatsapp.net")
+        val manager = shadowOf(context.getSystemService(NotificationManager::class.java))
+        assertEquals(1, manager.allNotifications.size)
+
+        whatsapp.conversations.value = listOf(conversation("a@s.whatsapp.net", "Alice", lastTimestamp = 20).copy(isArchived = true))
+        show(filter = null)
+        assertEquals(0, manager.allNotifications.size)
     }
 
     @Test

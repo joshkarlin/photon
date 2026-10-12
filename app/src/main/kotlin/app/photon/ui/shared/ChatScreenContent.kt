@@ -44,9 +44,11 @@ import app.photon.ui.shared.components.MessageActions
 import app.photon.ui.shared.components.MessageInputBar
 import app.photon.ui.shared.components.MessageRow
 import app.photon.ui.shared.components.SwipeToReply
+import app.photon.ui.shared.components.SystemRow
 import app.photon.ui.shared.components.ThreadBottomBar
 import app.photon.ui.shared.components.backButton
 import app.photon.ui.shared.components.isCall
+import app.photon.ui.shared.components.isSystem
 import app.photon.ui.shared.components.messageActions
 import app.photon.ui.shared.components.quoteLabel
 import app.photon.ui.shared.components.rememberMediaInput
@@ -58,7 +60,6 @@ import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
 import com.thelightphone.sdk.ui.LightThemeTokens
 import com.thelightphone.sdk.ui.LightTopBar
-import com.thelightphone.sdk.ui.LightTopBarCenter
 import com.thelightphone.sdk.ui.gridUnitsAsDp
 import com.thelightphone.sdk.ui.lightClickable
 import kotlinx.coroutines.flow.Flow
@@ -82,6 +83,8 @@ import kotlinx.coroutines.launch
  *   chat shown in the same place
  * @param canDeleteForEveryone whether the user's own sent messages can be
  *   deleted for everyone, not just here
+ * @param disappearingSeconds the chat's disappearing-messages timer, shown
+ *   under the title while it's on; 0 = off
  */
 @Composable
 fun ChatScreenContent(
@@ -104,6 +107,7 @@ fun ChatScreenContent(
     supportsReply: Boolean = true,
     headerContent: (@Composable () -> Unit)? = null,
     conversationKey: String? = null,
+    disappearingSeconds: Long = 0,
 ) {
     val messages by messagesFlow.collectAsState(initial = emptyList())
     val context = LocalContext.current
@@ -133,6 +137,7 @@ fun ChatScreenContent(
         composeStyle = composeStyle,
         keyboardStyle = keyboardStyle,
         conversationKey = conversationKey,
+        disappearingSeconds = disappearingSeconds,
     )
 }
 
@@ -159,6 +164,7 @@ internal fun ChatThread(
     composeStyle: ComposeStyle? = ComposeStyle.INLINE,
     keyboardStyle: KeyboardStyle? = KeyboardStyle.SYSTEM,
     conversationKey: String? = null,
+    disappearingSeconds: Long = 0,
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
@@ -262,7 +268,7 @@ internal fun ChatThread(
         ) {
             LightTopBar(
                 leftButton = backButton(onBack),
-                center = LightTopBarCenter.Text(title, onClick = onTitleClick),
+                center = chatTitle(title, disappearingSeconds, onTitleClick),
             )
 
             headerContent?.invoke()
@@ -383,6 +389,10 @@ private fun MessageItem(
 ) {
     if (isCall(msg)) {
         CallRow(msg, onLongPress = onLongPress)
+        return
+    }
+    if (isSystem(msg)) {
+        SystemRow(msg)
         return
     }
     SwipeToReply(enabled = canReply, onReply = onReply) {

@@ -20,7 +20,8 @@ class PhotonApp : Application() {
         super.onCreate()
         DisplayNames.defaultCountry = deviceCountry(this)
         createNotificationChannels()
-        NotificationHelper.followLevel(PhotonPreferences(this).notificationLevel, scope)
+        val prefs = PhotonPreferences(this)
+        NotificationHelper.followLevels(prefs.messageLevel, prefs.callLevel, scope)
         cleanupLegacyWebView()
     }
 
@@ -62,10 +63,11 @@ class PhotonApp : Application() {
         ).apply { setShowBadge(false) }
         manager.createNotificationChannel(serviceChannel)
 
-        // One channel per NOTIFICATIONS level, as a channel's sound,
-        // vibration and importance can't change once it exists. Messages and
-        // calls post to the level's channel (NotificationHelper.channelFor).
-        // SOUND keeps the original id, so settings the user made to it carry over.
+        // One channel per level for messages and one for calls, as a
+        // channel's sound, vibration and importance can't change once it
+        // exists. A notification posts to its level's channel
+        // (NotificationHelper.channelFor, callChannelFor). Messages at SOUND
+        // keeps the original id, so settings the user made to it carry over.
         val soundChannel = NotificationChannel(
             CHANNEL_MESSAGES,
             "Messages",
@@ -93,18 +95,58 @@ class PhotonApp : Application() {
             enableVibration(false)
         }
         manager.createNotificationChannels(listOf(soundChannel, vibrateChannel, silentChannel))
+
+        // Calls: all high importance, so even a silent call shows heads-up
+        // while it rings. Ringing repeats the channel's sound or vibration
+        // (FLAG_INSISTENT) until the call ends.
+        val callSound = NotificationChannel(
+            CHANNEL_CALLS,
+            "Calls",
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply {
+            setShowBadge(true)
+            enableVibration(true)
+        }
+        val callVibrate = NotificationChannel(
+            CHANNEL_CALLS_VIBRATE,
+            "Calls (vibrate)",
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply {
+            setShowBadge(true)
+            setSound(null, null)
+            enableVibration(true)
+        }
+        val callSilent = NotificationChannel(
+            CHANNEL_CALLS_SILENT,
+            "Calls (silent)",
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply {
+            setShowBadge(true)
+            setSound(null, null)
+            enableVibration(false)
+        }
+        manager.createNotificationChannels(listOf(callSound, callVibrate, callSilent))
     }
 
     companion object {
         const val CHANNEL_SERVICE = "photon_service_v3"
 
-        /** Messages and calls at NOTIFICATIONS SOUND. */
+        /** Messages at SOUND. */
         const val CHANNEL_MESSAGES = "photon_messages"
 
-        /** Messages and calls at NOTIFICATIONS VIBRATE. */
+        /** Messages at VIBRATE. */
         const val CHANNEL_MESSAGES_VIBRATE = "photon_messages_vibrate"
 
-        /** Messages and calls at NOTIFICATIONS SILENT. */
+        /** Messages at SILENT. */
         const val CHANNEL_MESSAGES_SILENT = "photon_messages_silent"
+
+        /** Ringing, missed and group calls at SOUND. */
+        const val CHANNEL_CALLS = "photon_calls"
+
+        /** Ringing, missed and group calls at VIBRATE. */
+        const val CHANNEL_CALLS_VIBRATE = "photon_calls_vibrate"
+
+        /** Ringing, missed and group calls at SILENT. */
+        const val CHANNEL_CALLS_SILENT = "photon_calls_silent"
     }
 }

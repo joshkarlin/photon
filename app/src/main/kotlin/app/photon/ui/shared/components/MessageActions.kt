@@ -53,9 +53,17 @@ internal data class MessageActionSupport(
  * The actions [msg] offers. Reply, React and Delete for Everyone need a
  * message the others have: not a call row (Photon's own record), not one of
  * the user's still unsent, and not one already deleted. Reactions go on
- * other people's messages only, on every platform.
+ * other people's messages only, on every platform. A system line offers
+ * nothing, and a message only the phone has ([isPhoneOnly]) can only be
+ * deleted here.
  */
-internal fun messageActions(msg: Message, support: MessageActionSupport): List<MessageAction> = buildList {
+internal fun messageActions(msg: Message, support: MessageActionSupport): List<MessageAction> = when {
+    isSystem(msg) -> emptyList()
+    isPhoneOnly(msg) -> if (support.delete) listOf(MessageAction.DELETE) else emptyList()
+    else -> contentActions(msg, support)
+}
+
+private fun contentActions(msg: Message, support: MessageActionSupport): List<MessageAction> = buildList {
     val call = isCall(msg)
     val delivered = !call && !msg.status.isUnsent && msg.status != MessageStatus.DELETED
     if (support.reply && delivered) add(MessageAction.REPLY)

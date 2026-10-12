@@ -9,7 +9,6 @@ import android.media.MediaRecorder
 import android.net.Uri
 import android.provider.MediaStore
 import android.provider.OpenableColumns
-import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResultLauncher
@@ -284,14 +283,10 @@ fun rememberMediaInput(
 internal val ATTACHABLE_FILE_TYPES = arrayOf("image/*", "video/*", "application/*", "text/*")
 
 /** A staged file's extension, so the platform and the recipient can tell what it is. */
-internal fun stagedExtension(mime: String): String {
-    val type = mime.substringBefore(';').trim()
-    MimeTypeMap.getSingleton().getExtensionFromMimeType(type)?.let { return ".$it" }
-    return when {
-        type.startsWith("image/") -> ".jpg"
-        type.startsWith("video/") -> ".mp4"
-        else -> ".bin"
-    }
+internal fun stagedExtension(mime: String): String = mimeToExt(mime) ?: when {
+    mime.startsWith("image/") -> ".jpg"
+    mime.startsWith("video/") -> ".mp4"
+    else -> ".bin"
 }
 
 /**

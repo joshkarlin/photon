@@ -47,11 +47,18 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
+/**
+ * A message's media, full screen, with Save in the top bar.
+ *
+ * @param fileName the name the sender's file had (a document's), which
+ *   Save uses ([saveTarget]); null for media that has none
+ */
 @Composable
 fun MediaViewer(
     messageId: String,
     mediaMime: String?,
     existingPath: String? = null,
+    fileName: String? = null,
     onDownloadMedia: suspend (String) -> String?,
     onDismiss: () -> Unit,
 ) {
@@ -101,7 +108,7 @@ fun MediaViewer(
                         LightIcons.DOWNLOAD_ARROW,
                         onClick = {
                             scope.launch {
-                                saved = withContext(Dispatchers.IO) { saveToDevice(context, path, mediaMime) }
+                                saved = withContext(Dispatchers.IO) { saveToDevice(context, path, mediaMime, fileName) }
                             }
                         },
                         contentDescription = "Save",
@@ -137,7 +144,8 @@ fun MediaViewer(
                             AudioPlayer(file = file)
                         }
                         else -> {
-                            LightText("Downloaded: ${file.name}", variant = LightTextVariant.Copy, modifier = message)
+                            val name = remember(file, mediaMime, fileName) { saveTarget(fileName, mediaMime, file).displayName }
+                            LightText("Downloaded: $name", variant = LightTextVariant.Copy, modifier = message)
                         }
                     }
                 }
@@ -226,12 +234,16 @@ private fun AudioPlayer(file: File) {
     }
 }
 
-/** Copies the media into the shared Pictures, Movies or Downloads folder. Returns whether it did. */
-private fun saveToDevice(context: Context, path: String, mimeType: String?): Boolean {
+/**
+ * Copies the media into the shared Pictures, Movies or Downloads folder,
+ * under the name [saveTarget] gives it. Returns whether it did.
+ */
+private fun saveToDevice(context: Context, path: String, mimeType: String?, fileName: String?): Boolean {
     val file = File(path)
     if (!file.exists()) return false
 
-    val mime = mimeType ?: "application/octet-stream"
+    val target = saveTarget(fileName, mimeType, file)
+    val mime = target.mime
     val isImage = mime.startsWith("image/")
     val isVideo = mime.startsWith("video/")
 
@@ -242,7 +254,7 @@ private fun saveToDevice(context: Context, path: String, mimeType: String?): Boo
     }
 
     val values = ContentValues().apply {
-        put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
+        put(MediaStore.MediaColumns.DISPLAY_NAME, target.displayName)
         put(MediaStore.MediaColumns.MIME_TYPE, mime)
         put(MediaStore.MediaColumns.RELATIVE_PATH, when {
             isImage -> Environment.DIRECTORY_PICTURES + "/Photon"

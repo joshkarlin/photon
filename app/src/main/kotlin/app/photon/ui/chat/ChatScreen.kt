@@ -121,6 +121,7 @@ internal fun ChatScreen(
             { backend.contactPhone(jid)?.let { phone -> onContact(phone, title) } }
         } else null,
         supportsReply = capabilities.reply,
+        disappearingSeconds = conversation?.disappearingSeconds ?: 0,
     )
 
     viewingMedia?.let { media ->
@@ -128,6 +129,8 @@ internal fun ChatScreen(
             messageId = media.id,
             mediaMime = media.mediaMime,
             existingPath = media.mediaUrl,
+            // A document's text is its file name, on every platform that keeps one.
+            fileName = media.textBody.takeIf { media.contentType == "document" },
             onDownloadMedia = backend::downloadMedia,
             onDismiss = { viewingMedia = null },
         )

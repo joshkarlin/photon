@@ -12,6 +12,9 @@ object Routes {
     const val CHAT = "chat/{platform}/{jid}"
 
     const val PLATFORMS = "platforms"
+
+    /** Chats archived on the user's phone, every platform's ([openArchived]). */
+    const val ARCHIVED = "archived"
     const val WHATSAPP_PAIRING = "whatsapp/pairing"
     const val SIGNAL_PAIRING = "signal/pairing"
     const val CONTACT = "contact/{phone}/{name}"
@@ -39,6 +42,15 @@ fun NavController.openNewMessage() = navigate(Routes.NEW_MESSAGE) { launchSingle
  */
 internal fun NavController.openChatFromNewMessage(platform: Platform, jid: String) =
     navigate(Routes.chat(platform, jid)) { popUpTo(Routes.NEW_MESSAGE) { inclusive = true } }
+
+/**
+ * Open the archived chats in the platform picker's place, so Back returns
+ * to the chat list the picker was opened from.
+ */
+fun NavController.openArchived() = navigate(Routes.ARCHIVED) {
+    popUpTo(Routes.PLATFORMS) { inclusive = true }
+    launchSingleTop = true
+}
 
 /**
  * Where picking [filter] in the platform picker goes: its chats, unless it

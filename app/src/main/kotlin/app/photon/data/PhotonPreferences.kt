@@ -16,13 +16,16 @@ import kotlinx.coroutines.flow.map
 internal val Context.dataStore: DataStore<Preferences> by preferencesDataStore("photon_prefs")
 
 /**
- * How message and call notifications alert. Each level but [OFF] posts to
- * its own channel (`PhotonApp`), because a channel's sound, vibration and
- * importance are fixed once it exists.
+ * How notifications alert: Settings › Chat › Messages and Calls each pick
+ * one. Each level but [OFF] posts to its own channel (`PhotonApp`), because a
+ * channel's sound, vibration and importance are fixed once it exists.
  *
- * - [SOUND]: heads-up, with the default sound and vibration.
- * - [VIBRATE]: heads-up and vibration, no sound.
- * - [SILENT]: in the shade and on the badge only.
+ * - [SOUND]: heads-up, with the default sound and vibration. A ringing call
+ *   repeats them until it ends.
+ * - [VIBRATE]: heads-up and vibration, no sound. A ringing call repeats the
+ *   vibration until it ends.
+ * - [SILENT]: no sound or vibration. Messages show in the shade and on the
+ *   badge only; calls still show heads-up.
  * - [OFF]: nothing is posted.
  */
 enum class NotificationLevel(val label: String) {
@@ -41,7 +44,16 @@ enum class NotificationLevel(val label: String) {
          * ON / OFF: ON becomes [SOUND] (what it did) and OFF stays [OFF].
          */
         fun resolve(stored: String?, legacyEnabled: Boolean?): NotificationLevel =
-            entries.firstOrNull { it.name == stored } ?: if (legacyEnabled == false) OFF else DEFAULT
+            parse(stored) ?: if (legacyEnabled == false) OFF else DEFAULT
+
+        /**
+         * Resolves the stored Calls setting. Calls had no setting of their
+         * own before; they start at the Messages level they followed.
+         */
+        fun resolveCalls(stored: String?, messages: NotificationLevel): NotificationLevel =
+            parse(stored) ?: messages
+
+        private fun parse(name: String?): NotificationLevel? = entries.firstOrNull { it.name == name }
     }
 }
 
@@ -120,7 +132,9 @@ class PhotonPreferences(private val context: Context) {
     private val maxMessagesKey = intPreferencesKey("max_messages")
     private val maxDaysKey = intPreferencesKey("max_days")
     private val showThumbnailsKey = booleanPreferencesKey("show_thumbnails")
-    private val notificationLevelKey = stringPreferencesKey("notification_level")
+    // Messages keeps the key from when it was the one NOTIFICATIONS setting.
+    private val messageLevelKey = stringPreferencesKey("notification_level")
+    private val callLevelKey = stringPreferencesKey("call_level")
     private val scrollDialKey = stringPreferencesKey("scroll_dial")
     private val composeStyleKey = stringPreferencesKey("compose_style")
     private val keyboardStyleKey = stringPreferencesKey("keyboard_style")
@@ -133,8 +147,12 @@ class PhotonPreferences(private val context: Context) {
     val maxMessages: Flow<Int> = context.dataStore.data.map { it[maxMessagesKey] ?: 50 }
     val maxDays: Flow<Int> = context.dataStore.data.map { it[maxDaysKey] ?: 7 }
     val showThumbnails: Flow<Boolean> = context.dataStore.data.map { it[showThumbnailsKey] ?: true }
-    val notificationLevel: Flow<NotificationLevel> = context.dataStore.data.map {
-        NotificationLevel.resolve(it[notificationLevelKey], it[legacyNotificationsKey])
+    /** Settings › Chat › Messages: how message notifications alert. */
+    val messageLevel: Flow<NotificationLevel> = context.dataStore.data.map(::messageLevelOf)
+
+    /** Settings › Chat › Calls: how ringing, missed and group-call notifications alert. */
+    val callLevel: Flow<NotificationLevel> = context.dataStore.data.map {
+        NotificationLevel.resolveCalls(it[callLevelKey], messageLevelOf(it))
     }
     val scrollDial: Flow<ScrollDial> = context.dataStore.data.map {
         ScrollDial.resolve(it[scrollDialKey], it[legacyChatScrollSpeedKey], it[legacyMenuScrollSpeedKey])
@@ -154,12 +172,25 @@ class PhotonPreferences(private val context: Context) {
         context.dataStore.edit { it[showThumbnailsKey] = value }
     }
 
-    suspend fun setNotificationLevel(value: NotificationLevel) {
+    /**
+     * Calls start at the Messages level until they're set, so changing
+     * Messages first stores that starting level for Calls: it mustn't move
+     * with Messages from then on.
+     */
+    suspend fun setMessageLevel(value: NotificationLevel) {
         context.dataStore.edit {
-            it[notificationLevelKey] = value.name
+            if (it[callLevelKey] == null) it[callLevelKey] = messageLevelOf(it).name
+            it[messageLevelKey] = value.name
             it.remove(legacyNotificationsKey)
         }
     }
+
+    suspend fun setCallLevel(value: NotificationLevel) {
+        context.dataStore.edit { it[callLevelKey] = value.name }
+    }
+
+    private fun messageLevelOf(prefs: Preferences): NotificationLevel =
+        NotificationLevel.resolve(prefs[messageLevelKey], prefs[legacyNotificationsKey])
 
     suspend fun setScrollDial(value: ScrollDial) {
         context.dataStore.edit {
