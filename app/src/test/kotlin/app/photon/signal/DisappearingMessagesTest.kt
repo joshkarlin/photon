@@ -147,25 +147,13 @@ class DisappearingMessagesTest {
         assertEquals("Disappearing messages off", disappearingMessagesLine(0))
     }
 
+    /** The line words the timer as the chat header does: its largest whole unit. */
     @Test
-    fun durationsUseTheLargestWholeUnits() {
-        assertEquals("30 seconds", formatTimerDuration(30))
-        assertEquals("1 second", formatTimerDuration(1))
-        assertEquals("5 minutes", formatTimerDuration(300))
-        assertEquals("1 hour", formatTimerDuration(3_600))
-        assertEquals("8 hours", formatTimerDuration(8 * 3_600))
-        assertEquals("1 day", formatTimerDuration(day))
-        assertEquals("1 week", formatTimerDuration(week))
-        assertEquals("4 weeks", formatTimerDuration(4 * week))
-    }
-
-    /** A custom timer lists each part, largest first. */
-    @Test
-    fun customTimersListEachPart() {
-        assertEquals("1 day 12 hours", formatTimerDuration(day + 12 * 3_600))
-        assertEquals("1 minute 30 seconds", formatTimerDuration(90))
-        assertEquals("1 week 1 day 1 hour 1 minute 1 second", formatTimerDuration(week + day + 3_600 + 61))
-        assertEquals("0 seconds", formatTimerDuration(0))
+    fun theLineWordsTheTimerAsTheHeaderDoes() {
+        assertEquals("Disappearing messages · 1 day", disappearingMessagesLine(day))
+        assertEquals("Disappearing messages · 36 hours", disappearingMessagesLine(36 * 3_600))
+        assertEquals("Disappearing messages · 90 days", disappearingMessagesLine(90 * day))
+        assertEquals("Disappearing messages · 30 seconds", disappearingMessagesLine(30))
     }
 
     // ── The sweep's wait ──

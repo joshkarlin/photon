@@ -1,5 +1,7 @@
 package app.photon.signal
 
+import app.photon.data.model.formatTimerDuration
+
 // Disappearing messages: the rules for a chat's timer, as Signal-Android
 // applies them, and the line a change puts in the thread. Pure, so the
 // rules are tested on their own.
@@ -94,34 +96,12 @@ internal fun contactSyncTimerUpdate(stored: ChatTimer?, seconds: Int, version: I
     else -> null
 }
 
-/** The centred line a timer change puts in the thread: "Disappearing messages · 1 week". */
-fun disappearingMessagesLine(seconds: Int): String =
-    if (seconds <= 0) "Disappearing messages off" else "Disappearing messages · ${formatTimerDuration(seconds)}"
-
-private val TIMER_UNITS = listOf(
-    7 * 86_400 to "week",
-    86_400 to "day",
-    3_600 to "hour",
-    60 to "minute",
-    1 to "second",
-)
-
 /**
- * A timer as words: "1 week", "4 weeks", "8 hours", "30 seconds". A custom
- * timer that isn't a whole unit lists each part, largest first:
- * "1 day 12 hours". As Signal-Android's ExpirationUtil.
+ * The centred line a timer change puts in the thread: "Disappearing
+ * messages · 1 week", worded as the chat header words the timer.
  */
-fun formatTimerDuration(seconds: Int): String {
-    var left = seconds.coerceAtLeast(0)
-    val parts = buildList {
-        for ((size, unit) in TIMER_UNITS) {
-            val count = left / size
-            if (count > 0) add(if (count == 1) "1 $unit" else "$count ${unit}s")
-            left %= size
-        }
-    }
-    return parts.joinToString(" ").ifEmpty { "0 seconds" }
-}
+fun disappearingMessagesLine(seconds: Int): String =
+    if (seconds <= 0) "Disappearing messages off" else "Disappearing messages · ${formatTimerDuration(seconds.toLong())}"
 
 /** Longest the expiry sweep sleeps: it also catches clocks started while it slept. */
 internal const val MAX_EXPIRY_WAIT_MS = 5 * 60_000L
