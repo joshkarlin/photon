@@ -7,6 +7,7 @@ import app.photon.signal.SignalGroupV2Manager
 import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.applySignalVerificationSync
 import app.photon.signal.db.SignalMessageDatabase
+import app.photon.signal.db.getConversation
 import app.photon.signal.db.insertOwnRows
 import app.photon.signal.db.isMessageStored
 import app.photon.signal.db.markConversationRead
@@ -189,15 +190,15 @@ internal class SyncMessageHandler(
         // timer comes from its state, never from a message.
         val groupJid = groupJidOf(data)
         if (groupJid != null) {
-            if (rows.isNotEmpty() && !alreadyStored) {
+            if (rows.isEmpty()) return
+            if (!alreadyStored) {
                 messageDb.insertOwnRows(
                     messageId, rows, groupJid, myAci, timestamp / 1000, replyPrefix(data.quote),
                     expiresIn = expiresIn, expireStartMs = expireStart,
                 )
                 Log.d(TAG, "Stored sync sent message into group ${groupJid.take(12)}…")
             }
-            messageDb.markConversationRead(groupJid)
-            notifier.cancelConversation(groupJid)
+            readOnPrimaryUpTo(groupJid, timestamp)
             return
         }
 
@@ -205,7 +206,12 @@ internal class SyncMessageHandler(
             Log.w(TAG, "Sync sent message has no destination, skipping")
             return
         }
-        if ((rows.isNotEmpty() || data.isExpirationUpdate) && !alreadyStored) {
+        // Only a transcript that shows something says the user was in the
+        // chat: the primary also sends content-less ones on its own (a
+        // profile-key update after an unsealed message arrives, a group-call
+        // join, a poll vote, a pin), and those must not read anything.
+        if (rows.isEmpty() && !data.isExpirationUpdate) return
+        if (!alreadyStored) {
             // Capture destination phone and profile key so profile fetch can find names.
             sent.destinationE164?.let { messageDb.updateContactPhone(destinationAci, it) }
             val syncProfileKey = data.profileKey?.toByteArray()
@@ -226,13 +232,21 @@ internal class SyncMessageHandler(
                 expiresIn = expiresIn, expireStartMs = expireStart,
             )
         }
-        // A sent transcript means the user has seen this thread on the
-        // primary. Some primary/device combinations send sync.sent without
-        // the corresponding sync.read, so clear any stale local incoming
-        // unread state as a conservative fallback.
-        messageDb.markConversationRead(destinationAci)
-        notifier.cancelConversation(destinationAci)
+        readOnPrimaryUpTo(destinationAci, timestamp)
         Log.d(TAG, "Stored sync sent message to $destinationAci")
+    }
+
+    /**
+     * The user sent a message in [jid] from the primary at [sentAtMs]: they
+     * have seen the chat up to then. Some primary/device combinations send
+     * sync.sent without the matching sync.read, so incoming messages up to
+     * it are marked read (their clocks start), and the chat's notifications
+     * go once nothing unread is left. A message that arrived after it stays
+     * unread.
+     */
+    private fun readOnPrimaryUpTo(jid: String, sentAtMs: Long) {
+        messageDb.markConversationRead(jid, upToSeconds = sentAtMs / 1000)
+        if (messageDb.getConversation(jid)?.unreadCount == 0) notifier.cancelConversation(jid)
     }
 
     /** The user edited one of their messages on another device. */

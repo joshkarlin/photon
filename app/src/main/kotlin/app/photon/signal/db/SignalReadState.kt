@@ -59,63 +59,65 @@ fun SignalMessageDatabase.markConversationSeen(jid: String, nowMs: Long = System
 }
 
 /**
- * Mark all incoming messages in a conversation read and clear its unread
- * count. A primary-device sent transcript is evidence that the user has
- * seen that conversation, even when the corresponding sync.read arrives
- * late or is not delivered to this linked device.
+ * Mark the conversation's incoming messages read up to [upToSeconds]
+ * (inclusive; all of them by default), counting them off its unread count,
+ * and start their disappearing clocks. A sent transcript from the primary
+ * is evidence the user has seen the conversation up to the message they
+ * sent, even when the corresponding sync.read arrives late or never
+ * reaches this linked device; a message that arrived after it is still
+ * unread. (Signal-Android's send path marks the thread read and starts its
+ * timers.)
  *
  * Outgoing rows are intentionally untouched: their status is used for
  * delivery/read state and they are not part of the unread calculation.
+ * Returns how many incoming rows changed.
  */
-fun SignalMessageDatabase.markConversationRead(jid: String, nowMs: Long = System.currentTimeMillis()): Int {
+fun SignalMessageDatabase.markConversationRead(
+    jid: String,
+    upToSeconds: Long = Long.MAX_VALUE,
+    nowMs: Long = System.currentTimeMillis(),
+): Int {
     val db = writableDatabase
+    val upTo = upToSeconds.toString()
     var incomingChanged = 0
-    var unreadCount = 0
+    var unreadMarked = 0
     var started = 0
 
     db.beginTransaction()
     try {
         db.rawQuery(
-            "SELECT unread_count FROM conversations WHERE jid = ?",
-            arrayOf(jid),
+            "SELECT COUNT(*), TOTAL(status = ?) FROM messages " +
+                "WHERE conversation_jid = ? AND is_from_me = 0 AND status IN (?, ?) AND timestamp <= ?",
+            arrayOf(STATUS_UNREAD, jid, STATUS_UNREAD, STATUS_SEEN, upTo),
         ).use { cursor ->
-            if (cursor.moveToFirst()) unreadCount = cursor.getInt(0)
-        }
-        db.rawQuery(
-            """
-            SELECT COUNT(*)
-              FROM messages
-             WHERE conversation_jid = ?
-               AND is_from_me = 0
-               AND status IN (?, ?)
-            """.trimIndent(),
-            arrayOf(jid, STATUS_UNREAD, STATUS_SEEN),
-        ).use { cursor ->
-            if (cursor.moveToFirst()) incomingChanged = cursor.getInt(0)
+            if (cursor.moveToFirst()) {
+                incomingChanged = cursor.getInt(0)
+                unreadMarked = cursor.getInt(1)
+            }
         }
         if (incomingChanged > 0) {
             db.execSQL(
-                """
-                UPDATE messages
-                   SET status = ?
-                 WHERE conversation_jid = ?
-                   AND is_from_me = 0
-                   AND status IN (?, ?)
-                """.trimIndent(),
-                arrayOf(STATUS_READ, jid, STATUS_UNREAD, STATUS_SEEN),
+                "UPDATE messages SET status = ? " +
+                    "WHERE conversation_jid = ? AND is_from_me = 0 AND status IN (?, ?) AND timestamp <= ?",
+                arrayOf(STATUS_READ, jid, STATUS_UNREAD, STATUS_SEEN, upTo),
             )
         }
-        db.execSQL(
-            "UPDATE conversations SET unread_count = 0 WHERE jid = ?",
-            arrayOf(jid),
-        )
-        started = startIncomingClocks(db, nowMs, "conversation_jid = ?", jid)
+        val stillUnread = db.rawQuery(
+            "SELECT 1 FROM messages WHERE conversation_jid = ? AND is_from_me = 0 AND status = ? LIMIT 1",
+            arrayOf(jid, STATUS_UNREAD),
+        ).use { it.moveToFirst() }
+        if (stillUnread) {
+            decrementUnread(db, mapOf(jid to unreadMarked))
+        } else {
+            db.execSQL("UPDATE conversations SET unread_count = 0 WHERE jid = ? AND unread_count != 0", arrayOf(jid))
+        }
+        started = startIncomingClocks(db, nowMs, "conversation_jid = ? AND timestamp <= ?", jid, upTo)
         db.setTransactionSuccessful()
     } finally {
         db.endTransaction()
     }
 
-    if (incomingChanged > 0 || unreadCount > 0) notifyChanged()
+    notifyChanged()
     if (started > 0) notifyExpiryScheduled()
     return incomingChanged
 }
