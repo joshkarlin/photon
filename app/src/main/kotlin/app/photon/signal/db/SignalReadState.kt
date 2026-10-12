@@ -2,7 +2,9 @@ package app.photon.signal.db
 
 import android.content.ContentValues
 import app.photon.data.db.toMessage
+import app.photon.data.model.ContentTypes
 import app.photon.data.model.Message
+import app.photon.signal.MessageKeys
 import app.photon.signal.db.SignalMessageDatabase.Companion.CONTENT_CALL
 import app.photon.signal.db.SignalMessageDatabase.Companion.STATUS_DELETED
 import app.photon.signal.db.SignalMessageDatabase.Companion.STATUS_READ
@@ -20,9 +22,10 @@ import app.photon.signal.db.SignalMessageDatabase.RemoteDeleteChange
  * so a message inserted concurrently is either counted and marked seen,
  * or arrives afterwards and stays unread.
  */
-fun SignalMessageDatabase.markConversationSeen(jid: String) {
+fun SignalMessageDatabase.markConversationSeen(jid: String, nowMs: Long = System.currentTimeMillis()) {
     val db = writableDatabase
     var changed = 0
+    var started = 0
     db.beginTransaction()
     try {
         changed += db.update(
@@ -43,6 +46,8 @@ fun SignalMessageDatabase.markConversationSeen(jid: String) {
             "jid = ? AND unread_count != 0",
             arrayOf(jid),
         )
+        // Seen here: disappearing messages start counting down.
+        started = startIncomingClocks(db, nowMs, "conversation_jid = ?", jid)
         db.setTransactionSuccessful()
     } finally {
         db.endTransaction()
@@ -50,6 +55,7 @@ fun SignalMessageDatabase.markConversationSeen(jid: String) {
     // Only emit when something changed: this runs on every chat-screen
     // load, and an unconditional emission just causes a requery.
     if (changed > 0) notifyChanged()
+    if (started > 0) notifyExpiryScheduled()
 }
 
 /**
@@ -61,10 +67,11 @@ fun SignalMessageDatabase.markConversationSeen(jid: String) {
  * Outgoing rows are intentionally untouched: their status is used for
  * delivery/read state and they are not part of the unread calculation.
  */
-fun SignalMessageDatabase.markConversationRead(jid: String): Int {
+fun SignalMessageDatabase.markConversationRead(jid: String, nowMs: Long = System.currentTimeMillis()): Int {
     val db = writableDatabase
     var incomingChanged = 0
     var unreadCount = 0
+    var started = 0
 
     db.beginTransaction()
     try {
@@ -102,12 +109,14 @@ fun SignalMessageDatabase.markConversationRead(jid: String): Int {
             "UPDATE conversations SET unread_count = 0 WHERE jid = ?",
             arrayOf(jid),
         )
+        started = startIncomingClocks(db, nowMs, "conversation_jid = ?", jid)
         db.setTransactionSuccessful()
     } finally {
         db.endTransaction()
     }
 
     if (incomingChanged > 0 || unreadCount > 0) notifyChanged()
+    if (started > 0) notifyExpiryScheduled()
     return incomingChanged
 }
 
@@ -122,8 +131,8 @@ fun SignalMessageDatabase.markConversationRead(jid: String): Int {
 fun SignalMessageDatabase.getUnsyncedIncomingReads(jid: String): List<String> {
     readableDatabase.rawQuery(
         "SELECT id FROM messages WHERE conversation_jid = ? AND is_from_me = 0 " +
-            "AND status = ? AND content_type != ?",
-        arrayOf(jid, STATUS_SEEN, CONTENT_CALL),
+            "AND status = ? AND content_type NOT IN (?, ?)",
+        arrayOf(jid, STATUS_SEEN, CONTENT_CALL, ContentTypes.SYSTEM),
     ).use { c ->
         val ids = mutableListOf<String>()
         while (c.moveToNext()) ids.add(c.getString(0))
@@ -149,8 +158,9 @@ fun SignalMessageDatabase.markMessagesRead(ids: List<String>) {
  * prefix. Incoming remote-deletes only know author + timestamp, not the
  * "_{rand}" suffix on the stored id, so an exact-id match never hit. Blanks
  * the body/media so the shared UI renders it as "[ deleted ]", matching the
- * WhatsApp revoke behaviour. Returns a change for each conversation that
- * lost an unread message.
+ * WhatsApp revoke behaviour. A message stored as several rows (one per
+ * attachment) leaves one placeholder: its later rows go. Returns a change
+ * for each conversation that lost an unread message.
  */
 fun SignalMessageDatabase.markDeletedByPrefix(prefix: String): List<RemoteDeleteChange> {
     val lowerBound = "${prefix}_"
@@ -173,12 +183,16 @@ fun SignalMessageDatabase.markDeletedByPrefix(prefix: String): List<RemoteDelete
                 newestRemoved[c.getString(0)] = c.getLong(2)
             }
         }
+        val parts = db.rawQuery("SELECT id, conversation_jid FROM messages WHERE id >= ? AND id < ?", arrayOf(lowerBound, upperBound))
+            .use { c -> buildList { while (c.moveToNext()) add(c.getString(0) to c.getString(1)) } }
+        parts.filter { MessageKeys.isExtraPart(it.first) }.forEach { db.execSQL("DELETE FROM messages WHERE id = ?", arrayOf(it.first)) }
         db.execSQL(
-            "UPDATE messages SET text_body = '', content_type = 'text', media_url = NULL, status = ? " +
+            "UPDATE messages SET text_body = '', content_type = 'text', media_url = NULL, raw_proto = NULL, status = ? " +
                 "WHERE id >= ? AND id < ?",
             arrayOf(STATUS_DELETED, lowerBound, upperBound),
         )
         db.execSQL("DELETE FROM reactions WHERE message_id = ?", arrayOf(prefix))
+        parts.map { it.second }.distinct().forEach { repairLastMessageId(db, it) }
         decrementUnread(db, unreadRemoved)
         changes = unreadRemoved.keys.map { jid ->
             val newer = db.rawQuery(
@@ -218,12 +232,16 @@ fun SignalMessageDatabase.newestUnreadMessage(conversationJid: String): Message?
  * was cleared when the chat was opened, so subtracting them again would
  * eat the count (and cancel the notification) of newer messages.
  */
-fun SignalMessageDatabase.markIncomingReadByPrefix(prefix: String): ReadSyncResult {
+fun SignalMessageDatabase.markIncomingReadByPrefix(
+    prefix: String,
+    nowMs: Long = System.currentTimeMillis(),
+): ReadSyncResult {
     val lowerBound = "${prefix}_"
     val upperBound = "${prefix}_\uFFFF"
     val unreadByConversation = linkedMapOf<String, Int>()
     var matched = false
     var changed = 0
+    var started = 0
     val cleared: List<String>
     val db = writableDatabase
 
@@ -256,11 +274,14 @@ fun SignalMessageDatabase.markIncomingReadByPrefix(prefix: String): ReadSyncResu
             )
         }
         cleared = decrementUnread(db, unreadByConversation)
+        // Read on another device: disappearing messages start counting down.
+        started = startIncomingClocks(db, nowMs, "id >= ? AND id < ?", lowerBound, upperBound)
         db.setTransactionSuccessful()
     } finally {
         db.endTransaction()
     }
 
     if (changed > 0) notifyChanged()
+    if (started > 0) notifyExpiryScheduled()
     return ReadSyncResult(matched, cleared)
 }

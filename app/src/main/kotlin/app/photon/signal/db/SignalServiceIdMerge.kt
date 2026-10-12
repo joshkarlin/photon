@@ -64,6 +64,11 @@ fun SignalMessageDatabase.mergeServiceId(from: String, to: String): Boolean {
         db.execSQL("DELETE FROM reactions WHERE message_id >= ? AND message_id < ?", rangeOf(from))
         db.execSQL("UPDATE OR IGNORE reactions SET sender_jid = ? WHERE sender_jid = ?", arrayOf(to, from))
         db.execSQL("DELETE FROM reactions WHERE sender_jid = ?", arrayOf(from))
+        // Edit aliases: both the edit's key and the row it points at.
+        rekeyPrefixed(db, "message_aliases", "alias", from, to, orIgnore = true)
+        db.execSQL("DELETE FROM message_aliases WHERE alias >= ? AND alias < ?", rangeOf(from))
+        rekeyPrefixed(db, "message_aliases", "target_id", from, to)
+        db.execSQL("DELETE FROM message_aliases WHERE target_id NOT IN (SELECT id FROM messages)")
         db.execSQL("UPDATE OR IGNORE participants SET jid = ? WHERE jid = ?", arrayOf(to, from))
         db.execSQL("DELETE FROM participants WHERE jid = ?", arrayOf(from))
         mergeConversationRows(db, from, to)
@@ -140,10 +145,16 @@ private fun SignalMessageDatabase.rekeyMessages(db: SQLiteDatabase, from: String
     }
     val droppedUnread = mutableMapOf<String, Int>()
     val lostRows = mutableSetOf<String>()
+    // Messages moved by this merge: a message stored as several rows (one
+    // per attachment) moves whole, so its later rows aren't duplicates of
+    // its first.
+    val moved = mutableSetOf<String>()
     for (row in rows) {
         val isCallRow = row.id.startsWith("call_$from")
         val newId = if (isCallRow) "call_$to" + row.id.substring("call_$from".length) else to + row.id.substring(from.length)
-        val duplicate = if (isCallRow) rowExists(db, newId) else prefixExists(db, MessageKeys.prefixOf(newId))
+        val newPrefix = MessageKeys.prefixOf(newId)
+        val duplicate = if (isCallRow) rowExists(db, newId) else newPrefix !in moved && prefixExists(db, newPrefix)
+        if (!isCallRow && !duplicate) moved += newPrefix
         if (duplicate) {
             db.execSQL("DELETE FROM messages WHERE id = ?", arrayOf(row.id))
             lostRows += row.conversationJid

@@ -4,11 +4,16 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
 import app.photon.data.model.MessageStatus
+import app.photon.signal.ChatTimer
+import okio.ByteString.Companion.toByteString
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.whispersystems.signalservice.internal.push.AttachmentPointer
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
 /** Upgrades in place, on databases holding real data. */
@@ -124,7 +129,7 @@ class SignalMessageDatabaseUpgradeTest {
 
         val db = SignalMessageDatabase(context)
         try {
-            assertEquals(6, db.readableDatabase.version)
+            assertEquals(7, db.readableDatabase.version)
             val dm = db.getConversation("aci-dm")
             assertEquals(false, dm?.isMuted)
             assertEquals(2, dm?.unreadCount)
@@ -139,4 +144,104 @@ class SignalMessageDatabaseUpgradeTest {
             db.close()
         }
     }
+
+    /** The v6 storage tables, as v6 created them. */
+    private fun createV6StorageTables(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE conversations ADD COLUMN muted_until INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("CREATE TABLE storage_records (storage_id TEXT PRIMARY KEY, jid TEXT, muted_until INTEGER NOT NULL DEFAULT 0)")
+        db.execSQL("CREATE INDEX idx_storage_records_jid ON storage_records(jid)")
+        db.execSQL("CREATE TABLE storage_manifest (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL)")
+    }
+
+    private fun pointer(fileName: String?) =
+        AttachmentPointer(cdnKey = "k", contentType = "application/pdf", key = ByteArray(64).toByteString(), fileName = fileName).encode()
+
+    /**
+     * v6 → v7, in place on real data: received documents get their names
+     * from their stored pointers (a caption stays), every chat starts with
+     * no timer and unarchived, mutes stay, and the storage service is read
+     * again in full so archive state arrives.
+     */
+    @Test
+    fun upgradeNamesDocumentsAndRereadsStorageKeepingEverythingElse() {
+        context.openOrCreateDatabase(SignalMessageDatabase.DATABASE_NAME, Context.MODE_PRIVATE, null).use { v6 ->
+            createOldSchema(v6)
+            createV6StorageTables(v6)
+            v6.execSQL(
+                "INSERT INTO conversations (jid, name, is_group, unread_count, muted_until, master_key, group_revision) VALUES " +
+                    "('aci-dm', NULL, 0, 1, -1, NULL, 0), ('grp', 'Climbing', 1, 0, 0, randomblob(32), 5)",
+            )
+            val insert = "INSERT INTO messages (id, conversation_jid, sender_jid, timestamp, content_type, text_body, is_from_me, status, raw_proto) " +
+                "VALUES (?, 'aci-dm', 'aci-dm', 1, ?, ?, 0, 'received', ?)"
+            v6.execSQL(insert, arrayOf<Any?>("aci-dm_1_a", "document", null, pointer("Minutes.pdf")))
+            v6.execSQL(insert, arrayOf<Any?>("aci-dm_2_b", "document", "see attached", pointer("Plan.pdf")))
+            v6.execSQL(insert, arrayOf<Any?>("aci-dm_3_c", "document", null, pointer(null)))
+            v6.execSQL(insert, arrayOf<Any?>("aci-dm_4_d", "document", "", byteArrayOf(1, 2, 3)))
+            v6.execSQL(insert, arrayOf<Any?>("aci-dm_5_e", "image", null, pointer("photo.pdf")))
+            v6.execSQL("INSERT INTO storage_records (storage_id, jid, muted_until) VALUES ('s1', 'aci-dm', -1)")
+            v6.execSQL("INSERT INTO storage_manifest (id, version) VALUES (1, 12)")
+            v6.version = 6
+        }
+
+        val db = SignalMessageDatabase(context)
+        try {
+            assertEquals(7, db.readableDatabase.version)
+            assertEquals("Minutes.pdf", db.getMessage("aci-dm_1_a")?.textBody)
+            assertEquals("see attached", db.getMessage("aci-dm_2_b")?.textBody)
+            assertNull(db.getMessage("aci-dm_3_c")?.textBody)
+            // An unreadable pointer is left alone.
+            assertEquals("", db.getMessage("aci-dm_4_d")?.textBody)
+            assertNull(db.getMessage("aci-dm_5_e")?.textBody)
+
+            val dm = db.getConversation("aci-dm")
+            assertEquals(true, dm?.isMuted)
+            assertEquals(false, dm?.isArchived)
+            assertEquals(0, dm?.disappearingSeconds)
+            assertEquals(1, dm?.unreadCount)
+            assertEquals(ChatTimer.DEFAULT, db.chatTimer("aci-dm"))
+            assertEquals(MessageStatus.UNREAD, db.getMessage("aci-dm_1_a")?.status)
+
+            // Every group's state (and so its timer) is fetched once.
+            assertFalse(db.groupTimerKnown("grp"))
+            assertEquals(listOf("grp"), db.getGroupsNeedingMetadataRefresh().map { it.first })
+
+            // Storage is read again from scratch.
+            assertNull(db.storageManifestVersion())
+            assertEquals(emptySet(), db.storageRecordIds())
+
+            // The new tables and columns work.
+            db.markConversationSeen("aci-dm")
+            assertNull(db.nextExpiry())
+            assertNotNull(db.applyEdit("aci-dm_2", "aci-dm_9", "aci-dm", "see attached, v2"))
+            assertEquals("aci-dm_2", db.resolveMessagePrefix("aci-dm_9"))
+            db.updateTimerFromContactSync("aci-dm", 60, 2)
+        } finally {
+            db.close()
+        }
+    }
+
+    /** A fresh install has everything an upgraded one has. */
+    @Test
+    fun aFreshDatabaseMatchesAnUpgradedOne() {
+        val fresh = SignalMessageDatabase(context)
+        val freshColumns = try {
+            listOf("conversations", "messages", "contacts", "storage_records", "message_aliases").associateWith { columns(fresh.readableDatabase, it) }
+        } finally {
+            fresh.close()
+        }
+        context.deleteDatabase(SignalMessageDatabase.DATABASE_NAME)
+        context.openOrCreateDatabase(SignalMessageDatabase.DATABASE_NAME, Context.MODE_PRIVATE, null).use { v5 ->
+            createOldSchema(v5)
+            v5.version = 5
+        }
+        val upgraded = SignalMessageDatabase(context)
+        try {
+            for ((table, cols) in freshColumns) assertEquals(cols, columns(upgraded.readableDatabase, table), table)
+        } finally {
+            upgraded.close()
+        }
+    }
+
+    private fun columns(db: SQLiteDatabase, table: String): Set<String> =
+        db.rawQuery("PRAGMA table_info($table)", null).use { c -> buildSet { while (c.moveToNext()) add(c.getString(1)) } }
 }
