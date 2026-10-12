@@ -78,8 +78,9 @@ fun SignalMessageDatabase.applyEdit(
             body.isNullOrBlank() -> return null
             else -> {
                 // Documents only: the new text gets a row of its own, read or
-                // not as the message is.
-                val id = MessageKeys.partId(first.id, rows.size)
+                // not as the message is, after the last part (a part deleted
+                // on its own leaves a gap in the numbers).
+                val id = MessageKeys.partId(MessageKeys.firstPartId(first.id), rows.maxOf { MessageKeys.partNumber(it.id) })
                 db.execSQL(
                     "INSERT INTO messages (id, conversation_jid, sender_jid, timestamp, content_type, text_body, " +
                         "edit_version, is_from_me, status, expires_in, expires_at) " +

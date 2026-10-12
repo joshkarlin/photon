@@ -123,6 +123,10 @@ class IncomingRowsTest {
         assertEquals("aci_1700000000123", MessageKeys.prefixOf(MessageKeys.partId(id, 2)))
         assertTrue(MessageKeys.isExtraPart("$id.3"))
         assertFalse(MessageKeys.isExtraPart(id))
+        assertEquals(1, MessageKeys.partNumber(id))
+        assertEquals(12, MessageKeys.partNumber("$id.12"))
+        assertEquals(id, MessageKeys.firstPartId("$id.12"))
+        assertEquals(id, MessageKeys.firstPartId(id))
         assertEquals(("aci" to 1_700_000_000_123L), MessageKeys.parse("$id.2"))
     }
 }

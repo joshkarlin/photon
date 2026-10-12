@@ -4,10 +4,12 @@ import app.photon.data.model.ContentTypes
 import app.photon.data.model.Message
 import app.photon.service.messageNotificationText
 import app.photon.service.notificationPreview
+import app.photon.signal.MessageKeys
 import app.photon.signal.SignalNames
 import app.photon.signal.db.SignalMessageDatabase
 import app.photon.signal.db.SignalMessageDatabase.RemoteDeleteChange
 import app.photon.signal.db.getConversation
+import app.photon.signal.db.getMessage
 import app.photon.signal.db.isConversationMuted
 import app.photon.signal.db.newestUnreadMessage
 
@@ -81,14 +83,17 @@ internal class MessageNotifications(
     }
 
     /**
-     * An unread message was edited: when it's the newest unread one, the
-     * notification showing it is corrected, without alerting again.
+     * An unread message was edited: when it's the newest unread one (any of
+     * its rows, for a message stored as several), the notification showing
+     * it is corrected to the edited text, without alerting again.
      */
     fun afterEdit(conversationJid: String, editedRowId: String) {
         val newest = messageDb.newestUnreadMessage(conversationJid) ?: return
-        if (newest.id != editedRowId || !notifier.isShowingMessage(conversationJid)) return
+        if (MessageKeys.prefixOf(newest.id) != MessageKeys.prefixOf(editedRowId)) return
+        if (!notifier.isShowingMessage(conversationJid)) return
+        val edited = messageDb.getMessage(editedRowId) ?: return
         val isGroup = messageDb.getConversation(conversationJid)?.isGroup == true
-        showMessage(conversationJid, isGroup, newest.senderJid, newest.textBody, newest.contentType, update = true)
+        showMessage(conversationJid, isGroup, edited.senderJid, edited.textBody, edited.contentType, update = true)
     }
 
     /**

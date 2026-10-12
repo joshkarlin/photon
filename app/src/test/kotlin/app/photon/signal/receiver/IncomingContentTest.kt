@@ -4,6 +4,7 @@ import app.photon.data.model.ContentTypes
 import app.photon.data.model.MessageStatus
 import app.photon.signal.MessageKeys
 import app.photon.signal.SignalGroupV2Manager
+import app.photon.signal.db.deleteMessage
 import app.photon.signal.db.getConversation
 import app.photon.signal.db.getMessageRawProto
 import app.photon.signal.db.getMessages
@@ -288,6 +289,38 @@ class IncomingContentTest {
         edit(ts, "typo")
 
         assertEquals("update:$alice:Signal contact:typo", fx.notifier.events.last())
+    }
+
+    /** The caption of a several-photo message was edited while unread: the notification shows the new caption. */
+    @Test
+    fun aCaptionEditCorrectsTheNotificationOfASeveralPartMessage() {
+        val ts = receive(DataMessage(timestamp = ++now, body = "beech", attachments = listOf(pointer("image/jpeg"), pointer("image/jpeg"))))
+        fx.notifier.showing += alice
+
+        edit(ts, "beach")
+
+        assertEquals("update:$alice:Signal contact:beach", fx.notifier.events.last())
+    }
+
+    /**
+     * A documents-only message edited to say something gets a text row after
+     * its last part, even when a part in the middle was deleted on its own.
+     */
+    @Test
+    fun anEditAfterAPartWasDeletedTakesTheNextFreePart() {
+        val ts = receive(
+            DataMessage(
+                timestamp = ++now,
+                attachments = listOf(pointer("application/pdf", "a.pdf"), pointer("application/pdf", "b.pdf"), pointer("application/pdf", "c.pdf")),
+            ),
+        )
+        val first = thread().first().id
+        fx.db.deleteMessage("$first.2")
+
+        edit(ts, "three docs")
+
+        assertEquals(listOf(first, "$first.3", "$first.4"), thread().map { it.id })
+        assertEquals(listOf("a.pdf", "c.pdf", "three docs"), thread().map { it.textBody })
     }
 
     @Test

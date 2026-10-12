@@ -28,6 +28,14 @@ object MessageKeys {
     /** Whether [messageId] is a later row of a message stored as several ([partId]). */
     fun isExtraPart(messageId: String): Boolean = messageId.substringAfterLast("_").contains('.')
 
+    /** Which row of its message [messageId] is: 1 for the first, 2 for ".2", and so on. */
+    fun partNumber(messageId: String): Int =
+        if (isExtraPart(messageId)) messageId.substringAfterLast('.').toIntOrNull() ?: 1 else 1
+
+    /** The id of the first row of [messageId]'s message (which may itself be gone). */
+    fun firstPartId(messageId: String): String =
+        if (isExtraPart(messageId)) messageId.substringBeforeLast('.') else messageId
+
     /** `(authorAci, timestampMs)` parsed from a message id, or null if malformed. */
     fun parse(messageId: String): Pair<String, Long>? {
         val prefix = prefixOf(messageId)
