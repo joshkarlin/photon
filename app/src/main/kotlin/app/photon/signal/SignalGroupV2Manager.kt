@@ -76,6 +76,22 @@ class SignalGroupV2Manager(
         /** Base64-URL-safe encoding of the group id — matches receiver's existing jid format. */
         fun jidFromMasterKey(masterKey: ByteArray): String =
             Base64.encodeToString(groupIdFromMasterKey(masterKey), Base64.NO_WRAP or Base64.URL_SAFE)
+
+        /**
+         * Extract the member ACIs from a decrypted group. The aciBytes field
+         * is libsignal's binary ServiceId format; ServiceId.parseOrNull does
+         * the right thing across PNI/ACI prefixes.
+         */
+        fun memberAcis(group: DecryptedGroup): List<ServiceId.ACI> {
+            return group.members.mapNotNull { m ->
+                val bytes = m.aciBytes.toByteArray()
+                try {
+                    ServiceId.parseOrNull(bytes) as? ServiceId.ACI
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }
     }
 
     private val clientZk: ClientZkOperations = ClientZkOperations.create(config)
@@ -110,21 +126,8 @@ class SignalGroupV2Manager(
         }
     }
 
-    /**
-     * Extract the member ACIs from a decrypted group. The aciBytes field
-     * is libsignal's binary ServiceId format; ServiceId.parseOrNull does
-     * the right thing across PNI/ACI prefixes.
-     */
-    fun memberAcis(group: DecryptedGroup): List<ServiceId.ACI> {
-        return group.members.mapNotNull { m ->
-            val bytes = m.aciBytes.toByteArray()
-            try {
-                ServiceId.parseOrNull(bytes) as? ServiceId.ACI
-            } catch (_: Exception) {
-                null
-            }
-        }
-    }
+    /** The member ACIs of a decrypted group; see [Companion.memberAcis]. */
+    fun memberAcis(group: DecryptedGroup): List<ServiceId.ACI> = Companion.memberAcis(group)
 
     private fun getOrFetchCredentials(daySeconds: Long): AuthCredentialWithPniResponse? {
         credentialsByDay[daySeconds]?.let { return it }

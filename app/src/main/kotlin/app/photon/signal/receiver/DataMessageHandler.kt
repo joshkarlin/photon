@@ -11,8 +11,10 @@ import app.photon.signal.db.insertIncomingRows
 import app.photon.signal.db.isMessageStored
 import app.photon.signal.db.updateContactPhone
 import app.photon.signal.db.updateContactProfileKey
+import app.photon.signal.db.updateDmTimer
 import app.photon.signal.db.upsertConversation
 import app.photon.signal.db.upsertParticipant
+import app.photon.signal.incomingTimerUpdate
 import app.photon.signal.notificationContent
 import app.photon.signal.plannedRows
 import app.photon.signal.replyPrefix
@@ -24,9 +26,13 @@ import org.whispersystems.signalservice.internal.push.DataMessage
 
 private const val TAG = SignalMessageReceiver.TAG
 
+/** Whether a DataMessage is an explicit disappearing-messages timer change. */
+internal val DataMessage.isExpirationUpdate: Boolean
+    get() = (flags ?: 0) and DataMessage.Flags.EXPIRATION_TIMER_UPDATE.value != 0
+
 /**
  * Incoming DataMessages: text, media, contacts, polls, view-once media,
- * reactions, deletes and group-call announcements.
+ * timer changes, reactions, deletes and group-call announcements.
  */
 internal class DataMessageHandler(
     private val messageDb: SignalMessageDatabase,
@@ -60,7 +66,7 @@ internal class DataMessageHandler(
      * messages have no body (sender-key distribution prelude, group state
      * changes, typing indicators with no payload, etc.) but DO carry
      * `groupV2.masterKey`, the only material needed to fetch the group's
-     * name and members. Bailing out without storing it leaves the
+     * name, members and timer. Bailing out without storing it leaves the
      * group permanently unnamed and unable to receive outgoing sends.
      */
     private fun conversationOf(data: DataMessage, metadata: EnvelopeMetadata, senderAci: String): Pair<String, Boolean> {
@@ -133,14 +139,17 @@ internal class DataMessageHandler(
         }
 
         // Everything else that shows: one row per attachment, contact, poll
-        // or body (plannedRows).
+        // or body (plannedRows), or an explicit timer change, which shows as
+        // its line.
         val rows = plannedRows(data)
-        if (rows.isEmpty()) {
+        val timerChange = data.isExpirationUpdate
+        if (rows.isEmpty() && !timerChange) {
             // No displayable content (could be key update, profile key, etc.)
             return
         }
-        // A redelivery changes nothing.
-        if (messageDb.isMessageStored(messagePrefix)) {
+        // A redelivery changes nothing, not even the timer: an old message
+        // without a timer version would otherwise set an old timer again.
+        if (rows.isNotEmpty() && messageDb.isMessageStored(messagePrefix)) {
             Log.d(TAG, "Skipping duplicate incoming message $messagePrefix")
             return
         }
@@ -153,6 +162,19 @@ internal class DataMessageHandler(
             // Names are resolved when read (SignalNames), not stored.
             messageDb.upsertConversation(jid = conversationJid, name = null, isGroup = false)
         }
+
+        // Each message carries its chat's disappearing-messages timer. In a
+        // 1:1 chat it can change the chat's timer (by Signal-Android's
+        // version rule); a group's timer comes only from the group's state,
+        // as Signal-Android ignores the timer on group messages. Either way
+        // the message itself disappears after its own timer, once read.
+        val expiresIn = (data.expireTimer ?: 0).coerceAtLeast(0)
+        if (!isGroup) {
+            messageDb.updateDmTimer(conversationJid, lineTimestamp = timestamp / 1000) { stored ->
+                incomingTimerUpdate(stored, expiresIn, data.expireTimerVersion)
+            }
+        }
+        if (rows.isEmpty()) return
 
         // A read sync from another device may have beaten this message here
         // (e.g. it was resent after a decrypt failure). Then it's already
@@ -169,6 +191,7 @@ internal class DataMessageHandler(
             senderJid = senderAci,
             timestamp = timestamp / 1000,
             replyToId = replyPrefix(data.quote),
+            expiresIn = expiresIn,
             alreadyRead = readElsewhere,
         )
         if (!inserted) {

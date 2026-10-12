@@ -14,12 +14,14 @@ import app.photon.signal.db.markIncomingReadByPrefix
 import app.photon.signal.db.resolveMessagePrefix
 import app.photon.signal.db.updateContactPhone
 import app.photon.signal.db.updateContactProfileKey
+import app.photon.signal.db.updateDmTimer
 import app.photon.signal.db.upsertConversation
 import app.photon.signal.plannedRows
 import app.photon.signal.replyPrefix
 import app.photon.signal.serviceIdString
 import app.photon.signal.storage.StorageMuteSync
 import app.photon.signal.store.PhotonIdentityKeyStore
+import app.photon.signal.syncedTimerUpdate
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -144,7 +146,8 @@ internal class SyncMessageHandler(
      * A message the user sent from another device (a sent transcript):
      * stored as their own, in the group or DM it went to, row by row as an
      * incoming one is (plannedRows). Reactions and deletes apply to their
-     * target instead.
+     * target instead. In a DM the transcript's timer can move the chat's,
+     * by Signal-Android's sent-transcript rule.
      */
     private fun processSent(sent: SyncMessage.Sent) {
         val myAci = credentials.aciString ?: return
@@ -167,16 +170,24 @@ internal class SyncMessageHandler(
         val messageId = "${messagePrefix}_${UUID.randomUUID().toString().take(8)}"
         val alreadyStored = messageDb.isMessageStored(messagePrefix)
         val rows = plannedRows(data)
+        val expiresIn = (data.expireTimer ?: 0).coerceAtLeast(0)
+        // When the user's device started its clock; the library sets it on
+        // every transcript of a message with a timer.
+        val expireStart = sent.expirationStartTimestamp ?: timestamp
 
         // Group case: route into the group conversation regardless of
         // destinationServiceId (which is unset for group sends from the
         // primary, and the existing handler used to drop them silently —
         // that was the root cause of groups appearing missing for users
-        // who only sent into them rather than received from them).
+        // who only sent into them rather than received from them). A group's
+        // timer comes from its state, never from a message.
         val groupJid = groupJidOf(data)
         if (groupJid != null) {
             if (rows.isNotEmpty() && !alreadyStored) {
-                messageDb.insertOwnRows(messageId, rows, groupJid, myAci, timestamp / 1000, replyPrefix(data.quote))
+                messageDb.insertOwnRows(
+                    messageId, rows, groupJid, myAci, timestamp / 1000, replyPrefix(data.quote),
+                    expiresIn = expiresIn, expireStartMs = expireStart,
+                )
                 Log.d(TAG, "Stored sync sent message into group ${groupJid.take(12)}…")
             }
             messageDb.markConversationRead(groupJid)
@@ -188,7 +199,7 @@ internal class SyncMessageHandler(
             Log.w(TAG, "Sync sent message has no destination, skipping")
             return
         }
-        if (rows.isNotEmpty() && !alreadyStored) {
+        if ((rows.isNotEmpty() || data.isExpirationUpdate) && !alreadyStored) {
             // Capture destination phone and profile key so profile fetch can find names.
             sent.destinationE164?.let { messageDb.updateContactPhone(destinationAci, it) }
             val syncProfileKey = data.profileKey?.toByteArray()
@@ -201,7 +212,13 @@ internal class SyncMessageHandler(
             // works even when the transcript carries no E.164.
             messageDb.upsertConversation(jid = destinationAci, name = null, isGroup = false)
             if (destinationAci != myAci) contactNames.maybeFetchProfile(destinationAci)
-            messageDb.insertOwnRows(messageId, rows, destinationAci, myAci, timestamp / 1000, replyPrefix(data.quote))
+            messageDb.updateDmTimer(destinationAci, lineTimestamp = timestamp / 1000) { stored ->
+                syncedTimerUpdate(stored, expiresIn, data.expireTimerVersion)
+            }
+            messageDb.insertOwnRows(
+                messageId, rows, destinationAci, myAci, timestamp / 1000, replyPrefix(data.quote),
+                expiresIn = expiresIn, expireStartMs = expireStart,
+            )
         }
         // A sent transcript means the user has seen this thread on the
         // primary. Some primary/device combinations send sync.sent without
