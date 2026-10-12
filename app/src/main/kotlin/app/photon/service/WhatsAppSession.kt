@@ -1,5 +1,7 @@
 package app.photon.service
 
+import android.app.Notification
+import android.app.NotificationManager
 import android.content.Context
 import android.util.Log
 import app.photon.chat.ChatBackend
@@ -214,13 +216,7 @@ class WhatsAppSession internal constructor(
                 // placeholder, it now shows the message, without alerting.
                 if (evt.boolean("newest_unread") != true || evt.boolean("is_from_me") == true) return
                 val convJid = evt.string("conversation_jid") ?: return
-                if (isPseudoWhatsAppJid(convJid)) return
-                val conversation = repository.storedConversation(convJid)
-                if (conversation?.isMuted == true) return
-                val text = repository.names.messageNotification(evt, conversation)
-                NotificationHelper.showMessageNotification(
-                    context, text.title, text.body, Platform.WHATSAPP, convJid, update = true,
-                )
+                replaceShownMessage(convJid, evt)
             }
             "messages_removed" -> {
                 // Messages disappeared (or were placeholders for nothing).
@@ -229,15 +225,7 @@ class WhatsAppSession internal constructor(
                 when (val change = removedNotification(evt)) {
                     RemovedNotification.Keep -> {}
                     RemovedNotification.Cancel -> NotificationHelper.cancelForConversation(context, convJid)
-                    is RemovedNotification.Show -> {
-                        if (isPseudoWhatsAppJid(convJid)) return
-                        val conversation = repository.storedConversation(convJid)
-                        if (conversation?.isMuted == true) return
-                        val text = repository.names.messageNotification(change.newest, conversation)
-                        NotificationHelper.showMessageNotification(
-                            context, text.title, text.body, Platform.WHATSAPP, convJid, update = true,
-                        )
-                    }
+                    is RemovedNotification.Show -> replaceShownMessage(convJid, change.newest)
                 }
             }
             "message_revoked" -> {
@@ -270,6 +258,33 @@ class WhatsAppSession internal constructor(
         }
     }
 
+    /**
+     * Show [message] (a `new_message`-shaped event) in place of what the
+     * chat's message notification shows, without alerting. Only a
+     * notification still up is corrected: one the user dismissed isn't
+     * brought back. A chat that shouldn't notify loses it instead.
+     */
+    private fun replaceShownMessage(convJid: String, message: BridgeEvent) {
+        if (!hasMessageNotification(convJid)) return
+        val conversation = repository.storedConversation(convJid)
+        if (isPseudoWhatsAppJid(convJid) || conversation?.isMuted == true) {
+            NotificationHelper.cancelForConversation(context, convJid)
+            return
+        }
+        val text = repository.names.messageNotification(message, conversation)
+        NotificationHelper.showMessageNotification(
+            context, text.title, text.body, Platform.WHATSAPP, convJid, update = true,
+        )
+    }
+
+    private fun hasMessageNotification(convJid: String): Boolean = try {
+        context.getSystemService(NotificationManager::class.java).activeNotifications.any {
+            it.tag == convJid && it.notification.category == Notification.CATEGORY_MESSAGE
+        }
+    } catch (_: Exception) {
+        false
+    }
+
     private fun callerName(evt: BridgeEvent, convJid: String): String =
         repository.names.callerTitle(evt, repository.storedConversation(convJid))
 
@@ -297,7 +312,7 @@ internal sealed interface RemovedNotification {
     /** Nothing it showed went, or nothing was unread. */
     data object Keep : RemovedNotification
 
-    /** Nothing in the chat is unread any more. */
+    /** Nothing in the chat is unread any more, or nothing left to show. */
     data object Cancel : RemovedNotification
 
     /** The message it showed went; show [newest] (a `new_message`-shaped event) instead, quietly. */
@@ -307,6 +322,9 @@ internal sealed interface RemovedNotification {
 internal fun removedNotification(evt: BridgeEvent): RemovedNotification {
     if (evt.boolean("was_unread") != true) return RemovedNotification.Keep
     if ((evt.int("unread_count") ?: 0) == 0) return RemovedNotification.Cancel
-    val newest = evt.payload["newest_unread"] as? JsonObject ?: return RemovedNotification.Keep
+    // The message it showed is still there.
+    if (evt.boolean("newest_removed") != true) return RemovedNotification.Keep
+    // Gone, with no message left to show (calls, "mark as unread").
+    val newest = evt.payload["newest_unread"] as? JsonObject ?: return RemovedNotification.Cancel
     return RemovedNotification.Show(BridgeEvent(type = "new_message", payload = newest))
 }

@@ -117,12 +117,24 @@ class WhatsAppNotificationEventsTest {
         assertEquals(listOf("newer"), notifications().map { it.text })
     }
 
+    /** A notification the user dismissed isn't brought back to be corrected. */
+    @Test
+    fun aDismissedNotificationStaysDismissed() {
+        bridgeSays("""{"type":"message_replaced","payload":{${newMessage("u1", "here it is")},"newest_unread":true}}""")
+        bridgeSays(
+            """{"type":"messages_removed","payload":{"conversation_jid":"$chat","message_ids":["m2"],"reason":"expired",""" +
+                """"was_unread":true,"unread_count":1,"newest_removed":true,"newest_unread":{${newMessage("m1", "older")}}}}""",
+        )
+        Thread.sleep(300)
+        assertEquals(emptyList(), notifications().map { it.text })
+    }
+
     @Test
     fun theShownMessageDisappearingShowsTheNewestLeft() {
         NotificationHelper.showMessageNotification(context, "Alice", "secret", Platform.WHATSAPP, chat)
         bridgeSays(
             """{"type":"messages_removed","payload":{"conversation_jid":"$chat","message_ids":["m2"],"reason":"expired",""" +
-                """"was_unread":true,"unread_count":1,"newest_unread":{${newMessage("m1", "older")}}}}""",
+                """"was_unread":true,"unread_count":1,"newest_removed":true,"newest_unread":{${newMessage("m1", "older")}}}}""",
         )
         val shown = awaitNotifications { it.singleOrNull()?.text == "older" }.single()
         assertTrue(shown.alertsOnlyOnce)

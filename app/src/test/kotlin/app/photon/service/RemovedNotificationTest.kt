@@ -52,14 +52,21 @@ class RemovedNotificationTest {
 
     @Test
     fun anOlderUnreadGoingKeepsIt() {
-        val evt = removed("""{"conversation_jid":"a@s.whatsapp.net","message_ids":["m1"],"reason":"expired","was_unread":true,"unread_count":1}""")
+        val evt = removed("""{"conversation_jid":"a@s.whatsapp.net","message_ids":["m1"],"reason":"expired","was_unread":true,"unread_count":1,"newest_removed":false}""")
         assertEquals(RemovedNotification.Keep, removedNotification(evt))
+    }
+
+    /** The count can include a call or "mark as unread", which leave no message to show. */
+    @Test
+    fun theShownMessageGoingWithNothingLeftToShowCancelsIt() {
+        val evt = removed("""{"conversation_jid":"a@s.whatsapp.net","message_ids":["m1"],"reason":"expired","was_unread":true,"unread_count":1,"newest_removed":true}""")
+        assertEquals(RemovedNotification.Cancel, removedNotification(evt))
     }
 
     @Test
     fun theShownMessageGoingShowsTheNewestLeft() {
         val evt = removed(
-            """{"conversation_jid":"120363000000000000@g.us","message_ids":["m2"],"reason":"expired","was_unread":true,"unread_count":1,
+            """{"conversation_jid":"120363000000000000@g.us","message_ids":["m2"],"reason":"expired","was_unread":true,"unread_count":1,"newest_removed":true,
             "newest_unread":{"conversation_jid":"120363000000000000@g.us","message_id":"m1","is_group":true,
             "conversation_name":"Climbing","sender_jid":"447700900456@s.whatsapp.net","sender_name":"Al",
             "text_body":"see you at 8","content_type":"text","is_from_me":false}}""",
