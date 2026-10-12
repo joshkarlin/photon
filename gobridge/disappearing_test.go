@@ -384,6 +384,22 @@ func TestSends_carryTheChatTimer(t *testing.T) {
 	}
 }
 
+// A DM whose messages still sit under its LID (not merged yet) lends a send
+// to its phone JID its timer.
+func TestSends_findTheTimerUnderTheLID(t *testing.T) {
+	b, fake, _ := mediaBridge(t, "send_media_1.pdf")
+	lid := types.NewJID("11223344", types.HiddenUserServer)
+	b.client.Store.LIDs.PutLIDMapping(context.Background(), lid, alice)
+	fakeTimerChat(t, b, lid.String(), week, 100)
+
+	if _, _, err := b.SendTextMessage(context.Background(), alice.String(), "hi", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.sent[0].GetExtendedTextMessage().GetContextInfo().GetExpiration(); got != week {
+		t.Errorf("expiration = %d, want the LID row's timer", got)
+	}
+}
+
 // In a chat without a timer, sends are as before: plain text, no expiry.
 func TestSends_withoutATimer(t *testing.T) {
 	b, fake, _ := mediaBridge(t, "send_media_1.pdf")

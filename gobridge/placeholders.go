@@ -132,6 +132,12 @@ func applyViewOnce(row *MessageRow, wrapped bool, content *waE2E.Message) bool {
 // may upgrade any row it was asked for), only a placeholder. Returns
 // whether a row changed.
 func (b *Bridge) replacePlaceholder(m *MessageRow, info types.MessageInfo, fromPhone bool) bool {
+	// Almost every message is new: nothing to replace, and no need to take
+	// the write lock to find that out.
+	var exists int
+	if b.msgDB.QueryRow(`SELECT 1 FROM messages WHERE id = ?`, m.ID).Scan(&exists) != nil {
+		return false
+	}
 	cond := placeholderCondition
 	if fromPhone {
 		cond = "1"

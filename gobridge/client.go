@@ -333,7 +333,7 @@ func (b *Bridge) SendTextMessage(ctx context.Context, jid string, text string, r
 		ReplyToID:       sql.NullString{String: replyToID, Valid: replyToID != ""},
 		IsFromMe:        true,
 		Status:          "sending",
-		ExpiresAt:       expiryAfter(ts, b.chatTimer(jid).seconds),
+		ExpiresAt:       expiryAfter(ts, b.sendTimer(jid).seconds),
 	})
 	b.UpsertConversation(jid, rankedName{}, id, ts)
 	b.BroadcastEvent("new_message", b.newMessageEvent(jid, id, b.client.Store.ID.ToNonAD().String(), text, "text", true))

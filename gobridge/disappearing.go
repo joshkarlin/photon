@@ -154,12 +154,33 @@ func (b *Bridge) chatTimer(jid string) timerSetting {
 	return t
 }
 
+// sendTimer is the timer a message Photon sends to jid goes out under: its
+// chat's, or, for a DM whose rows still sit under its LID (stored before
+// the mapping was known, and not merged yet), that row's if newer.
+func (b *Bridge) sendTimer(jid string) timerSetting {
+	t := b.chatTimer(jid)
+	parsed, err := types.ParseJID(jid)
+	if err != nil || parsed.Server != types.DefaultUserServer || b.client == nil {
+		return t
+	}
+	lid, err := b.client.Store.LIDs.GetLIDForPN(context.Background(), parsed)
+	if err != nil || lid.IsEmpty() {
+		return t
+	}
+	if l := b.chatTimer(lid.String()); l.setAt > t.setAt || t == (timerSetting{}) {
+		return l
+	}
+	return t
+}
+
 // applyTimer stores what a source reports of a chat's timer, if it
 // supersedes the stored one, and adds a line to the chat when the timer
 // changed (at r.at, unless that's outside the retention window). Kotlin is
 // told of any change. Returns whether the timer changed.
 func (b *Bridge) applyTimer(chatJID string, r timerReport) bool {
-	if !hasTimer(chatJID) {
+	// Most reports (every message in a disappearing chat) repeat what's
+	// stored; those don't need the write lock.
+	if !hasTimer(chatJID) || !r.supersedes(b.chatTimer(chatJID)) {
 		return false
 	}
 	var changed bool
@@ -259,7 +280,7 @@ func (b *Bridge) applyGroupTimer(group types.JID, info *types.GroupInfo) {
 // disappears for everyone as the chat's other messages do. nil when there's
 // neither. Also returns the timer, for the row's expiry.
 func (b *Bridge) outgoingContext(jid, replyToID string) (*waE2E.ContextInfo, uint32) {
-	t := b.chatTimer(jid)
+	t := b.sendTimer(jid)
 	var ctx *waE2E.ContextInfo
 	if replyToID != "" {
 		ctx = &waE2E.ContextInfo{StanzaID: proto.String(replyToID)}

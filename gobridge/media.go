@@ -137,7 +137,7 @@ func (b *Bridge) UploadAndSend(p SendMediaPayload) (string, int64, error) {
 		ReplyToID:       sql.NullString{String: p.ReplyToID, Valid: p.ReplyToID != ""},
 		IsFromMe:        true,
 		Status:          "sending",
-		ExpiresAt:       expiryAfter(ts, b.chatTimer(jid).seconds),
+		ExpiresAt:       expiryAfter(ts, b.sendTimer(jid).seconds),
 	})
 	b.UpsertConversation(jid, rankedName{}, id, ts)
 	b.BroadcastEvent("new_message", b.newMessageEvent(jid, id, b.client.Store.ID.ToNonAD().String(), body, contentType, true))
