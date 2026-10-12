@@ -1,5 +1,6 @@
 package app.photon.ui.shared.components
 
+import app.photon.data.model.ContentTypes
 import app.photon.data.model.Message
 import app.photon.data.model.MessageStatus
 import app.photon.ui.shared.components.MessageAction.DELETE
@@ -80,5 +81,30 @@ class MessageActionRulesTest {
         MessageStatus.entries.forEach { status ->
             assert(REACT !in messageActions(message(fromMe = true, status), full)) { "own $status message offers React" }
         }
+    }
+
+    @Test
+    fun systemLinesOfferNothing() {
+        assertEquals(emptyList(), messageActions(message(fromMe = false, contentType = ContentTypes.SYSTEM), full))
+        assertEquals(emptyList(), messageActions(message(fromMe = true, contentType = ContentTypes.SYSTEM), full))
+    }
+
+    /** View-once media and undelivered messages: no reply, reaction or anything else but Delete. */
+    @Test
+    fun phoneOnlyContentCanOnlyBeDeleted() {
+        listOf(ContentTypes.VIEW_ONCE, ContentTypes.UNAVAILABLE).forEach { type ->
+            assertEquals(listOf(DELETE), messageActions(message(fromMe = false, contentType = type), full), type)
+            assertEquals(listOf(DELETE), messageActions(message(fromMe = true, contentType = type), full), type)
+            assertEquals(emptyList(), messageActions(message(fromMe = false, contentType = type), sms), type)
+        }
+    }
+
+    @Test
+    fun locationsAreMessagesLikeAnyOther() {
+        assertEquals(listOf(REPLY, REACT, DELETE), messageActions(message(fromMe = false, contentType = ContentTypes.LOCATION), full))
+        assertEquals(
+            listOf(REPLY, DELETE, DELETE_FOR_EVERYONE),
+            messageActions(message(fromMe = true, contentType = ContentTypes.LOCATION), full),
+        )
     }
 }

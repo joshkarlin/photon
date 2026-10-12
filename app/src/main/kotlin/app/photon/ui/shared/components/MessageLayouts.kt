@@ -1,5 +1,9 @@
 package app.photon.ui.shared.components
 
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -17,9 +21,14 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import app.photon.data.model.ContentTypes
 import app.photon.data.model.Message
 import app.photon.data.model.MessageStatus
 import app.photon.data.names.DisplayNames
+import app.photon.service.UNAVAILABLE_LABEL
+import app.photon.service.locationLabel
+import app.photon.service.notificationPreview
+import app.photon.service.viewOnceLabel
 import app.photon.ui.theme.PhotonColors
 import app.photon.ui.theme.PhotonGrid
 import com.thelightphone.sdk.ui.LightHapticFeedback
@@ -57,11 +66,11 @@ internal fun formatMessageTime(epochSeconds: Long, nowMillis: Long = System.curr
 /**
  * Whether [msg] begins a new burst: a run of messages from one sender with no
  * gap over [BURST_GAP_SECONDS]. [previous] is the message shown just above it
- * (the next older one). Call rows always stand alone.
+ * (the next older one). Call rows and system lines always stand alone.
  */
 internal fun startsBurst(msg: Message, previous: Message?): Boolean = when {
     previous == null -> true
-    isCall(msg) || isCall(previous) -> true
+    standsAlone(msg) || standsAlone(previous) -> true
     msg.isFromMe != previous.isFromMe -> true
     !msg.isFromMe && msg.senderJid != previous.senderJid -> true
     else -> msg.timestamp - previous.timestamp > BURST_GAP_SECONDS
@@ -77,30 +86,99 @@ internal fun formatContent(msg: Message): String {
         // A document's body is its file name: WhatsApp's, and those Photon sends.
         "document" -> if (body != null) "[ document: $body ]" else "[ document ]"
         "sticker" -> "[ sticker ]"
-        "location" -> "[ location ]"
+        ContentTypes.LOCATION -> locationLabel(body)
         "contact" -> "[ contact: ${body ?: ""} ]"
         "call" -> body ?: "Call"
+        ContentTypes.SYSTEM -> body.orEmpty()
+        // Content that's only on the user's phone: say what it is and where it is.
+        ContentTypes.VIEW_ONCE -> "[ ${viewOnceLabel(body)} · $ON_YOUR_PHONE ]"
+        ContentTypes.UNAVAILABLE -> "[ $UNAVAILABLE_LABEL · $ON_YOUR_PHONE ]"
         // Unknown types: the platforms store a readable placeholder (e.g.
         // "[ unsupported message ]") in the body when they have one.
         else -> body ?: "[ ${msg.contentType} ]"
     }
 }
 
+private const val ON_YOUR_PHONE = "open on your phone"
+
 /**
- * Bodies with no message content of their own — a deleted message or a
- * bracketed placeholder such as "[ unsupported message ]" — which recede.
+ * Bodies with no message content of their own — a deleted message, a
+ * bracketed placeholder such as "[ unsupported message ]", or content only
+ * the user's phone has ([isPhoneOnly]) — which recede.
  */
 internal fun isPlaceholder(msg: Message): Boolean {
     val body = msg.textBody?.trim()
     val isBracketed = body != null && body.startsWith("[") && body.endsWith("]")
     return when (msg.contentType) {
         "text" -> body.isNullOrEmpty() || isBracketed
-        "image", "video", "audio", "document", "sticker", "location", "contact", "call" -> false
+        "image", "video", "audio", "document", "sticker", "contact", "call",
+        ContentTypes.LOCATION, ContentTypes.SYSTEM -> false
+        ContentTypes.VIEW_ONCE, ContentTypes.UNAVAILABLE -> true
         else -> body.isNullOrEmpty() || isBracketed
     }
 }
 
 internal fun isCall(msg: Message): Boolean = msg.contentType == "call"
+
+/** A centred informational line, such as a disappearing-messages change. */
+internal fun isSystem(msg: Message): Boolean = msg.contentType == ContentTypes.SYSTEM
+
+/** Rows that never join a burst: calls and system lines. */
+private fun standsAlone(msg: Message): Boolean = isCall(msg) || isSystem(msg)
+
+/**
+ * A message whose content only the user's phone has: view-once media, which
+ * Photon never downloads, and a message not yet delivered to this device.
+ * Photon can show that it's there, and delete it here, nothing more.
+ */
+internal fun isPhoneOnly(msg: Message): Boolean =
+    msg.contentType == ContentTypes.VIEW_ONCE || msg.contentType == ContentTypes.UNAVAILABLE
+
+internal fun isLocation(msg: Message): Boolean = msg.contentType == ContentTypes.LOCATION
+
+/** A place, from a location's media_url (`geo:<lat>,<lng>`). */
+internal data class GeoPoint(val latitude: Double, val longitude: Double)
+
+/**
+ * The point in a `geo:` URI ("geo:51.5007,-0.1246", with or without an
+ * altitude or parameters); null for anything else, or coordinates off the
+ * globe.
+ */
+internal fun parseGeo(uri: String?): GeoPoint? {
+    if (uri == null || !uri.startsWith("geo:", ignoreCase = true)) return null
+    val coordinates = uri.substring(4).substringBefore('?').substringBefore(';').split(',')
+    if (coordinates.size < 2) return null
+    val latitude = coordinates[0].trim().toDoubleOrNull() ?: return null
+    val longitude = coordinates[1].trim().toDoubleOrNull() ?: return null
+    if (latitude !in -90.0..90.0 || longitude !in -180.0..180.0) return null
+    return GeoPoint(latitude, longitude)
+}
+
+/** "51.5007, -0.1246": four decimals, about 10m, whatever the device's locale. */
+internal fun formatCoordinates(point: GeoPoint): String =
+    String.format(Locale.ROOT, "%.4f, %.4f", point.latitude, point.longitude)
+
+/**
+ * The map intent a location opens: its point, pinned with its name where it
+ * has one (`geo:lat,lng?q=lat,lng(name)`, which map apps such as Organic
+ * Maps read). Null when the location has no usable point.
+ */
+internal fun locationIntent(msg: Message): Intent? {
+    val point = parseGeo(msg.mediaUrl) ?: return null
+    val at = String.format(Locale.ROOT, "%.6f,%.6f", point.latitude, point.longitude)
+    val name = msg.textBody?.trim()?.takeIf { it.isNotEmpty() }
+    val uri = if (name == null) "geo:$at" else "geo:$at?q=$at(${Uri.encode(name)})"
+    return Intent(Intent.ACTION_VIEW, Uri.parse(uri))
+}
+
+/** Opens a location in whatever map app answers `geo:`; with none, nothing happens. */
+private fun openLocation(context: Context, msg: Message) {
+    val intent = locationIntent(msg) ?: return
+    try {
+        context.startActivity(intent)
+    } catch (_: ActivityNotFoundException) {
+    }
+}
 
 internal fun isMedia(msg: Message): Boolean =
     msg.contentType in listOf("image", "video", "audio", "document", "sticker")
@@ -121,10 +199,9 @@ private fun formatReactions(msg: Message): String =
  */
 fun quoteLabel(quoted: Message, quotedSenderName: String?): String {
     val who = if (quoted.isFromMe) DisplayNames.YOU else quotedSenderName?.takeIf { it.isNotBlank() }
-    val preview = when {
-        !quoted.textBody.isNullOrBlank() -> quoted.textBody.replace('\n', ' ')
-        else -> "[ ${quoted.contentType} ]"
-    }.take(60)
+    val preview = (notificationPreview(quoted.textBody, quoted.contentType) ?: "[ ${quoted.contentType} ]")
+        .replace('\n', ' ')
+        .take(60)
     return if (who == null) "↳ $preview" else "↳ $who: $preview"
 }
 
@@ -180,14 +257,31 @@ fun SenderLabel(name: String, modifier: Modifier = Modifier) {
     )
 }
 
-/** The message text itself. Placeholders recede. */
+/**
+ * The message text itself. Placeholders recede. A location adds its
+ * coordinates beneath, in Detail.
+ */
 @Composable
 fun MessageBody(msg: Message, modifier: Modifier = Modifier, alignEnd: Boolean = false) {
+    val align = if (alignEnd) TextAlign.End else TextAlign.Start
+    val point = if (isLocation(msg)) parseGeo(msg.mediaUrl) else null
+    if (point == null) {
+        MessageText(msg, align, modifier)
+        return
+    }
+    Column(modifier = modifier, horizontalAlignment = if (alignEnd) Alignment.End else Alignment.Start) {
+        MessageText(msg, align)
+        LightText(text = formatCoordinates(point), variant = LightTextVariant.Detail, lighten = true, align = align)
+    }
+}
+
+@Composable
+private fun MessageText(msg: Message, align: TextAlign, modifier: Modifier = Modifier) {
     LightText(
         text = formatContent(msg),
         variant = LightTextVariant.Paragraph,
         color = if (isPlaceholder(msg)) PhotonColors.Faint else null,
-        align = if (alignEnd) TextAlign.End else TextAlign.Start,
+        align = align,
         modifier = modifier,
     )
 }
@@ -256,6 +350,21 @@ fun ReplyQuoteLine(
 // ─── Rows ───────────────────────────────────────────────────────
 
 /**
+ * A system line, such as "Disappearing messages · 1 week": centred and
+ * secondary, like a call row, and inert: no long-press, swipe or tap.
+ */
+@Composable
+fun SystemRow(msg: Message) {
+    LightText(
+        text = formatContent(msg),
+        variant = LightTextVariant.Detail,
+        lighten = true,
+        align = TextAlign.Center,
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+/**
  * A call log entry: one centred line, e.g. "Missed voice call · 14:02". No
  * reply or reaction; long-press offers delete only.
  */
@@ -276,7 +385,8 @@ fun CallRow(msg: Message, onLongPress: (() -> Unit)? = null) {
  * One message in the thread, laid out like the LP3 thread: no bubbles;
  * received messages on the left, sent on the right. The first message of a
  * burst carries its timestamp above it; tapping any other message reveals its
- * timestamp in the same place (and delivery status below).
+ * timestamp in the same place (and delivery status below). Tapping media
+ * opens it ([onMediaTap]), and tapping a location opens it in a map app.
  *
  * Groups pass [senderName], which puts the sender before the timestamp on
  * incoming bursts, as the LP2 group thread does ("Name  12:36"). DMs pass null.
@@ -293,6 +403,7 @@ fun MessageRow(
     onRetry: (() -> Unit)? = null,
 ) {
     var revealed by remember { mutableStateOf(false) }
+    val context = LocalContext.current
     val fromMe = msg.isFromMe
     val showName = senderName != null && !fromMe && startsBurst
 
@@ -300,7 +411,13 @@ fun MessageRow(
         modifier = Modifier
             .fillMaxWidth()
             .lightCombinedClickable(
-                onClick = { if (isMedia(msg)) onMediaTap() else revealed = !revealed },
+                onClick = {
+                    when {
+                        isMedia(msg) -> onMediaTap()
+                        isLocation(msg) -> openLocation(context, msg)
+                        else -> revealed = !revealed
+                    }
+                },
                 onLongClick = onLongPress,
             ),
         horizontalAlignment = if (fromMe) Alignment.End else Alignment.Start,

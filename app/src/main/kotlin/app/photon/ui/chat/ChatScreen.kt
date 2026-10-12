@@ -121,6 +121,7 @@ internal fun ChatScreen(
             { backend.contactPhone(jid)?.let { phone -> onContact(phone, title) } }
         } else null,
         supportsReply = capabilities.reply,
+        disappearingSeconds = conversation?.disappearingSeconds ?: 0,
     )
 
     viewingMedia?.let { media ->

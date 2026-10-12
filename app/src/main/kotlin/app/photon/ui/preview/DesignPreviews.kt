@@ -11,6 +11,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import app.photon.R
 import app.photon.data.ComposeStyle
 import app.photon.data.KeyboardStyle
+import app.photon.data.model.ContentTypes
 import app.photon.data.model.Conversation
 import app.photon.data.model.Message
 import app.photon.data.model.MessageStatus
@@ -25,8 +26,9 @@ import com.thelightphone.sdk.ui.LightThemeTokens
 
 // LP3-sized design previews (1080x1240 at 3x) with sample data covering the
 // cases the row design has to handle: bursts, a call, a failed send,
-// reactions, a reply, a deleted message, a placeholder, long titles, and a
-// muted chat with unread messages.
+// reactions, a reply, a deleted message, a placeholder, long titles, a
+// muted chat with unread messages, and the 0.5.0 rows (system line,
+// view-once, unavailable, location) under a disappearing-messages header.
 
 private const val LP3_WIDTH_DP = 360
 private const val LP3_HEIGHT_DP = 413
@@ -81,9 +83,10 @@ internal object PreviewSamples {
         status: MessageStatus = if (fromMe) MessageStatus.READ else MessageStatus.UNREAD,
         reactions: List<String> = emptyList(),
         replyTo: Message? = null,
+        mediaUrl: String? = null,
     ) = Message(
         id = id, conversationJid = "chat", senderJid = if (fromMe) "me@s.whatsapp.net" else sender,
-        timestamp = now - ago, contentType = contentType, textBody = body, mediaUrl = null,
+        timestamp = now - ago, contentType = contentType, textBody = body, mediaUrl = mediaUrl,
         mediaMime = null, mediaSize = null, thumbnailPath = null, stickerPackId = null,
         replyToId = replyTo?.id, editVersion = 0, isFromMe = fromMe, status = status,
         reactions = reactions.map { Reaction(id, "x", it, now) },
@@ -106,6 +109,28 @@ internal object PreviewSamples {
             plan,
         )
     }
+
+    const val NEW_ROWS_TITLE = "Sam Okafor"
+    const val SYSTEM_LINE = "Disappearing messages · 1 week"
+    const val LOCATION_NAME = "Buckingham Palace"
+    const val LOCATION_GEO = "geo:51.501364,-0.14189"
+
+    /** A week, the disappearing-messages timer of [newRowMessages]' chat. */
+    const val WEEK_SECONDS = 7 * 24 * 3600L
+
+    /**
+     * A DM (Signal, timer on) with the 0.5.0 rows: a system line, a
+     * view-once photo, a message still on its way, and a location. Newest first.
+     */
+    val newRowMessages: List<Message> = listOf(
+        message("n7", 2 * MIN, LOCATION_NAME, contentType = ContentTypes.LOCATION, mediaUrl = LOCATION_GEO),
+        message("n6", 3 * MIN, "Meet you by the gates"),
+        message("n5", 9 * MIN, null, contentType = ContentTypes.UNAVAILABLE),
+        message("n4", 30 * MIN, "photo", contentType = ContentTypes.VIEW_ONCE),
+        message("n3", 58 * MIN, "Done, a week it is", fromMe = true),
+        message("n2", 59 * MIN, SYSTEM_LINE, contentType = ContentTypes.SYSTEM, status = MessageStatus.READ),
+        message("n1", 62 * MIN, "Can you turn on disappearing messages?"),
+    )
 
     private const val ALICE = "alice@s.whatsapp.net"
     private const val BOB = "bob@s.whatsapp.net"
@@ -174,6 +199,7 @@ internal fun ChatThreadSample(
     participantNames: Map<String, String> = emptyMap(),
     composeStyle: ComposeStyle = ComposeStyle.INLINE,
     keyboardStyle: KeyboardStyle = KeyboardStyle.SYSTEM,
+    disappearingSeconds: Long = 0,
 ) {
     ChatThread(
         title = title,
@@ -195,6 +221,19 @@ internal fun ChatThreadSample(
         headerContent = null,
         composeStyle = composeStyle,
         keyboardStyle = keyboardStyle,
+        disappearingSeconds = disappearingSeconds,
+    )
+}
+
+/** The 0.5.0 rows in a DM whose messages disappear after a week. */
+@Composable
+internal fun NewRowsThreadSample() {
+    ChatThreadSample(
+        title = PreviewSamples.NEW_ROWS_TITLE,
+        messages = PreviewSamples.newRowMessages,
+        isGroup = false,
+        platform = Platform.SIGNAL,
+        disappearingSeconds = PreviewSamples.WEEK_SECONDS,
     )
 }
 
@@ -262,3 +301,7 @@ private fun SystemComposeEditorPreview() = PhotonPreview { ComposeEditorSample(K
 @Preview(name = "Group", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
 @Composable
 private fun GroupChatPreview() = PhotonPreview { GroupThreadSample() }
+
+@Preview(name = "DM – new rows, disappearing", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
+@Composable
+private fun NewRowsPreview() = PhotonPreview { NewRowsThreadSample() }
