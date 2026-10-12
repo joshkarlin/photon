@@ -12,6 +12,7 @@ import app.photon.signal.receiver.ContactNames
 import app.photon.signal.receiver.ContactsSync
 import app.photon.signal.receiver.DataMessageHandler
 import app.photon.signal.receiver.EnvelopeProcessor
+import app.photon.signal.receiver.Expiry
 import app.photon.signal.receiver.GroupMetadata
 import app.photon.signal.receiver.MessageNotifications
 import app.photon.signal.receiver.NetworkMonitor
@@ -117,6 +118,7 @@ class SignalMessageReceiver(
     )
     private val receipts = Receipts(credentials, messageDb)
     private val messageNotifications = MessageNotifications(messageDb, names, notifier)
+    private val expiry = Expiry(messageDb, messageNotifications, context.filesDir)
     private val remoteEdits = RemoteEdits(messageDb, messageNotifications)
     private val dataMessages = DataMessageHandler(
         messageDb, contactNames, groupMetadata, calls, remoteEdits, attachments, earlyReads,
@@ -515,6 +517,12 @@ class SignalMessageReceiver(
 
     /** Delete downloaded media past its TTL. Called periodically by the Signal session. */
     fun pruneMedia() = attachments.pruneMedia()
+
+    /**
+     * Delete disappearing messages whose time is up (see [Expiry]). Returns
+     * when the next one goes (epoch ms), or null when none is counting down.
+     */
+    fun expireMessages(): Long? = expiry.sweep()
 
     /**
      * Enforce the ephemeral message window (per-chat cap and max age from

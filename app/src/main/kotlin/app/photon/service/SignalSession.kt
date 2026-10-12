@@ -15,6 +15,7 @@ import app.photon.signal.SignalMessageReceiver
 import app.photon.signal.SignalMessageSender
 import app.photon.signal.SignalRepository
 import app.photon.signal.db.SignalMessageDatabase
+import app.photon.signal.expiryWaitMs
 import app.photon.signal.store.PhotonProtocolStore
 import app.photon.signal.store.SignalProtocolDatabase
 import java.io.File
@@ -23,6 +24,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Signal for as long as the service runs: the account's credentials and
@@ -58,8 +60,12 @@ class SignalSession(private val context: Context, private val scope: CoroutineSc
     val groupManager: SignalGroupV2Manager? get() = receiver.groupManager
 
     private var pruneJob: Job? = null
+    private var expiryJob: Job? = null
 
-    /** Connect if linked, and keep the ephemeral window. Starting a running session does nothing. */
+    /**
+     * Connect if linked, keep the ephemeral window, and delete disappearing
+     * messages on time. Starting a running session does nothing.
+     */
     @Synchronized
     fun start() {
         Log.i(TAG, "Signal registered: ${credentials.isRegistered()}")
@@ -68,12 +74,15 @@ class SignalSession(private val context: Context, private val scope: CoroutineSc
             receiver.start()
         }
         if (pruneJob?.isActive != true) pruneJob = scope.launch { pruneEvery5Minutes() }
+        if (expiryJob?.isActive != true) expiryJob = scope.launch { expireOnTime() }
     }
 
     @Synchronized
     fun stop() {
         pruneJob?.cancel()
         pruneJob = null
+        expiryJob?.cancel()
+        expiryJob = null
         receiver.stop()
         sender.shutdown()
     }
@@ -124,6 +133,28 @@ class SignalSession(private val context: Context, private val scope: CoroutineSc
                 receiver.pruneMessages(prefs.maxMessages.first(), prefs.maxDays.first())
             } catch (e: Exception) {
                 Log.w(TAG, "Signal message prune failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * The other half of the ephemeral window: disappearing messages go when
+     * their time is up, not at the next 5-minute prune, since a timer can
+     * be 30 seconds. Sleeps until the next one is due, and wakes early when
+     * a clock starts (a message read or sent), so a short timer isn't
+     * missed; at most 5 minutes, so nothing waits on a wake-up it missed.
+     */
+    private suspend fun expireOnTime() {
+        while (true) {
+            val seen = messageDb.expiryScheduled.value
+            val next = try {
+                receiver.expireMessages()
+            } catch (e: Exception) {
+                Log.w(TAG, "Signal disappearing-message sweep failed: ${e.message}")
+                null
+            }
+            withTimeoutOrNull(expiryWaitMs(next, System.currentTimeMillis())) {
+                messageDb.expiryScheduled.first { it != seen }
             }
         }
     }
