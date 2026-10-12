@@ -56,7 +56,9 @@ class FakeSmsProvider : ContentProvider() {
     ): Cursor {
         if (denied) throw SecurityException("READ_SMS revoked")
         selections += selection
-        return db.query("sms", projection, selection, selectionArgs, null, null, sortOrder)
+        // Run the query now, under the lock: a SQLite cursor otherwise reads its
+        // rows when first touched, and could see an insert that came after it.
+        return db.query("sms", projection, selection, selectionArgs, null, null, sortOrder).also { it.count }
     }
 
     @Synchronized
