@@ -10,6 +10,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
+import android.provider.MediaStore
 import app.photon.ui.RegisterComposeHostActivity
 import app.photon.ui.theme.PhotonTheme
 import org.junit.Rule
@@ -18,6 +19,7 @@ import org.junit.rules.RuleChain
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import kotlin.test.assertEquals
@@ -72,5 +74,28 @@ class MediaViewerTest {
         rule.onNodeWithContentDescription("Save").performClick()
         rule.waitUntil(5_000) { rule.onAllNodesWithContentDescription("Saved").fetchSemanticsNodes().isNotEmpty() }
         rule.onAllNodesWithContentDescription("Save").assertCountEquals(0)
+    }
+
+    /** A document is saved under its own name, with the extension its type has. */
+    @Test
+    fun aDocumentIsSavedUnderItsRealName() {
+        val docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        val file = files.newFile("3EB0C5A1.bin").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        rule.setContent {
+            PhotonTheme {
+                MediaViewer(
+                    messageId = "m", mediaMime = docx, existingPath = file.path, fileName = "Q3 report",
+                    onDownloadMedia = { null }, onDismiss = {},
+                )
+            }
+        }
+        rule.onNodeWithText("Downloaded: Q3 report.docx").assertExists()
+        rule.onNodeWithContentDescription("Save").performClick()
+        rule.waitUntil(5_000) { rule.onAllNodesWithContentDescription("Saved").fetchSemanticsNodes().isNotEmpty() }
+
+        val saved = shadowOf(rule.activity.contentResolver).insertStatements.single().contentValues
+        assertEquals("Q3 report.docx", saved.getAsString(MediaStore.MediaColumns.DISPLAY_NAME))
+        assertEquals(docx, saved.getAsString(MediaStore.MediaColumns.MIME_TYPE))
+        assertEquals("Download/Photon", saved.getAsString(MediaStore.MediaColumns.RELATIVE_PATH))
     }
 }
