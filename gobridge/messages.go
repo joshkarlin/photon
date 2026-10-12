@@ -31,6 +31,11 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 	ts := evt.Info.Timestamp.Unix()
 
 	kind, targetID := classifyMessageEvent(msg)
+	if kind != kindContent {
+		// Nothing to show under this ID: a placeholder stored for it when it
+		// couldn't be decrypted has nothing to become.
+		b.dropPlaceholder(chatJID, evt.Info)
+	}
 	switch kind {
 	case kindReaction:
 		b.UpsertReaction(targetID, senderJID, msg.GetReactionMessage().GetText(), ts)
@@ -65,9 +70,11 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 		b.applyTimer(chatJID, timerReport{timerSetting: t, at: ts})
 	}
 	row := b.buildMessageRow(content, msgID, chatJID, senderJID, ts, isFromMe, "sent")
+	viewOnce := applyViewOnce(row, evt.IsViewOnce, content)
 	if row.ExpiresAt > 0 && row.ExpiresAt <= time.Now().Unix() {
 		// Delivered after it was due to disappear (Photon was offline).
 		b.log.Debugf("Skipping message %s in %s: already disappeared", msgID, chatJID)
+		b.dropPlaceholder(chatJID, evt.Info)
 		return
 	}
 	if row.ContentType == "call" {
@@ -76,15 +83,18 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 		// (and history-sync call stubs, on the same premise that the entry
 		// carries the call's ID), whichever arrives second is a redelivery.
 		// Call events own a call's unread count, so the entry is stored read.
+		b.dropPlaceholder(chatJID, evt.Info)
 		row.ID, row.Status = callRowID(msgID), "read"
 		msgID = row.ID
-	}
-
-	// The phone's copy of a message it had masked from linked devices:
-	// upgrade the placeholder row in place (it was already counted).
-	if evt.UnavailableRequestID != "" && b.ReplaceMessageContent(row) {
-		b.saveInlineThumbnail(msgID, content)
+	} else if b.replacePlaceholder(row, evt.Info, evt.UnavailableRequestID != "") {
+		// The message a placeholder stood for (resent by its sender after a
+		// decryption failure, or by the phone): the row becomes it in place.
+		// It was counted and announced as the placeholder.
+		if !viewOnce {
+			b.fetchMediaExtras(msgID, row.ContentType, content)
+		}
 		b.BroadcastEvent("message_updated", MessageUpdatedEvent{ConversationJID: chatJID, MessageID: msgID})
+		b.BroadcastEvent("message_replaced", b.messageReplacedEvent(row))
 		return
 	}
 
@@ -102,59 +112,69 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 	}
 	contentType, textBody := row.ContentType, row.TextBody.String
 
-	b.saveInlineThumbnail(msgID, content)
-
-	// Auto-download small media (stickers, audio)
-	if contentType == "sticker" || contentType == "audio" {
-		go b.autoDownloadMedia(msgID, content)
+	// View-once media is never downloaded or previewed.
+	if !viewOnce {
+		b.fetchMediaExtras(msgID, contentType, content)
 	}
 
 	if content.GetPlaceholderMessage() != nil && !isFromMe {
 		go b.requestFromPhone(evt.Info)
 	}
 
+	b.upsertMessageConversation(evt.Info, chatJID, senderJID, msgID, ts)
+
 	// A call-log entry in the chat. Live calls are tracked from call events,
 	// which own the unread count and notification, so this only shows the
 	// entry.
-	isCallLog := contentType == "call"
-	if isCallLog {
+	if contentType == "call" {
 		b.log.Infof("Call log message %s in %s: %s", msgID, chatJID, textBody)
-	}
-
-	// Update conversation. A verified or push name the message carries is
-	// the other person's, never the user's own.
-	verifiedName, pushName := "", ""
-	if !isFromMe {
-		pushName = evt.Info.PushName
-		if evt.Info.VerifiedName != nil {
-			verifiedName = evt.Info.VerifiedName.Details.GetVerifiedName()
-		}
-	}
-	var name rankedName
-	isGroup := evt.Info.Chat.Server == types.GroupServer
-	if isGroup {
-		// The group's subject from its info (cached — one network fetch per
-		// group per hour, not per message).
-		name = rankedName{name: cleanName(b.groupName(evt.Info.Chat)), rank: rankSubject}
-		if !isFromMe {
-			b.UpsertParticipant(chatJID, senderJID, b.memberName(evt.Info.Sender, verifiedName, pushName))
-		}
-	} else {
-		name = personName(b.lookupContact(evt.Info.Chat), verifiedName, pushName)
-	}
-	b.UpsertConversation(chatJID, name, msgID, ts)
-
-	if isCallLog {
 		b.BroadcastEvent("message_updated", MessageUpdatedEvent{ConversationJID: chatJID, MessageID: msgID})
 		return
 	}
+	b.announceNewMessage(chatJID, msgID, senderJID, textBody, contentType, isFromMe)
+}
 
-	// Increment unread if not from me
+// fetchMediaExtras saves a stored media message's inline preview and
+// downloads the small media Photon keeps at hand (stickers, audio).
+func (b *Bridge) fetchMediaExtras(msgID, contentType string, content *waE2E.Message) {
+	b.saveInlineThumbnail(msgID, content)
+	if contentType == "sticker" || contentType == "audio" {
+		go b.autoDownloadMedia(msgID, content)
+	}
+}
+
+// upsertMessageConversation names and bumps the chat of a message just
+// stored. A verified or push name the message carries is the other
+// person's, never the user's own.
+func (b *Bridge) upsertMessageConversation(info types.MessageInfo, chatJID, senderJID, msgID string, ts int64) {
+	verifiedName, pushName := "", ""
+	if !info.IsFromMe {
+		pushName = info.PushName
+		if info.VerifiedName != nil {
+			verifiedName = info.VerifiedName.Details.GetVerifiedName()
+		}
+	}
+	var name rankedName
+	if info.Chat.Server == types.GroupServer {
+		// The group's subject from its info (cached — one network fetch per
+		// group per hour, not per message).
+		name = rankedName{name: cleanName(b.groupName(info.Chat)), rank: rankSubject}
+		if !info.IsFromMe {
+			b.UpsertParticipant(chatJID, senderJID, b.memberName(info.Sender, verifiedName, pushName))
+		}
+	} else {
+		name = personName(b.lookupContact(info.Chat), verifiedName, pushName)
+	}
+	b.UpsertConversation(chatJID, name, msgID, ts)
+}
+
+// announceNewMessage counts a message just stored as unread, unless the
+// user sent it, and tells Kotlin (new_message).
+func (b *Bridge) announceNewMessage(chatJID, msgID, senderJID, text, contentType string, isFromMe bool) {
 	if !isFromMe {
 		b.IncrementUnread(chatJID)
 	}
-
-	b.BroadcastEvent("new_message", b.newMessageEvent(chatJID, msgID, senderJID, textBody, contentType, isFromMe))
+	b.BroadcastEvent("new_message", b.newMessageEvent(chatJID, msgID, senderJID, text, contentType, isFromMe))
 }
 
 // newMessageEvent is new_message's payload for a stored message, with the

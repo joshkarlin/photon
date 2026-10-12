@@ -15,6 +15,8 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 	switch v := evt.(type) {
 	case *events.Message:
 		b.handleMessage(v)
+	case *events.UndecryptableMessage:
+		b.handleUndecryptable(v)
 	case *events.Receipt:
 		b.handleReceipt(v)
 	case *events.ChatPresence:

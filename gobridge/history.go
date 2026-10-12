@@ -133,6 +133,7 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 
 			content := contentMessage(evt.Message)
 			row := b.buildMessageRow(content, evt.Info.ID, jid, senderJID, ts, isFromMe, "read")
+			applyViewOnce(row, evt.IsViewOnce, content)
 			if row.ExpiresAt = historyExpiry(wm, content, ts); row.ExpiresAt > 0 && row.ExpiresAt <= now {
 				skippedOld++
 				continue

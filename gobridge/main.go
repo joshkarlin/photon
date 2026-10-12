@@ -162,6 +162,9 @@ func main() {
 	// a transient primary-device/network outage. Let whatsmeow retry an initial
 	// connection in the background instead of returning a terminal failure.
 	client.InitialAutoReconnect = true
+	// A message that fails to decrypt is asked of the phone too, if its
+	// sender hasn't resent it within a few seconds (as mautrix-whatsapp does).
+	client.AutomaticMessageRerequestFromPhone = true
 
 	// Create bridge
 	bridge := NewBridge(client, msgDB, cfg.dataDir, logger)

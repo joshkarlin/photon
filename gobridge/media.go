@@ -58,7 +58,12 @@ func (b *Bridge) DownloadMedia(msgID string, msg *waE2E.Message) (string, error)
 }
 
 // DownloadMediaByID looks up a message's raw proto and downloads its media.
+// View-once media never is (its row keeps no proto anyway).
 func (b *Bridge) DownloadMediaByID(msgID string) (string, error) {
+	var contentType string
+	if b.msgDB.QueryRow(`SELECT content_type FROM messages WHERE id = ?`, msgID).Scan(&contentType); contentType == contentViewOnce {
+		return "", fmt.Errorf("message %s is view-once: open it on your phone", msgID)
+	}
 	raw, err := b.GetMessageRawProto(msgID)
 	if err != nil {
 		return "", err

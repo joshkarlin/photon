@@ -86,6 +86,7 @@ var migrations = []func(b *Bridge, ctx context.Context, tx *sql.Tx) error{
 	(*Bridge).migrateIncomingReadState,
 	(*Bridge).migrateNameRanks,
 	(*Bridge).migrateDisappearing,
+	(*Bridge).migrateViewOnce,
 }
 
 // migrateMessageDB runs the migrations this database hasn't had yet.
