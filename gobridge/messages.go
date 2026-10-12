@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"time"
 
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
@@ -30,6 +31,11 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 	ts := evt.Info.Timestamp.Unix()
 
 	kind, targetID := classifyMessageEvent(msg)
+	if kind != kindContent {
+		// Nothing to show under this ID: a placeholder stored for it when it
+		// couldn't be decrypted has nothing to become.
+		b.dropPlaceholder(chatJID, evt.Info)
+	}
 	switch kind {
 	case kindReaction:
 		b.UpsertReaction(targetID, senderJID, msg.GetReactionMessage().GetText(), ts)
@@ -44,28 +50,51 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 	case kindEdit:
 		b.applyEdit(chatJID, targetID, msg.GetProtocolMessage().GetEditedMessage(), b.authorOf(evt.Info))
 		return
+	case kindTimer:
+		// Only a DM's two people set its timer this way; a group's comes
+		// from the server (group info), not from any member's say-so.
+		if !isGroupJID(chatJID) {
+			t := settingMessageTimer(msg.GetProtocolMessage(), ts)
+			b.applyTimer(chatJID, timerReport{timerSetting: t, at: ts})
+		}
+		return
 	case kindDrop:
 		b.log.Debugf("Skipping content-free message %s in %s", msgID, chatJID)
 		return
 	}
 
 	content := contentMessage(msg)
+	// The chat's timer as this message has it. A change it reveals goes in
+	// the chat before the message itself.
+	if t, ok := contextTimer(content); ok {
+		b.applyTimer(chatJID, timerReport{timerSetting: t, at: ts})
+	}
 	row := b.buildMessageRow(content, msgID, chatJID, senderJID, ts, isFromMe, "sent")
+	viewOnce := applyViewOnce(row, evt.IsViewOnce, content)
+	if row.ExpiresAt > 0 && row.ExpiresAt <= time.Now().Unix() {
+		// Delivered after it was due to disappear (Photon was offline).
+		b.log.Debugf("Skipping message %s in %s: already disappeared", msgID, chatJID)
+		b.dropPlaceholder(chatJID, evt.Info)
+		return
+	}
 	if row.ContentType == "call" {
 		// The phone's log entry for a call, which Photon may already hold as
 		// a row from the call's own events. Keyed by call ID like those
 		// (and history-sync call stubs, on the same premise that the entry
 		// carries the call's ID), whichever arrives second is a redelivery.
 		// Call events own a call's unread count, so the entry is stored read.
+		b.dropPlaceholder(chatJID, evt.Info)
 		row.ID, row.Status = callRowID(msgID), "read"
 		msgID = row.ID
-	}
-
-	// The phone's copy of a message it had masked from linked devices:
-	// upgrade the placeholder row in place (it was already counted).
-	if evt.UnavailableRequestID != "" && b.ReplaceMessageContent(row) {
-		b.saveInlineThumbnail(msgID, content)
-		b.BroadcastEvent("message_updated", MessageUpdatedEvent{ConversationJID: chatJID, MessageID: msgID})
+	} else if b.replacePlaceholder(row, evt.Info, evt.UnavailableRequestID != "") {
+		// The message a placeholder stood for (resent by its sender after a
+		// decryption failure, or by the phone): the row becomes it in place.
+		// It was counted and announced as the placeholder.
+		if !viewOnce && row.ContentType != contentViewOnce {
+			b.fetchMediaExtras(msgID, row.ContentType, content)
+		}
+		b.BroadcastEvent("message_updated", MessageUpdatedEvent{ConversationJID: row.ConversationJID, MessageID: msgID})
+		b.BroadcastEvent("message_replaced", b.messageReplacedEvent(row))
 		return
 	}
 
@@ -83,59 +112,71 @@ func (b *Bridge) handleMessage(evt *events.Message) {
 	}
 	contentType, textBody := row.ContentType, row.TextBody.String
 
-	b.saveInlineThumbnail(msgID, content)
-
-	// Auto-download small media (stickers, audio)
-	if contentType == "sticker" || contentType == "audio" {
-		go b.autoDownloadMedia(msgID, content)
+	// View-once media is never downloaded or previewed.
+	if !viewOnce {
+		b.fetchMediaExtras(msgID, contentType, content)
 	}
 
 	if content.GetPlaceholderMessage() != nil && !isFromMe {
 		go b.requestFromPhone(evt.Info)
 	}
 
+	b.upsertMessageConversation(evt.Info, chatJID, senderJID, msgID, ts)
+
 	// A call-log entry in the chat. Live calls are tracked from call events,
 	// which own the unread count and notification, so this only shows the
 	// entry.
-	isCallLog := contentType == "call"
-	if isCallLog {
+	if contentType == "call" {
 		b.log.Infof("Call log message %s in %s: %s", msgID, chatJID, textBody)
-	}
-
-	// Update conversation. A verified or push name the message carries is
-	// the other person's, never the user's own.
-	verifiedName, pushName := "", ""
-	if !isFromMe {
-		pushName = evt.Info.PushName
-		if evt.Info.VerifiedName != nil {
-			verifiedName = evt.Info.VerifiedName.Details.GetVerifiedName()
-		}
-	}
-	var name rankedName
-	isGroup := evt.Info.Chat.Server == types.GroupServer
-	if isGroup {
-		// The group's subject from its info (cached — one network fetch per
-		// group per hour, not per message).
-		name = rankedName{name: cleanName(b.groupName(evt.Info.Chat)), rank: rankSubject}
-		if !isFromMe {
-			b.UpsertParticipant(chatJID, senderJID, b.memberName(evt.Info.Sender, verifiedName, pushName))
-		}
-	} else {
-		name = personName(b.lookupContact(evt.Info.Chat), verifiedName, pushName)
-	}
-	b.UpsertConversation(chatJID, name, msgID, ts)
-
-	if isCallLog {
 		b.BroadcastEvent("message_updated", MessageUpdatedEvent{ConversationJID: chatJID, MessageID: msgID})
 		return
 	}
+	b.announceNewMessage(chatJID, msgID, senderJID, textBody, contentType, isFromMe, ts)
+}
 
-	// Increment unread if not from me
+// fetchMediaExtras saves a stored media message's inline preview and
+// downloads the small media Photon keeps at hand (stickers, audio).
+func (b *Bridge) fetchMediaExtras(msgID, contentType string, content *waE2E.Message) {
+	b.saveInlineThumbnail(msgID, content)
+	if contentType == "sticker" || contentType == "audio" {
+		go b.autoDownloadMedia(msgID, content)
+	}
+}
+
+// upsertMessageConversation names and bumps the chat of a message just
+// stored. A verified or push name the message carries is the other
+// person's, never the user's own.
+func (b *Bridge) upsertMessageConversation(info types.MessageInfo, chatJID, senderJID, msgID string, ts int64) {
+	verifiedName, pushName := "", ""
+	if !info.IsFromMe {
+		pushName = info.PushName
+		if info.VerifiedName != nil {
+			verifiedName = info.VerifiedName.Details.GetVerifiedName()
+		}
+	}
+	var name rankedName
+	if info.Chat.Server == types.GroupServer {
+		// The group's subject from its info (cached — one network fetch per
+		// group per hour, not per message).
+		name = rankedName{name: cleanName(b.groupName(info.Chat)), rank: rankSubject}
+		if !info.IsFromMe {
+			b.UpsertParticipant(chatJID, senderJID, b.memberName(info.Sender, verifiedName, pushName))
+		}
+	} else {
+		name = personName(b.lookupContact(info.Chat), verifiedName, pushName)
+	}
+	b.UpsertConversation(chatJID, name, msgID, ts)
+}
+
+// announceNewMessage counts a message just stored as unread, unless the
+// user sent it, unarchives its chat if the account wants that, and tells
+// Kotlin (new_message).
+func (b *Bridge) announceNewMessage(chatJID, msgID, senderJID, text, contentType string, isFromMe bool, ts int64) {
 	if !isFromMe {
 		b.IncrementUnread(chatJID)
+		b.unarchiveForMessage(chatJID, ts)
 	}
-
-	b.BroadcastEvent("new_message", b.newMessageEvent(chatJID, msgID, senderJID, textBody, contentType, isFromMe))
+	b.BroadcastEvent("new_message", b.newMessageEvent(chatJID, msgID, senderJID, text, contentType, isFromMe))
 }
 
 // newMessageEvent is new_message's payload for a stored message, with the
@@ -268,7 +309,7 @@ func (a author) sqlClause() (string, []interface{}) {
 func (b *Bridge) buildMessageRow(msg *waE2E.Message, id, convJID, senderJID string, ts int64, isFromMe bool, status string) *MessageRow {
 	contentType, textBody, _ := extractContent(msg)
 	textBody = b.resolveMentions(msg, convJID, textBody)
-	rawProto, _ := proto.Marshal(msg)
+	rawProto, _ := proto.Marshal(withoutQuote(msg))
 
 	var replyToID sql.NullString
 	if ctx := getContextInfo(msg); ctx != nil && ctx.GetStanzaID() != "" {
@@ -279,6 +320,11 @@ func (b *Bridge) buildMessageRow(msg *waE2E.Message, id, convJID, senderJID stri
 	if mime := getMediaMime(msg); mime != "" {
 		mediaMime = sql.NullString{String: mime, Valid: true}
 	}
+	// A place's map link (see location).
+	var mediaURL sql.NullString
+	if _, geo, ok := location(msg); ok {
+		mediaURL = sql.NullString{String: geo, Valid: true}
+	}
 
 	return &MessageRow{
 		ID:              id,
@@ -287,12 +333,27 @@ func (b *Bridge) buildMessageRow(msg *waE2E.Message, id, convJID, senderJID stri
 		Timestamp:       ts,
 		ContentType:     contentType,
 		TextBody:        sql.NullString{String: textBody, Valid: textBody != ""},
+		MediaURL:        mediaURL,
 		MediaMime:       mediaMime,
 		ReplyToID:       replyToID,
 		IsFromMe:        isFromMe,
 		Status:          status,
 		RawProto:        rawProto,
+		ExpiresAt:       messageExpiry(msg, ts),
 	}
+}
+
+// withoutQuote is msg without the copy of the message it replies to that its
+// ContextInfo carries. Nothing reads it (a reply finds its quote by ID),
+// and it would outlive what it copies: a view-once photo's keys and
+// preview, or a message that has disappeared.
+func withoutQuote(msg *waE2E.Message) *waE2E.Message {
+	if getContextInfo(msg).GetQuotedMessage() == nil {
+		return msg
+	}
+	clone := proto.Clone(msg).(*waE2E.Message)
+	getContextInfo(clone).QuotedMessage = nil
+	return clone
 }
 
 func getMediaMime(msg *waE2E.Message) string {

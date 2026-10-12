@@ -45,7 +45,7 @@ func (b *Bridge) DownloadMedia(msgID string, msg *waE2E.Message) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("download failed for %s: %w", msgID, err)
 	}
-	ext := mimeToExt(getMediaMime(msg))
+	ext := mediaExt(msg)
 
 	filename := msgID + ext
 	path := filepath.Join(b.dataDir, "media", filename)
@@ -58,7 +58,12 @@ func (b *Bridge) DownloadMedia(msgID string, msg *waE2E.Message) (string, error)
 }
 
 // DownloadMediaByID looks up a message's raw proto and downloads its media.
+// View-once media never is (its row keeps no proto anyway).
 func (b *Bridge) DownloadMediaByID(msgID string) (string, error) {
+	var contentType string
+	if b.msgDB.QueryRow(`SELECT content_type FROM messages WHERE id = ?`, msgID).Scan(&contentType); contentType == contentViewOnce {
+		return "", fmt.Errorf("message %s is view-once: open it on your phone", msgID)
+	}
 	raw, err := b.GetMessageRawProto(msgID)
 	if err != nil {
 		return "", err
@@ -132,6 +137,7 @@ func (b *Bridge) UploadAndSend(p SendMediaPayload) (string, int64, error) {
 		ReplyToID:       sql.NullString{String: p.ReplyToID, Valid: p.ReplyToID != ""},
 		IsFromMe:        true,
 		Status:          "sending",
+		ExpiresAt:       expiryAfter(ts, b.sendTimer(jid).seconds),
 	})
 	b.UpsertConversation(jid, rankedName{}, id, ts)
 	b.BroadcastEvent("new_message", b.newMessageEvent(jid, id, b.client.Store.ID.ToNonAD().String(), body, contentType, true))
@@ -149,14 +155,16 @@ func (b *Bridge) UploadAndSend(p SendMediaPayload) (string, int64, error) {
 		return id, ts, fmt.Errorf("upload failed: %w", err)
 	}
 
-	msg := buildMediaMessage(resp, p.MimeType, text, p.ReplyToID, data)
+	b.refreshGroupTimer(targetJID)
+	ctxInfo, timer := b.outgoingContext(jid, p.ReplyToID)
+	msg := buildMediaMessage(resp, p.MimeType, text, ctxInfo, data)
 	sendResp, err := b.sendWithID(ctx, targetJID, msg, id)
 	if err != nil {
 		b.markMessageFailed(jid, id)
 		return id, ts, fmt.Errorf("send failed: %w", err)
 	}
 
-	b.markMessageSent(jid, id, sendResp.Timestamp.Unix())
+	b.markMessageSent(jid, id, sendResp.Timestamp.Unix(), timer)
 	return id, sendResp.Timestamp.Unix(), nil
 }
 
@@ -171,11 +179,15 @@ func (b *Bridge) uploadMedia(ctx context.Context, data []byte, mediaType whatsme
 // sendWithID sends msg under the message id the row was stored with, so a
 // retry reuses the original's and recipients dedupe it.
 func (b *Bridge) sendWithID(ctx context.Context, to types.JID, msg *waE2E.Message, id string) (whatsmeow.SendResponse, error) {
-	extra := whatsmeow.SendRequestExtra{ID: id}
+	return b.sendMessage(ctx, to, msg, whatsmeow.SendRequestExtra{ID: id})
+}
+
+// sendMessage sends msg to WhatsApp (or, in tests, to messageSender).
+func (b *Bridge) sendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, extra ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error) {
 	if b.messageSender != nil {
-		return b.messageSender(ctx, to, msg, extra)
+		return b.messageSender(ctx, to, msg, extra...)
 	}
-	return b.client.SendMessage(ctx, to, msg, extra)
+	return b.client.SendMessage(ctx, to, msg, extra...)
 }
 
 // mediaText is what a media message carries besides the media: a caption,
@@ -218,11 +230,9 @@ func mediaKind(mimeType string) (contentType string, mediaType whatsmeow.MediaTy
 	}
 }
 
-func buildMediaMessage(resp whatsmeow.UploadResponse, mimeType string, text mediaText, replyToID string, data []byte) *waE2E.Message {
-	var ctx *waE2E.ContextInfo
-	if replyToID != "" {
-		ctx = &waE2E.ContextInfo{StanzaID: &replyToID}
-	}
+// buildMediaMessage is an uploaded file as a message of its kind, with ctx
+// (see outgoingContext) as its context.
+func buildMediaMessage(resp whatsmeow.UploadResponse, mimeType string, text mediaText, ctx *waE2E.ContextInfo, data []byte) *waE2E.Message {
 
 	switch {
 	case strings.HasPrefix(mimeType, "image/"):
@@ -293,34 +303,90 @@ func buildMediaMessage(resp whatsmeow.UploadResponse, mimeType string, text medi
 	}
 }
 
-func mimeToExt(mime string) string {
-	switch mime {
-	case "image/jpeg":
-		return ".jpg"
-	case "image/png":
-		return ".png"
-	case "image/webp":
-		return ".webp"
-	case "video/mp4":
-		return ".mp4"
-	case "audio/ogg; codecs=opus", "audio/ogg":
-		return ".ogg"
-	case "audio/mpeg":
-		return ".mp3"
-	case "application/pdf":
-		return ".pdf"
-	default:
-		if strings.HasPrefix(mime, "image/") {
-			return ".jpg"
+// documentName is a received document's name: its file name, else its
+// title. The row's text_body holds it, and Save saves under it.
+func documentName(doc *waE2E.DocumentMessage) string {
+	return firstNonEmpty(strings.TrimSpace(doc.GetFileName()), strings.TrimSpace(doc.GetTitle()))
+}
+
+// mediaExt is the extension a downloaded file gets: a document's own (a
+// .docx stays .docx whatever its MIME type), else its MIME type's.
+func mediaExt(msg *waE2E.Message) string {
+	if doc := msg.GetDocumentMessage(); doc != nil {
+		if ext := fileExt(documentName(doc)); ext != "" {
+			return ext
 		}
-		if strings.HasPrefix(mime, "video/") {
-			return ".mp4"
-		}
-		if strings.HasPrefix(mime, "audio/") {
-			return ".ogg"
-		}
-		return ".bin"
 	}
+	return mimeToExt(getMediaMime(msg))
+}
+
+// fileExt is a file name's extension, if it's a plausible one: short, and
+// letters and digits only, as it becomes part of a path.
+func fileExt(name string) string {
+	ext := filepath.Ext(name)
+	if len(ext) < 2 || len(ext) > 10 {
+		return ""
+	}
+	for _, r := range ext[1:] {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+			return ""
+		}
+	}
+	return strings.ToLower(ext)
+}
+
+// mimeExts are the extensions of the MIME types WhatsApp commonly carries.
+var mimeExts = map[string]string{
+	"image/jpeg":                    ".jpg",
+	"image/png":                     ".png",
+	"image/webp":                    ".webp",
+	"image/gif":                     ".gif",
+	"image/heic":                    ".heic",
+	"video/mp4":                     ".mp4",
+	"video/3gpp":                    ".3gp",
+	"video/quicktime":               ".mov",
+	"audio/ogg; codecs=opus":        ".ogg",
+	"audio/ogg":                     ".ogg",
+	"audio/mpeg":                    ".mp3",
+	"audio/mp4":                     ".m4a",
+	"audio/aac":                     ".aac",
+	"audio/amr":                     ".amr",
+	"application/pdf":               ".pdf",
+	"application/zip":               ".zip",
+	"application/rtf":               ".rtf",
+	"application/epub+zip":          ".epub",
+	"application/json":              ".json",
+	"application/msword":            ".doc",
+	"application/vnd.ms-excel":      ".xls",
+	"application/vnd.ms-powerpoint": ".ppt",
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document":   ".docx",
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":         ".xlsx",
+	"application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+	"application/vnd.oasis.opendocument.text":                                   ".odt",
+	"application/vnd.oasis.opendocument.spreadsheet":                            ".ods",
+	"application/vnd.oasis.opendocument.presentation":                           ".odp",
+	"text/plain":   ".txt",
+	"text/csv":     ".csv",
+	"text/html":    ".html",
+	"text/vcard":   ".vcf",
+	"text/x-vcard": ".vcf",
+}
+
+// mimeToExt is the extension for a MIME type: a known one's, else a guess
+// from its kind, else .bin.
+func mimeToExt(mime string) string {
+	if ext, ok := mimeExts[strings.ToLower(strings.TrimSpace(mime))]; ok {
+		return ext
+	}
+	switch {
+	case strings.HasPrefix(mime, "image/"):
+		return ".jpg"
+	case strings.HasPrefix(mime, "video/"):
+		return ".mp4"
+	case strings.HasPrefix(mime, "audio/"):
+		return ".ogg"
+	}
+	return ".bin"
 }
 
 func ptrUint64(v uint64) *uint64 { return &v }

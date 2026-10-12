@@ -34,6 +34,8 @@ fun Cursor.toConversation(): Conversation {
         ),
         avatarUrl = getStringOrNull("avatar_url"),
         updatedAt = getLong(getColumnIndexOrThrow("updated_at")),
+        isArchived = (getLongOrNull("is_archived") ?: 0) != 0L,
+        disappearingSeconds = getLongOrNull("disappearing_seconds") ?: 0,
     )
 }
 

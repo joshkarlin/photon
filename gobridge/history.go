@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sort"
 	"time"
 
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
@@ -8,6 +9,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 )
 
 func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
@@ -20,12 +22,18 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 	b.mu.RLock()
 	cfg := b.retention
 	b.mu.RUnlock()
+	now := time.Now().Unix()
 	cutoffTS := int64(0)
 	if cfg.MaxDays > 0 {
-		cutoffTS = time.Now().Unix() - int64(cfg.MaxDays*86400)
+		cutoffTS = now - int64(cfg.MaxDays*86400)
 	}
 
 	b.log.Infof("History sync: %d conversations (retention: %d days, %d msgs)", totalConvs, cfg.MaxDays, cfg.MaxMessages)
+
+	// "Keep chats archived", as the phone had it when it sent the history.
+	if gs := data.GetGlobalSettings(); gs != nil && gs.AutoUnarchiveChats != nil {
+		b.setKeepArchived(!gs.GetAutoUnarchiveChats(), 0)
+	}
 
 	for i, conv := range convs {
 		rawJID := conv.GetID()
@@ -49,6 +57,8 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 		// they run after the insert.
 		var edits []historyEdit
 		var revokes []historyRevoke
+		// Timer settings in the payload, applied after its messages.
+		var timers []timerReport
 		// Collect each distinct group sender's best name from history push
 		// names so historical messages render the contact/profile name instead
 		// of a bare number. Upserted once per sender after the loop.
@@ -103,6 +113,12 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 			case kindRevoke:
 				revokes = append(revokes, historyRevoke{targetID, evt.Info})
 				continue
+			case kindTimer:
+				if !isGroup {
+					t := settingMessageTimer(evt.Message.GetProtocolMessage(), ts)
+					timers = append(timers, timerReport{timerSetting: t, at: ts})
+				}
+				continue
 			case kindReaction, kindDrop:
 				skippedEmpty++
 				continue
@@ -120,7 +136,14 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 				}
 			}
 
-			pending = append(pending, b.buildMessageRow(contentMessage(evt.Message), evt.Info.ID, jid, senderJID, ts, isFromMe, "read"))
+			content := contentMessage(evt.Message)
+			row := b.buildMessageRow(content, evt.Info.ID, jid, senderJID, ts, isFromMe, "read")
+			applyViewOnce(row, evt.IsViewOnce, content)
+			if row.ExpiresAt = historyExpiry(wm, content, ts); row.ExpiresAt > 0 && row.ExpiresAt <= now {
+				skippedOld++
+				continue
+			}
+			pending = append(pending, row)
 			totalMsgs++
 			convMsgCount++
 		}
@@ -134,6 +157,10 @@ func (b *Bridge) handleHistorySync(evt *events.HistorySync) {
 		}
 		for _, r := range revokes {
 			b.applyRevoke(jid, r.info, r.targetID)
+		}
+		b.applyHistoryTimers(jid, conv, timers)
+		if conv.Archived != nil {
+			b.SetArchived(jid, conv.GetArchived(), 0)
 		}
 
 		// Name each distinct group sender once, as live messages do, but
@@ -272,4 +299,64 @@ func historyEditTarget(evt *events.Message, wm *waWeb.WebMessageInfo) (targetID 
 		return id, evt.Message.GetProtocolMessage().GetEditedMessage()
 	}
 	return "", nil
+}
+
+// applyHistoryTimers records a chat's disappearing timer from a history
+// payload: the setting messages in it, oldest first, then the timer the
+// conversation itself reports (its state when the phone sent it). A payload
+// whose conversation says nothing of a timer leaves it to its newest
+// message's.
+func (b *Bridge) applyHistoryTimers(jid string, conv *waHistorySync.Conversation, settings []timerReport) {
+	sort.SliceStable(settings, func(i, j int) bool { return settings[i].setAt < settings[j].setAt })
+	for _, r := range settings {
+		b.applyTimer(jid, r)
+	}
+	if conv.EphemeralExpiration != nil || conv.EphemeralSettingTimestamp != nil {
+		setAt := conv.GetEphemeralSettingTimestamp()
+		b.applyTimer(jid, timerReport{
+			timerSetting: timerSetting{seconds: conv.GetEphemeralExpiration(), setAt: setAt},
+			at:           setAt,
+		})
+		return
+	}
+	if t, ok := b.newestMessageTimer(jid); ok && t.seconds > 0 {
+		b.applyTimer(jid, timerReport{timerSetting: t})
+	}
+}
+
+// newestMessageTimer is the timer the newest stored message in a chat that
+// kept its proto reports.
+func (b *Bridge) newestMessageTimer(jid string) (timerSetting, bool) {
+	var raw []byte
+	err := b.msgDB.QueryRow(`SELECT raw_proto FROM messages WHERE conversation_jid = ? AND raw_proto IS NOT NULL
+		AND content_type NOT IN ('call', ?) ORDER BY timestamp DESC, _rowid_ DESC LIMIT 1`, jid, contentSystem).Scan(&raw)
+	if err != nil {
+		return timerSetting{}, false
+	}
+	var msg waE2E.Message
+	if proto.Unmarshal(raw, &msg) != nil {
+		return timerSetting{}, false
+	}
+	return contextTimer(&msg)
+}
+
+// historyExpiry is when a history message disappears: as the payload
+// records it, else from its own timer.
+func historyExpiry(wm *waWeb.WebMessageInfo, content *waE2E.Message, ts int64) int64 {
+	if at := unixSeconds(wm.GetEphemeralExpirationTimestamp()); at > 0 {
+		return at
+	}
+	if start, d := unixSeconds(wm.GetEphemeralStartTimestamp()), wm.GetEphemeralDuration(); start > 0 && d > 0 {
+		return start + int64(d)
+	}
+	return messageExpiry(content, ts)
+}
+
+// unixSeconds reads a timestamp WhatsApp may give in seconds or
+// milliseconds.
+func unixSeconds(v uint64) int64 {
+	if v > 100_000_000_000 {
+		return int64(v / 1000)
+	}
+	return int64(v)
 }

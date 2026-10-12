@@ -9,14 +9,16 @@ internal fun createWhatsAppSchema(db: SQLiteDatabase) {
         "CREATE TABLE conversations (jid TEXT PRIMARY KEY, name TEXT, is_group INTEGER NOT NULL DEFAULT 0, " +
             "last_message_id TEXT, last_timestamp INTEGER NOT NULL DEFAULT 0, unread_count INTEGER NOT NULL DEFAULT 0, " +
             "is_muted INTEGER NOT NULL DEFAULT 0, avatar_url TEXT, updated_at INTEGER NOT NULL DEFAULT 0, " +
-            "muted_until INTEGER NOT NULL DEFAULT 0)",
+            "muted_until INTEGER NOT NULL DEFAULT 0, name_rank INTEGER NOT NULL DEFAULT 0, " +
+            "disappearing_seconds INTEGER NOT NULL DEFAULT 0, disappearing_set_at INTEGER NOT NULL DEFAULT 0, " +
+            "is_archived INTEGER NOT NULL DEFAULT 0, archived_at INTEGER NOT NULL DEFAULT 0)",
     )
     db.execSQL(
         "CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_jid TEXT NOT NULL, sender_jid TEXT NOT NULL, " +
             "timestamp INTEGER NOT NULL, content_type TEXT NOT NULL, text_body TEXT, media_url TEXT, media_mime TEXT, " +
             "media_size INTEGER, thumbnail_path TEXT, sticker_pack_id TEXT, reply_to_id TEXT, " +
             "edit_version INTEGER NOT NULL DEFAULT 0, is_from_me INTEGER NOT NULL DEFAULT 0, " +
-            "status TEXT NOT NULL DEFAULT 'sent', raw_proto BLOB)",
+            "status TEXT NOT NULL DEFAULT 'sent', raw_proto BLOB, expires_at INTEGER NOT NULL DEFAULT 0)",
     )
     db.execSQL(
         "CREATE TABLE participants (conversation_jid TEXT NOT NULL, jid TEXT NOT NULL, display_name TEXT, " +

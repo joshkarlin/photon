@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
@@ -15,6 +16,8 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 	switch v := evt.(type) {
 	case *events.Message:
 		b.handleMessage(v)
+	case *events.UndecryptableMessage:
+		b.handleUndecryptable(v)
 	case *events.Receipt:
 		b.handleReceipt(v)
 	case *events.ChatPresence:
@@ -39,6 +42,10 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 		// as events.Contact.
 		b.log.Infof("App state sync complete: %s", v.Name)
 		go b.reconcile()
+		if v.Name == appstate.WAPatchRegularLow {
+			// Where archive states live; stored without events too.
+			go b.syncArchivedFromStore()
+		}
 	case *events.Disconnected:
 		b.log.Infof("Disconnected from WhatsApp")
 		state, _ := b.currentConnectionState()
@@ -76,8 +83,14 @@ func (b *Bridge) HandleEvent(evt interface{}) {
 		b.handleCallEvent(v)
 	case *events.GroupInfo:
 		b.handleGroupInfo(v)
+	case *events.JoinedGroup:
+		b.handleJoinedGroup(v)
 	case *events.Mute:
 		b.handleMute(v)
+	case *events.Archive:
+		b.handleArchive(v)
+	case *events.UnarchiveChatsSetting:
+		b.handleUnarchiveChatsSetting(v)
 	case *events.MarkChatAsRead:
 		b.handleMarkChatAsRead(v)
 	case *events.BusinessName:

@@ -31,7 +31,11 @@ func (f *fakeWhatsApp) attach(b *Bridge) {
 			return whatsmeow.SendResponse{}, errors.New("offline")
 		}
 		f.sent = append(f.sent, msg)
-		f.ids = append(f.ids, extra[0].ID)
+		id := ""
+		if len(extra) > 0 {
+			id = extra[0].ID
+		}
+		f.ids = append(f.ids, id)
 		return whatsmeow.SendResponse{Timestamp: time.Unix(1_900_000_000, 0)}, nil
 	}
 }
@@ -69,7 +73,7 @@ func sendMedia(t *testing.T, b *Bridge, payload SendMediaPayload) (string, Envel
 func TestBuildMediaMessage_namesDocumentsOnly(t *testing.T) {
 	withName := mediaText{FileName: "Q1 report.pdf"}
 
-	doc := buildMediaMessage(whatsmeow.UploadResponse{}, "application/pdf", withName, "", []byte("x")).GetDocumentMessage()
+	doc := buildMediaMessage(whatsmeow.UploadResponse{}, "application/pdf", withName, nil, []byte("x")).GetDocumentMessage()
 	if doc.GetFileName() != "Q1 report.pdf" || doc.GetTitle() != "Q1 report.pdf" {
 		t.Errorf("document file name %q, title %q", doc.GetFileName(), doc.GetTitle())
 	}
@@ -77,13 +81,13 @@ func TestBuildMediaMessage_namesDocumentsOnly(t *testing.T) {
 		t.Errorf("document caption = %q, want none", doc.GetCaption())
 	}
 
-	unnamed := buildMediaMessage(whatsmeow.UploadResponse{}, "application/pdf", mediaText{}, "", nil).GetDocumentMessage()
+	unnamed := buildMediaMessage(whatsmeow.UploadResponse{}, "application/pdf", mediaText{}, nil, nil).GetDocumentMessage()
 	if unnamed.FileName != nil || unnamed.Title != nil {
 		t.Errorf("a document without a name got %q / %q", unnamed.GetFileName(), unnamed.GetTitle())
 	}
 
 	for _, mime := range []string{"image/jpeg", "video/mp4", "audio/ogg"} {
-		msg := buildMediaMessage(whatsmeow.UploadResponse{}, mime, withName, "", nil)
+		msg := buildMediaMessage(whatsmeow.UploadResponse{}, mime, withName, nil, nil)
 		if msg.GetDocumentMessage() != nil {
 			t.Errorf("%s was sent as a document", mime)
 		}

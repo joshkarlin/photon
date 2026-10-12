@@ -1,5 +1,7 @@
 package app.photon.service
 
+import android.app.Notification
+import android.app.NotificationManager
 import android.content.Context
 import android.util.Log
 import app.photon.chat.ChatBackend
@@ -24,6 +26,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.JsonObject
 
 /**
  * WhatsApp for as long as the service runs: the bridge process and the
@@ -207,6 +210,24 @@ class WhatsAppSession internal constructor(
                     NotificationHelper.cancelForConversation(context, convJid)
                 }
             }
+            "message_replaced" -> {
+                // A placeholder (a message that couldn't be decrypted) became
+                // the real message. If the notification showed the
+                // placeholder, it now shows the message, without alerting.
+                if (evt.boolean("newest_unread") != true || evt.boolean("is_from_me") == true) return
+                val convJid = evt.string("conversation_jid") ?: return
+                replaceShownMessage(convJid, evt)
+            }
+            "messages_removed" -> {
+                // Messages disappeared (or were placeholders for nothing).
+                // The notification mustn't keep showing one.
+                val convJid = evt.string("conversation_jid") ?: return
+                when (val change = removedNotification(evt)) {
+                    RemovedNotification.Keep -> {}
+                    RemovedNotification.Cancel -> NotificationHelper.cancelForConversation(context, convJid)
+                    is RemovedNotification.Show -> replaceShownMessage(convJid, change.newest)
+                }
+            }
             "message_revoked" -> {
                 // A sender deleted the only unread message: withdraw the banner
                 // that announced it.
@@ -237,6 +258,33 @@ class WhatsAppSession internal constructor(
         }
     }
 
+    /**
+     * Show [message] (a `new_message`-shaped event) in place of what the
+     * chat's message notification shows, without alerting. Only a
+     * notification still up is corrected: one the user dismissed isn't
+     * brought back. A chat that shouldn't notify loses it instead.
+     */
+    private fun replaceShownMessage(convJid: String, message: BridgeEvent) {
+        if (!hasMessageNotification(convJid)) return
+        val conversation = repository.storedConversation(convJid)
+        if (isPseudoWhatsAppJid(convJid) || conversation?.isMuted == true) {
+            NotificationHelper.cancelForConversation(context, convJid)
+            return
+        }
+        val text = repository.names.messageNotification(message, conversation)
+        NotificationHelper.showMessageNotification(
+            context, text.title, text.body, Platform.WHATSAPP, convJid, update = true,
+        )
+    }
+
+    private fun hasMessageNotification(convJid: String): Boolean = try {
+        context.getSystemService(NotificationManager::class.java).activeNotifications.any {
+            it.tag == convJid && it.notification.category == Notification.CATEGORY_MESSAGE
+        }
+    } catch (_: Exception) {
+        false
+    }
+
     private fun callerName(evt: BridgeEvent, convJid: String): String =
         repository.names.callerTitle(evt, repository.storedConversation(convJid))
 
@@ -248,7 +296,8 @@ class WhatsAppSession internal constructor(
 
         // Bridge events the notification layer acts on; delivered losslessly.
         val NOTIFIED_EVENTS = setOf(
-            "new_message", "read_self", "message_revoked", "call_incoming", "call_ended", "call_missed",
+            "new_message", "read_self", "message_revoked", "messages_removed", "message_replaced",
+            "call_incoming", "call_ended", "call_missed",
         )
 
         // A restarted bridge that stays up this long resets the restart backoff.
@@ -256,4 +305,26 @@ class WhatsAppSession internal constructor(
 
         const val QR_TTL_MS = 15_000L
     }
+}
+
+/** What a bridge `messages_removed` event does to its chat's notification. */
+internal sealed interface RemovedNotification {
+    /** Nothing it showed went, or nothing was unread. */
+    data object Keep : RemovedNotification
+
+    /** Nothing in the chat is unread any more, or nothing left to show. */
+    data object Cancel : RemovedNotification
+
+    /** The message it showed went; show [newest] (a `new_message`-shaped event) instead, quietly. */
+    data class Show(val newest: BridgeEvent) : RemovedNotification
+}
+
+internal fun removedNotification(evt: BridgeEvent): RemovedNotification {
+    if (evt.boolean("was_unread") != true) return RemovedNotification.Keep
+    if ((evt.int("unread_count") ?: 0) == 0) return RemovedNotification.Cancel
+    // The message it showed is still there.
+    if (evt.boolean("newest_removed") != true) return RemovedNotification.Keep
+    // Gone, with no message left to show (calls, "mark as unread").
+    val newest = evt.payload["newest_unread"] as? JsonObject ?: return RemovedNotification.Cancel
+    return RemovedNotification.Show(BridgeEvent(type = "new_message", payload = newest))
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"strings"
 
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
@@ -62,6 +61,7 @@ const (
 	kindReaction                    // a reaction to targetID
 	kindRevoke                      // "delete for everyone" of targetID
 	kindEdit                        // an edit of targetID
+	kindTimer                       // a chat's disappearing timer was set
 )
 
 // classifyMessageEvent decides what a (UnwrapRaw-ed) message does. Shared by
@@ -69,6 +69,9 @@ const (
 func classifyMessageEvent(msg *waE2E.Message) (kind messageKind, targetID string) {
 	if r := msg.GetReactionMessage(); r != nil {
 		return kindReaction, r.GetKey().GetID()
+	}
+	if msg.GetProtocolMessage().GetType() == waE2E.ProtocolMessage_EPHEMERAL_SETTING {
+		return kindTimer, ""
 	}
 	if pm := msg.GetProtocolMessage(); pm != nil && pm.GetKey().GetID() != "" {
 		switch pm.GetType() {
@@ -176,15 +179,12 @@ func directContent(msg *waE2E.Message) (contentType, text string, found bool) {
 	case msg.GetAudioMessage() != nil:
 		return "audio", "", true
 	case msg.GetDocumentMessage() != nil:
-		return "document", msg.GetDocumentMessage().GetFileName(), true
+		return "document", documentName(msg.GetDocumentMessage()), true
 	case msg.GetStickerMessage() != nil:
 		return "sticker", "", true
-	case msg.GetLocationMessage() != nil:
-		loc := msg.GetLocationMessage()
-		return "location", formatCoords(loc.GetDegreesLatitude(), loc.GetDegreesLongitude()), true
-	case msg.GetLiveLocationMessage() != nil:
-		loc := msg.GetLiveLocationMessage()
-		return "location", formatCoords(loc.GetDegreesLatitude(), loc.GetDegreesLongitude()), true
+	case msg.GetLocationMessage() != nil, msg.GetLiveLocationMessage() != nil:
+		label, _, _ := location(msg)
+		return contentLocation, label, true
 	case msg.GetContactMessage() != nil:
 		return "contact", msg.GetContactMessage().GetDisplayName(), true
 	case msg.GetContactsArrayMessage() != nil:
@@ -388,10 +388,6 @@ func callLogText(isVideo bool, outcome waE2E.CallLogMessage_CallOutcome) string 
 		return "Failed " + kind
 	}
 	return strings.ToUpper(kind[:1]) + kind[1:]
-}
-
-func formatCoords(lat, lng float64) string {
-	return fmt.Sprintf("%.6f, %.6f", lat, lng)
 }
 
 func orBusiness(s string) string {

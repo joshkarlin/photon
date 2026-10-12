@@ -106,8 +106,13 @@ func (b *Bridge) mergeConversation(from, to string) (bool, error) {
 	var name rankedName
 	var unread int
 	var lastTS, mutedUntil int64
-	err = tx.QueryRow(`SELECT COALESCE(name, ''), name_rank, COALESCE(last_message_id, ''), last_timestamp, unread_count, muted_until
-		FROM conversations WHERE jid = ?`, from).Scan(&name.name, &name.rank, &lastMsgID, &lastTS, &unread, &mutedUntil)
+	var timer timerSetting
+	var archived bool
+	var archivedAt int64
+	err = tx.QueryRow(`SELECT COALESCE(name, ''), name_rank, COALESCE(last_message_id, ''), last_timestamp, unread_count, muted_until,
+		disappearing_seconds, disappearing_set_at, is_archived, archived_at
+		FROM conversations WHERE jid = ?`, from).Scan(&name.name, &name.rank, &lastMsgID, &lastTS, &unread, &mutedUntil,
+		&timer.seconds, &timer.setAt, &archived, &archivedAt)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -119,6 +124,12 @@ func (b *Bridge) mergeConversation(from, to string) (bool, error) {
 	// upsertConversation moves the target's last message only forward, and
 	// the source's name, as it may be the older of the two, only fills a
 	// missing or weaker one — exactly the merge we want.
+	// A timer change both JIDs recorded shows once.
+	if _, err := tx.Exec(`DELETE FROM messages WHERE conversation_jid = ? AND content_type = ? AND EXISTS (
+			SELECT 1 FROM messages t WHERE t.conversation_jid = ? AND t.content_type = messages.content_type
+			AND t.timestamp = messages.timestamp AND t.text_body IS messages.text_body)`, from, contentSystem, to); err != nil {
+		return false, err
+	}
 	for _, q := range []string{
 		`UPDATE messages SET conversation_jid = ? WHERE conversation_jid = ?`,
 		`UPDATE OR IGNORE participants SET conversation_jid = ? WHERE conversation_jid = ?`,
@@ -139,6 +150,18 @@ func (b *Bridge) mergeConversation(from, to string) (bool, error) {
 		is_muted = CASE WHEN ? <> 0 OR muted_until <> 0 THEN 1 ELSE 0 END
 		WHERE jid = ?`, unread, mutedUntil, mutedUntil, mutedUntil, to); err != nil {
 		return false, err
+	}
+	// The disappearing timer and archive state set more recently under
+	// either JID stand.
+	if timer != (timerSetting{}) {
+		if _, _, err := b.applyTimerTx(tx, to, timerReport{timerSetting: timer}); err != nil {
+			return false, err
+		}
+	}
+	if archived || archivedAt > 0 {
+		if _, err := setArchived(tx, to, archived, archivedAt); err != nil {
+			return false, err
+		}
 	}
 	if _, err := tx.Exec(`DELETE FROM conversations WHERE jid = ?`, from); err != nil {
 		return false, err
