@@ -6,9 +6,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.tooling.preview.Preview
-import app.photon.R
 import app.photon.data.ComposeStyle
 import app.photon.data.KeyboardStyle
 import app.photon.data.model.ContentTypes
@@ -17,6 +15,10 @@ import app.photon.data.model.Message
 import app.photon.data.model.MessageStatus
 import app.photon.data.model.Platform
 import app.photon.data.model.Reaction
+import app.photon.ui.chat.ARCHIVED
+import app.photon.ui.chat.platformIcon
+import app.photon.ui.home.PlatformsScreen
+import app.photon.ui.shared.ChatListFrame
 import app.photon.ui.shared.ChatListLayout
 import app.photon.ui.shared.ChatThread
 import app.photon.ui.shared.components.ComposeEditor
@@ -51,10 +53,11 @@ internal object PreviewSamples {
         unread: Int = 0,
         isGroup: Boolean = false,
         muted: Boolean = false,
+        archived: Boolean = false,
     ) = Conversation(
         jid = jid, name = name, isGroup = isGroup, lastMessageId = null,
         lastTimestamp = now - ago, unreadCount = unread, isMuted = muted,
-        avatarUrl = null, updatedAt = now - ago,
+        avatarUrl = null, updatedAt = now - ago, isArchived = archived,
     ) to platform
 
     private val tagged = listOf(
@@ -68,10 +71,19 @@ internal object PreviewSamples {
         conversation("b@s.whatsapp.net", "Priya", Platform.WHATSAPP, 9 * 24 * HOUR),
     )
 
+    /** Chats archived on the phone, one of them with a new message. */
+    private val taggedArchived = listOf(
+        conversation("sig-3", "Marcus Lee", Platform.SIGNAL, 3 * HOUR, unread = 1, archived = true),
+        conversation("f@g.us", "Old flatmates", Platform.WHATSAPP, 3 * 24 * HOUR, isGroup = true, archived = true),
+        conversation("Dentist", "Dentist", Platform.SMS, 12 * 24 * HOUR, archived = true),
+        conversation("p@g.us", "Parents' evening", Platform.WHATSAPP, 40 * 24 * HOUR, isGroup = true, muted = true, archived = true),
+    )
+
     val conversations: List<Conversation> = tagged.map { it.first }
+    val archivedConversations: List<Conversation> = taggedArchived.map { it.first }
 
     fun platformOf(conversation: Conversation): Platform =
-        tagged.first { it.first.jid == conversation.jid }.second
+        (tagged + taggedArchived).first { it.first.jid == conversation.jid }.second
 
     private fun message(
         id: String,
@@ -172,21 +184,23 @@ private fun PhotonPreview(content: @Composable () -> Unit) {
 @Composable
 internal fun ChatListSample() {
     ChatListLayout(
-        filter = "All Chats",
+        frame = ChatListFrame.Main("All Chats", onFilter = {}, onSettings = {}),
         conversations = PreviewSamples.conversations,
         platformOf = PreviewSamples::platformOf,
         onChat = {},
-        onFilter = {},
-        onSettings = {},
-        icon = { conv ->
-            painterResource(
-                when (PreviewSamples.platformOf(conv)) {
-                    Platform.WHATSAPP -> R.drawable.ic_whatsapp
-                    Platform.SIGNAL -> R.drawable.ic_signal
-                    Platform.SMS -> R.drawable.ic_sms
-                },
-            )
-        },
+        icon = { conv -> platformIcon(PreviewSamples.platformOf(conv)) },
+    )
+}
+
+/** Archived, opened from the platform picker. */
+@Composable
+internal fun ArchivedChatsSample() {
+    ChatListLayout(
+        frame = ChatListFrame.Page(ARCHIVED, onBack = {}),
+        conversations = PreviewSamples.archivedConversations,
+        platformOf = PreviewSamples::platformOf,
+        onChat = {},
+        icon = { conv -> platformIcon(PreviewSamples.platformOf(conv)) },
     )
 }
 
@@ -279,8 +293,22 @@ private fun ChatListPreview() = PhotonPreview { ChatListSample() }
 @Preview(name = "Chat list – empty", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
 @Composable
 private fun EmptyChatListPreview() = PhotonPreview {
-    ChatListLayout(filter = "Signal", conversations = emptyList(), platformOf = { Platform.SIGNAL }, onChat = {}, emptyMessage = "no messages yet", onFilter = {}, onSettings = {})
+    ChatListLayout(
+        frame = ChatListFrame.Main("Signal", onFilter = {}, onSettings = {}),
+        conversations = emptyList(),
+        platformOf = { Platform.SIGNAL },
+        onChat = {},
+        emptyMessage = "no messages yet",
+    )
 }
+
+@Preview(name = "Archived", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
+@Composable
+private fun ArchivedChatsPreview() = PhotonPreview { ArchivedChatsSample() }
+
+@Preview(name = "Platform picker", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
+@Composable
+private fun PlatformsPreview() = PhotonPreview { PlatformsScreen(onPick = {}, onArchived = {}, onBack = {}) }
 
 @Preview(name = "DM", widthDp = LP3_WIDTH_DP, heightDp = LP3_HEIGHT_DP, showBackground = true, backgroundColor = 0xFF000000)
 @Composable

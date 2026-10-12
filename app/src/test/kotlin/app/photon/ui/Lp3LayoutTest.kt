@@ -16,6 +16,7 @@ import app.photon.ui.preview.GroupThreadSample
 import app.photon.ui.preview.PreviewSamples
 import app.photon.ui.settings.SettingsScreen
 import app.photon.ui.shared.CHAT_LIST_TAG
+import app.photon.ui.shared.ChatListFrame
 import app.photon.ui.shared.ChatListLayout
 import app.photon.ui.shared.formatTimestamp
 import app.photon.ui.theme.PhotonTheme
@@ -62,7 +63,7 @@ class Lp3LayoutTest {
         rule.setContent {
             PhotonTheme {
                 ChatListLayout(
-                    filter = "SMS",
+                    frame = ChatListFrame.Main("SMS"),
                     conversations = PreviewSamples.conversations,
                     platformOf = PreviewSamples::platformOf,
                     onChat = {},

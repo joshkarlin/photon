@@ -25,6 +25,7 @@ import app.photon.data.model.Conversation
 import app.photon.data.model.Platform
 import app.photon.service.NotificationHelper
 import app.photon.ui.shared.components.PageScrollBar
+import app.photon.ui.shared.components.backButton
 import app.photon.ui.shared.components.newMessageButton
 import app.photon.ui.shared.components.settingsButton
 import app.photon.ui.theme.PhotonGrid
@@ -34,29 +35,56 @@ import com.thelightphone.sdk.ui.LightLazyScrollView
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
 import com.thelightphone.sdk.ui.LightThemeTokens
+import com.thelightphone.sdk.ui.LightTopBar
+import com.thelightphone.sdk.ui.LightTopBarCenter
 import com.thelightphone.sdk.ui.gridUnitsAsDp
 
 /**
+ * What frames a chat list: the main list's bottom bar, or a secondary
+ * page's top bar.
+ */
+sealed interface ChatListFrame {
+    /**
+     * The main list, as LightOS Messages: no top bar (its height is left
+     * empty above the list), and a bottom bar that stays put while the list
+     * scrolls, with Settings on the left as in LightOS Calendar and
+     * Weather, the [filter] in the middle ("All Chats", "Signal"; tapping
+     * it calls [onFilter]), and New message on the right (none when
+     * [onNewMessage] is null).
+     */
+    data class Main(
+        val filter: String,
+        val onFilter: (() -> Unit)? = null,
+        val onSettings: (() -> Unit)? = null,
+        val onNewMessage: (() -> Unit)? = null,
+    ) : ChatListFrame
+
+    /**
+     * A list opened from somewhere else (Archived): Back and a centred
+     * [title] on top, as every secondary page has, and no bottom bar.
+     */
+    data class Page(val title: String, val onBack: () -> Unit) : ChatListFrame
+}
+
+/**
  * The chat list's layout and behaviour, for [app.photon.ui.chat.ChatListScreen]:
- * the conversation list (or its loading or empty state) over a bottom bar.
+ * the conversation list (or its loading or empty state) in its [frame].
  *
- * @param filter which chats are listed ("All Chats", "Signal"), shown in the
- *   bottom bar, where tapping it calls [onFilter]
  * @param platformOf which platform a listed conversation belongs to
- * @param onNewMessage starts a new conversation; null leaves its slot empty
+ * @param reconcileWith the chats whose notifications this list clears once
+ *   they're read: those listed, and any the list leaves out (archived chats
+ *   still notify)
  */
 @Composable
 fun ChatListContent(
-    filter: String,
+    frame: ChatListFrame,
     conversations: List<Conversation>?,
     platformOf: (Conversation) -> Platform,
     onChat: (String) -> Unit,
     emptyMessage: String = "no messages",
     emptyContent: @Composable (() -> Unit)? = null,
     icon: @Composable ((Conversation) -> Painter)? = null,
-    onFilter: (() -> Unit)? = null,
-    onSettings: (() -> Unit)? = null,
-    onNewMessage: (() -> Unit)? = null,
+    reconcileWith: List<Conversation>? = conversations,
 ) {
     val listState = rememberLazyListState()
     val context = LocalContext.current
@@ -64,8 +92,8 @@ fun ChatListContent(
 
     // Clear notifications left behind for chats that are no longer unread
     // (read on another device, deleted, or posted by a previous process).
-    LaunchedEffect(conversations) {
-        conversations?.let { list ->
+    LaunchedEffect(reconcileWith) {
+        reconcileWith?.let { list ->
             NotificationHelper.reconcile(context, list.associate { it.jid to it.unreadCount })
         }
     }
@@ -97,7 +125,7 @@ fun ChatListContent(
     }
 
     ChatListLayout(
-        filter = filter,
+        frame = frame,
         conversations = conversations,
         platformOf = platformOf,
         onChat = onChat,
@@ -105,9 +133,6 @@ fun ChatListContent(
         emptyMessage = emptyMessage,
         emptyContent = emptyContent,
         icon = icon,
-        onFilter = onFilter,
-        onSettings = onSettings,
-        onNewMessage = onNewMessage,
     )
 }
 
@@ -115,16 +140,13 @@ fun ChatListContent(
 internal const val CHAT_LIST_TAG = "chatList"
 
 /**
- * The chat list without its effects, so previews can render it. Laid out
- * as LightOS Messages: no top bar (its height is left empty above the
- * list), and a bottom bar that stays put while the list scrolls, with
- * Settings on the left as in LightOS Calendar and Weather, the filter in
- * the middle, and New message on the right. Loading and empty states keep
- * the bar, so Settings is always in reach.
+ * The chat list without its effects, so previews can render it: the list,
+ * or its loading or empty state, in its [frame]. Loading and empty states
+ * keep the frame, so Settings (or Back) is always in reach.
  */
 @Composable
 internal fun ChatListLayout(
-    filter: String,
+    frame: ChatListFrame,
     conversations: List<Conversation>?,
     platformOf: (Conversation) -> Platform,
     onChat: (String) -> Unit,
@@ -132,16 +154,19 @@ internal fun ChatListLayout(
     emptyMessage: String = "no messages",
     emptyContent: @Composable (() -> Unit)? = null,
     icon: @Composable ((Conversation) -> Painter)? = null,
-    onFilter: (() -> Unit)? = null,
-    onSettings: (() -> Unit)? = null,
-    onNewMessage: (() -> Unit)? = null,
 ) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(LightThemeTokens.colors.background),
     ) {
-        Spacer(Modifier.height(PhotonGrid.TOP_BAR_HEIGHT.gridUnitsAsDp()))
+        when (frame) {
+            is ChatListFrame.Main -> Spacer(Modifier.height(PhotonGrid.TOP_BAR_HEIGHT.gridUnitsAsDp()))
+            is ChatListFrame.Page -> LightTopBar(
+                leftButton = backButton(frame.onBack),
+                center = LightTopBarCenter.Text(frame.title),
+            )
+        }
 
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             when {
@@ -189,12 +214,14 @@ internal fun ChatListLayout(
             }
         }
 
-        LightBottomBar(
-            items = listOf(
-                onSettings?.let(::settingsButton),
-                LightBarButton.Text(text = filter.uppercase(), onClick = onFilter),
-                onNewMessage?.let(::newMessageButton),
-            ),
-        )
+        if (frame is ChatListFrame.Main) {
+            LightBottomBar(
+                items = listOf(
+                    frame.onSettings?.let(::settingsButton),
+                    LightBarButton.Text(text = frame.filter.uppercase(), onClick = frame.onFilter),
+                    frame.onNewMessage?.let(::newMessageButton),
+                ),
+            )
+        }
     }
 }
