@@ -1,5 +1,6 @@
 package app.photon.service
 
+import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
@@ -28,6 +29,10 @@ object NotificationHelper {
     private const val MESSAGE_NOTIF_ID = 1
     private const val INCOMING_CALL_NOTIF_ID = 2
     private const val MISSED_CALL_NOTIF_ID = 3
+    private const val GROUP_CALL_NOTIF_ID = 4
+
+    // What a chat being read clears; a ringing call is left to end by itself.
+    private val READ_CLEARS = listOf(MESSAGE_NOTIF_ID, MISSED_CALL_NOTIF_ID, GROUP_CALL_NOTIF_ID)
 
     // A ringing notification outlives the call by a margin; the caller gives
     // up well before this, and the terminate event replaces it as "missed".
@@ -35,6 +40,9 @@ object NotificationHelper {
 
     /** A message notification's body when there's nothing of the message to show. */
     const val NEW_MESSAGE = "New message"
+
+    /** A group-call notification's text: "Alice started a group call". */
+    internal fun groupCallStartedText(starterName: String) = "$starterName started a group call"
 
     const val EXTRA_PLATFORM = "app.photon.extra.PLATFORM"
     const val EXTRA_CONVERSATION = "app.photon.extra.CONVERSATION"
@@ -54,35 +62,70 @@ object NotificationHelper {
 
     fun isVisible(conversationJid: String): Boolean = visibleConversation == conversationJid
 
-    // The NOTIFICATIONS setting, cached so posting doesn't wait on DataStore.
-    // Null while nothing keeps it current.
-    @Volatile private var cachedLevel: NotificationLevel? = null
+    // Settings › Chat › Messages and Calls, cached so posting doesn't wait on
+    // DataStore. Null while nothing keeps them current.
+    @Volatile private var cachedMessageLevel: NotificationLevel? = null
+    @Volatile private var cachedCallLevel: NotificationLevel? = null
 
     /**
-     * Keeps the cached NOTIFICATIONS level current from [levels] for the life
-     * of [scope]. `PhotonApp` follows the stored setting at startup.
+     * Keeps the cached Messages and Calls levels current from [messageLevels]
+     * and [callLevels] for the life of [scope]. `PhotonApp` follows the
+     * stored settings at startup.
      */
-    fun followLevel(levels: Flow<NotificationLevel>, scope: CoroutineScope): Job = scope.launch {
-        try {
-            levels.collect { cachedLevel = it }
-        } finally {
-            cachedLevel = null
+    fun followLevels(
+        messageLevels: Flow<NotificationLevel>,
+        callLevels: Flow<NotificationLevel>,
+        scope: CoroutineScope,
+    ): Job = scope.launch {
+        launch {
+            try {
+                messageLevels.collect { cachedMessageLevel = it }
+            } finally {
+                cachedMessageLevel = null
+            }
+        }
+        launch {
+            try {
+                callLevels.collect { cachedCallLevel = it }
+            } finally {
+                cachedCallLevel = null
+            }
         }
     }
 
-    // Before the first value arrives (moments after startup, well before a
-    // session can deliver anything), read the setting directly. Posting
+    // Before the first values arrive (moments after startup, well before a
+    // session can deliver anything), read the settings directly. Posting
     // happens off the main thread.
-    private fun level(context: Context): NotificationLevel =
-        cachedLevel ?: runBlocking { PhotonPreferences(context).notificationLevel.first() }
+    private fun messageLevel(context: Context): NotificationLevel =
+        cachedMessageLevel ?: runBlocking { PhotonPreferences(context).messageLevel.first() }
 
-    /** The channel a level posts messages and calls to; null at [NotificationLevel.OFF]. */
+    private fun callLevel(context: Context): NotificationLevel =
+        cachedCallLevel ?: runBlocking { PhotonPreferences(context).callLevel.first() }
+
+    /** The channel a Messages level posts to; null at [NotificationLevel.OFF]. */
     internal fun channelFor(level: NotificationLevel): String? = when (level) {
         NotificationLevel.SOUND -> PhotonApp.CHANNEL_MESSAGES
         NotificationLevel.VIBRATE -> PhotonApp.CHANNEL_MESSAGES_VIBRATE
         NotificationLevel.SILENT -> PhotonApp.CHANNEL_MESSAGES_SILENT
         NotificationLevel.OFF -> null
     }
+
+    /** The channel a Calls level posts to; null at [NotificationLevel.OFF]. */
+    internal fun callChannelFor(level: NotificationLevel): String? = when (level) {
+        NotificationLevel.SOUND -> PhotonApp.CHANNEL_CALLS
+        NotificationLevel.VIBRATE -> PhotonApp.CHANNEL_CALLS_VIBRATE
+        NotificationLevel.SILENT -> PhotonApp.CHANNEL_CALLS_SILENT
+        NotificationLevel.OFF -> null
+    }
+
+    /**
+     * Whether a ringing call keeps alerting until it ends: at the levels
+     * that alert at all. FLAG_INSISTENT repeats the channel's sound or
+     * vibration until the notification is cancelled ([cancelIncomingCall],
+     * the missed call that replaces it, or the timeout).
+     */
+    internal fun ringsInsistently(level: NotificationLevel): Boolean =
+        level == NotificationLevel.SOUND || level == NotificationLevel.VIBRATE
 
     /**
      * Post (or replace) the conversation's message notification.
@@ -103,7 +146,7 @@ object NotificationHelper {
         update: Boolean = false,
     ) {
         if (isVisible(conversationJid)) return
-        val channel = channelFor(level(context))
+        val channel = channelFor(messageLevel(context))
         if (channel == null) {
             if (update) NotificationManagerCompat.from(context).cancel(conversationJid, MESSAGE_NOTIF_ID)
             return
@@ -122,7 +165,9 @@ object NotificationHelper {
      * A call is ringing on the user's other devices. Photon can't answer it;
      * this tells the user someone is calling. Not suppressed for the visible
      * conversation — a ringing call is time-sensitive even mid-chat. Posted
-     * at every level but OFF, so at SILENT it shows without ringing.
+     * at every Calls level but OFF. At SOUND and VIBRATE it keeps ringing or
+     * buzzing until the call ends or [INCOMING_CALL_TIMEOUT_MS] passes; at
+     * SILENT it shows without either.
      */
     fun showIncomingCall(
         context: Context,
@@ -131,15 +176,19 @@ object NotificationHelper {
         conversationJid: String,
         isVideo: Boolean,
     ) {
-        val channel = channelFor(level(context)) ?: return
-        post(
-            context, conversationJid, INCOMING_CALL_NOTIF_ID,
-            builder(context, channel, platform, conversationJid)
-                .setContentTitle("$callerName · ${platform.label}")
-                .setContentText(if (isVideo) "Incoming video call" else "Incoming voice call")
-                .setCategory(NotificationCompat.CATEGORY_CALL)
-                .setTimeoutAfter(INCOMING_CALL_TIMEOUT_MS),
-        )
+        val level = callLevel(context)
+        val channel = callChannelFor(level) ?: return
+        val notification = builder(context, channel, platform, conversationJid)
+            .setContentTitle("$callerName · ${platform.label}")
+            .setContentText(if (isVideo) "Incoming video call" else "Incoming voice call")
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setTimeoutAfter(INCOMING_CALL_TIMEOUT_MS)
+            .build()
+        // NotificationCompat.Builder has no setter for FLAG_INSISTENT (and
+        // setOngoing is a different flag: it would stop the user swiping the
+        // ringing away), so it goes on the built notification.
+        if (ringsInsistently(level)) notification.flags = notification.flags or Notification.FLAG_INSISTENT
+        post(context, conversationJid, INCOMING_CALL_NOTIF_ID, notification)
     }
 
     /** Replaces any ringing notification for the conversation with a missed-call one. */
@@ -152,7 +201,7 @@ object NotificationHelper {
     ) {
         cancelIncomingCall(context, conversationJid)
         if (isVisible(conversationJid)) return
-        val channel = channelFor(level(context)) ?: return
+        val channel = callChannelFor(callLevel(context)) ?: return
         post(
             context, conversationJid, MISSED_CALL_NOTIF_ID,
             builder(context, channel, platform, conversationJid)
@@ -162,25 +211,53 @@ object NotificationHelper {
         )
     }
 
+    /**
+     * Someone started a group call (Signal announces it to the group). It
+     * counts as a call, so it follows the Calls level, but it alerts once
+     * rather than ringing: Photon can't join, and it isn't calling the user
+     * alone. Not posted for the visible conversation, where the call's row
+     * shows. The caller decides about mutes, as it does for messages.
+     *
+     * @param groupTitle the group, as DisplayNames titles it
+     * @param starterName who started it, as DisplayNames names them
+     */
+    fun showGroupCallStarted(
+        context: Context,
+        groupTitle: String,
+        starterName: String,
+        platform: Platform,
+        conversationJid: String,
+    ) {
+        if (isVisible(conversationJid)) return
+        val channel = callChannelFor(callLevel(context)) ?: return
+        post(
+            context, conversationJid, GROUP_CALL_NOTIF_ID,
+            builder(context, channel, platform, conversationJid)
+                .setContentTitle("$groupTitle · ${platform.label}")
+                .setContentText(groupCallStartedText(starterName))
+                .setCategory(NotificationCompat.CATEGORY_CALL),
+        )
+    }
+
     /** The call was answered, declined, or cancelled elsewhere — stop showing it as ringing. */
     fun cancelIncomingCall(context: Context, conversationJid: String) {
         NotificationManagerCompat.from(context).cancel(conversationJid, INCOMING_CALL_NOTIF_ID)
     }
 
-    /** The conversation has been read: clear its message and missed-call notifications. */
+    /** The conversation has been read: clear its message, missed-call and group-call notifications. */
     fun cancelForConversation(context: Context, conversationJid: String) {
         val nm = NotificationManagerCompat.from(context)
-        nm.cancel(conversationJid, MESSAGE_NOTIF_ID)
-        nm.cancel(conversationJid, MISSED_CALL_NOTIF_ID)
+        READ_CLEARS.forEach { nm.cancel(conversationJid, it) }
     }
 
     /**
-     * Clear message and missed-call notifications for every listed conversation
-     * whose unread count is zero. Catches notifications left behind by any path
-     * that cleared unread state without cancelling (reads on another device,
-     * deletes, a previous process). Conversations not in the map are untouched,
-     * so a single platform's list can reconcile its own notifications. Matches
-     * by tag and id, so it finds them on every level's channel.
+     * Clear message, missed-call and group-call notifications for every
+     * listed conversation whose unread count is zero. Catches notifications
+     * left behind by any path that cleared unread state without cancelling
+     * (reads on another device, deletes, a previous process). Conversations
+     * not in the map are untouched, so a single platform's list can reconcile
+     * its own notifications. Matches by tag and id, so it finds them on every
+     * level's channel.
      */
     fun reconcile(context: Context, unreadByConversation: Map<String, Int>) {
         val active = try {
@@ -190,7 +267,7 @@ object NotificationHelper {
         }
         for (sbn in active) {
             val tag = sbn.tag ?: continue
-            if (sbn.id != MESSAGE_NOTIF_ID && sbn.id != MISSED_CALL_NOTIF_ID) continue
+            if (sbn.id !in READ_CLEARS) continue
             if (unreadByConversation[tag] == 0) {
                 NotificationManagerCompat.from(context).cancel(tag, sbn.id)
             }
@@ -222,9 +299,12 @@ object NotificationHelper {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
     }
 
-    private fun post(context: Context, tag: String, id: Int, builder: NotificationCompat.Builder) {
+    private fun post(context: Context, tag: String, id: Int, builder: NotificationCompat.Builder) =
+        post(context, tag, id, builder.build())
+
+    private fun post(context: Context, tag: String, id: Int, notification: Notification) {
         try {
-            NotificationManagerCompat.from(context).notify(tag, id, builder.build())
+            NotificationManagerCompat.from(context).notify(tag, id, notification)
         } catch (_: SecurityException) {
             // Notification permission not granted
         }

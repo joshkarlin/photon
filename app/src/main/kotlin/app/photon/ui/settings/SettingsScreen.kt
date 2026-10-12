@@ -261,26 +261,29 @@ private fun ChatPage(onBack: () -> Unit) {
 
     // Null until read, so no default flashes before the stored value.
     val showThumbnails = prefs.showThumbnails.collectAsState(initial = null).value
-    val notificationLevel = prefs.notificationLevel.collectAsState(initial = null).value
+    val messageLevel = prefs.messageLevel.collectAsState(initial = null).value
+    val callLevel = prefs.callLevel.collectAsState(initial = null).value
     val scrollDial = prefs.scrollDial.collectAsState(initial = null).value
     val composeStyle = prefs.composeStyle.collectAsState(initial = null).value
     val keyboardStyle = prefs.keyboardStyle.collectAsState(initial = null).value
 
     BackHandler { onBack() }
-    if (showThumbnails == null || notificationLevel == null || scrollDial == null ||
+    if (showThumbnails == null || messageLevel == null || callLevel == null || scrollDial == null ||
         composeStyle == null || keyboardStyle == null
     ) {
         MenuScreen("Chat", onBack) {}
         return
     }
     ChatSettingsContent(
-        notificationLevel = notificationLevel,
+        messageLevel = messageLevel,
+        callLevel = callLevel,
         showThumbnails = showThumbnails,
         scrollDial = scrollDial,
         composeStyle = composeStyle,
         keyboardStyle = keyboardStyle,
         onBack = onBack,
-        onCycleNotifications = { scope.launch { prefs.setNotificationLevel(notificationLevel.next()) } },
+        onCycleMessages = { scope.launch { prefs.setMessageLevel(messageLevel.next()) } },
+        onCycleCalls = { scope.launch { prefs.setCallLevel(callLevel.next()) } },
         onToggleThumbnails = { scope.launch { prefs.setShowThumbnails(!showThumbnails) } },
         onCycleScrollDial = { scope.launch { prefs.setScrollDial(scrollDial.next()) } },
         onCycleComposeStyle = { scope.launch { prefs.setComposeStyle(composeStyle.next()) } },
@@ -288,22 +291,30 @@ private fun ChatPage(onBack: () -> Unit) {
     )
 }
 
+/**
+ * Settings › Chat. Messages and Calls are how each kind of notification
+ * alerts (Sound / Vibrate / Silent / Off), so calls can still come through
+ * with messages off.
+ */
 @Composable
-private fun ChatSettingsContent(
-    notificationLevel: NotificationLevel,
+internal fun ChatSettingsContent(
+    messageLevel: NotificationLevel,
+    callLevel: NotificationLevel,
     showThumbnails: Boolean,
     scrollDial: ScrollDial,
     composeStyle: ComposeStyle,
     keyboardStyle: KeyboardStyle,
     onBack: () -> Unit,
-    onCycleNotifications: () -> Unit,
+    onCycleMessages: () -> Unit,
+    onCycleCalls: () -> Unit,
     onToggleThumbnails: () -> Unit,
     onCycleScrollDial: () -> Unit,
     onCycleComposeStyle: () -> Unit,
     onCycleKeyboardStyle: () -> Unit,
 ) {
     MenuScreen("Chat", onBack) {
-        MenuRow("Notifications", sentenceCase(notificationLevel.label), onClick = onCycleNotifications)
+        MenuRow("Messages", sentenceCase(messageLevel.label), onClick = onCycleMessages)
+        MenuRow("Calls", sentenceCase(callLevel.label), onClick = onCycleCalls)
         MenuRow("Thumbnails", if (showThumbnails) "On" else "Off", onClick = onToggleThumbnails)
         MenuRow("Scroll Dial", sentenceCase(scrollDial.label), onClick = onCycleScrollDial)
         MenuRow("Compose", sentenceCase(composeStyle.label), onClick = onCycleComposeStyle)
@@ -379,15 +390,21 @@ private fun SettingsHomePreview() = PhotonTheme {
 
 @Preview(name = "Settings – chat", widthDp = 360, heightDp = 413, showBackground = true, backgroundColor = 0xFF000000)
 @Composable
-private fun ChatSettingsPreview() = PhotonTheme {
+private fun ChatSettingsPreview() = PhotonTheme { ChatSettingsSample() }
+
+/** Settings › Chat with messages off and calls on vibrate. */
+@Composable
+internal fun ChatSettingsSample() {
     ChatSettingsContent(
-        notificationLevel = NotificationLevel.VIBRATE,
+        messageLevel = NotificationLevel.OFF,
+        callLevel = NotificationLevel.VIBRATE,
         showThumbnails = false,
         scrollDial = ScrollDial.MEDIUM,
         composeStyle = ComposeStyle.INLINE,
         keyboardStyle = KeyboardStyle.SYSTEM,
         onBack = {},
-        onCycleNotifications = {},
+        onCycleMessages = {},
+        onCycleCalls = {},
         onToggleThumbnails = {},
         onCycleScrollDial = {},
         onCycleComposeStyle = {},
