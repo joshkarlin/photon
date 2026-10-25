@@ -3,11 +3,9 @@ package app.photon.ui.shared.components
 import android.Manifest
 import android.content.ContentResolver
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.MediaRecorder
 import android.net.Uri
-import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -28,7 +26,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -37,13 +34,10 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
- * Taking photos, attaching photos and files, and recording voice notes for
- * one chat. The attachment sheet ([AttachSheet]) offers the first three; the
+ * Attaching photos and files, and recording voice notes for one chat.
+ * The attachment sheet ([AttachSheet]) offers the two pickers; the
  * inline bar and the full-screen thread's bottom bar record. Create it with
  * [rememberMediaInput].
- *
- * @param cameraAvailable whether an app can take a photo for Photon
- *   ([MediaStore.ACTION_IMAGE_CAPTURE]); the LP3's own camera may not
  */
 @Stable
 class MediaInput internal constructor(
@@ -51,11 +45,8 @@ class MediaInput internal constructor(
     private val scope: CoroutineScope,
     private val sendAudio: State<((path: String) -> Unit)?>,
     private val sendMedia: State<((path: String, mime: String, fileName: String?) -> Unit)?>,
-    private val cameraAvailable: Boolean,
 ) {
     internal lateinit var micPermission: ActivityResultLauncher<String>
-    internal lateinit var cameraPermission: ActivityResultLauncher<String>
-    internal lateinit var camera: ActivityResultLauncher<Uri>
     internal lateinit var photoPicker: ActivityResultLauncher<PickVisualMediaRequest>
     internal lateinit var filePicker: ActivityResultLauncher<Array<String>>
 
@@ -64,9 +55,6 @@ class MediaInput internal constructor(
      * there's an attachment sheet at all (SMS sends none).
      */
     val canAttach: Boolean get() = sendMedia.value != null
-
-    /** Whether a photo can be taken and sent. */
-    val canTakePhoto: Boolean get() = canAttach && cameraAvailable
 
     /** Whether the platform can send voice notes. */
     val canRecord: Boolean get() = sendAudio.value != null
@@ -91,58 +79,6 @@ class MediaInput internal constructor(
     /** Opens the system's document picker for a file ([ATTACHABLE_FILE_TYPES]), then sends it. */
     fun pickFile() {
         if (canAttach) filePicker.launch(ATTACHABLE_FILE_TYPES)
-    }
-
-    /**
-     * Opens the camera app to take a photo, then sends it. Photon declares
-     * CAMERA, so Android refuses the capture until it's granted: ask first.
-     */
-    fun takePhoto() {
-        if (!canTakePhoto) return
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            cameraPermission.launch(Manifest.permission.CAMERA)
-            return
-        }
-        openCamera()
-    }
-
-    /** Asks the camera app for a photo in [captureFile], through the FileProvider. */
-    internal fun openCamera() {
-        val file = captureFile(context).apply {
-            parentFile?.mkdirs()
-            delete()
-        }
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}$CAMERA_AUTHORITY_SUFFIX", file)
-        try {
-            camera.launch(uri)
-        } catch (e: RuntimeException) {
-            // No camera app after all, or one that refuses: say so.
-            android.util.Log.w("MediaInput", "Couldn't open the camera", e)
-            Toast.makeText(context, "Couldn't open the camera", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    /**
-     * The camera app has finished. A photo it took is staged as a
-     * send_media_* file, the only kind the platforms send, and sent;
-     * anything else is dropped.
-     */
-    internal fun onPhotoTaken(taken: Boolean) {
-        val capture = captureFile(context)
-        val send = sendMedia.value
-        if (!taken || send == null || capture.length() == 0L) {
-            capture.delete()
-            return
-        }
-        val staged = File(context.filesDir, "send_media_${System.currentTimeMillis()}.jpg")
-        if (capture.renameTo(staged)) {
-            send(staged.absolutePath, "image/jpeg", null)
-        } else {
-            capture.delete()
-            Toast.makeText(context, "Couldn't attach that photo", Toast.LENGTH_SHORT).show()
-        }
     }
 
     /** Starts a voice note, asking for the microphone first if needed. */
@@ -240,19 +176,12 @@ fun rememberMediaInput(
     val sendAudio = rememberUpdatedState(onSendAudio)
     val sendMedia = rememberUpdatedState(onSendMedia)
     val media = remember(context, scope) {
-        val cameraAvailable = Intent(MediaStore.ACTION_IMAGE_CAPTURE).resolveActivity(context.packageManager) != null
-        MediaInput(context, scope, sendAudio, sendMedia, cameraAvailable)
+        MediaInput(context, scope, sendAudio, sendMedia)
     }
     // Remembered launchers: the same instances on every composition.
     media.micPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted -> if (granted) media.beginRecording() }
-    media.cameraPermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted -> if (granted) media.openCamera() }
-    media.camera = rememberLauncherForActivityResult(
-        ActivityResultContracts.TakePicture(),
-    ) { taken -> media.onPhotoTaken(taken) }
     media.photoPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri -> if (uri != null) media.stageAndSend(uri) }
@@ -347,15 +276,6 @@ private fun truncateKeepingExtension(name: String, max: Int): String {
     val stem = name.substring(0, name.offsetByCodePoints(0, stemLimit)).trimEnd()
     return stem + keep
 }
-
-/** Appended to the package name: the FileProvider the camera writes through (AndroidManifest.xml). */
-private const val CAMERA_AUTHORITY_SUFFIX = ".camera"
-
-/**
- * Where the camera app writes the photo being taken, in the FileProvider's
- * one directory (res/xml/camera_paths.xml). One at a time, so one name.
- */
-internal fun captureFile(context: Context): File = File(File(context.filesDir, "camera"), "photo.jpg")
 
 private fun startRecording(context: Context, path: String): MediaRecorder? {
     if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)

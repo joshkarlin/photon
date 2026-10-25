@@ -27,9 +27,9 @@ import com.thelightphone.sdk.ui.lightClickable
  * The attachment sheet, as LightOS Messages draws it over a thread: the
  * thread's title in the top bar, a row of unlabelled icons in the lower part
  * of the page, and a chevron at the bottom that closes it. The icons are what
- * [media] can do: Camera (when an app can take a photo), Photos and Files.
+ * [media] can do: Photos and Files.
  *
- * Each hands over to the camera app or a picker and closes the sheet; what
+ * Each hands over to a picker and closes the sheet; what
  * comes back is sent to the thread. Back, here or the system's, returns to
  * the thread.
  */
@@ -55,7 +55,6 @@ internal fun AttachSheet(title: String, media: MediaInput, onClose: () -> Unit) 
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(ATTACH_ICON_GAP_UNITS.gridUnitsAsDp(), Alignment.CenterHorizontally),
         ) {
-            if (media.canTakePhoto) AttachIcon(LightIcons.CAMERA, "Camera") { choose(media::takePhoto) }
             if (media.canAttach) {
                 AttachIcon(LightIcons.MEDIA, "Photos") { choose(media::pickPhoto) }
                 AttachIcon(LightIcons.LARGE_LIST, "Files") { choose(media::pickFile) }

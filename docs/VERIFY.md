@@ -4,6 +4,13 @@ Fixes that are implemented (with tests where practical) but not yet confirmed on
 
 Each check has an id (A1, W3, …) so a result can be reported in one line, for example "W3 fails: no missed-call row".
 
+## Start here (v0.5.0-rc.2)
+
+1. [AT4](#at4-only-photos-and-files-are-offered) Upgrade in place, check the two-icon attachment sheet in both compose styles, and send through Photos and Files.
+2. [AT2](#at2-photos-and-files-send) Check photo, video and document sending, including cancelling each picker.
+
+The broader [v0.5.0-rc.1 checks](#start-here-v050-rc1) remain pending. Passing automated tests does not confirm these LP3 checks.
+
 ## Start here (v0.5.0-rc.1)
 
 These cover the riskiest and most important changes in v0.5.0-rc.1. Run them first, in this order. The v0.4.0 checks still await confirmation too, with their own Start here lists for [rc.2](#start-here-v040-rc2) and [rc.1](#start-here-v040-rc1).
@@ -41,6 +48,15 @@ sqlite3 /tmp/photon/app.db
 **Re-pair.** Go to Settings → Connections → WhatsApp (or Signal) → Reset, confirm with RESET, then link again. WhatsApp history sync only runs at pairing, so a WhatsApp fix applied when a message is stored doesn't change rows stored before the fix until you re-pair.
 
 "Other phone" means your primary phone or a contact's phone, whichever the step needs.
+
+## v0.5.0-rc.2
+
+### Attachments
+
+#### AT4. Only Photos and Files are offered
+- **Was:** confirming a photo in a camera app could return to the chat without sending or showing an error.
+- **Do:** install the v0.5.0-rc.2 APK over rc.1 with `adb install -r`; chats and linked accounts should remain intact. Open + in WhatsApp and Signal in both compose styles; inspect the full page and close with Back and the down chevron. Check a long chat title too. Send an existing photo with Photos and a document with Files; cancel each picker once. Quit and reopen Photon and check the sheet again.
+- **Expect:** only the two centred Photos and Files icons appear, with the usual top and bottom controls. No camera permission is requested and no camera app opens. Picked items send as before; cancellation sends nothing.
 
 ## v0.5.0-rc.1
 
@@ -218,7 +234,7 @@ These cover the riskiest and most important changes in v0.4.0-rc.2. Run them aft
 1. [W9](#w9-re-pairing-recovers-history) and [W10](#w10-first-messages-to-and-from-someone-new) Re-pair WhatsApp to recover history, then check that first messages to and from someone new appear
 2. [U6](#u6-lightos-layout-parity) LightOS layout parity: scroll bar, text size and margins, side by side with LightOS Messages and Settings
 3. [NM1](#nm1-the-to-field-and-the-keyboard)–[NM4](#nm4-a-new-chat-on-each-platform) New message
-4. [AT1](#at1-the-attachment-sheet) and [AT2](#at2-camera-photos-and-files-send) The attachment sheet, including whether Camera shows
+4. [AT1](#at1-the-attachment-sheet) and [AT2](#at2-photos-and-files-send) The attachment sheet and pickers
 5. [M1](#m1-what-a-long-press-offers) and [M2](#m2-the-action-pages) The long-press menu
 
 ### WhatsApp
@@ -338,23 +354,21 @@ Send only to yourself or a willing contact.
 
 #### AT1. The attachment sheet
 - **Was:** attach (+) opened the document picker straight away, for photos and videos only.
-- **Do:** in a WhatsApp chat and a Signal chat, with Compose: Inline and then Full screen, tap +. Close it with the down chevron, then with the Back icon, then with the system Back. Check whether an app on the LP3 can take photos for Photon: `adb shell cmd package query-activities -a android.media.action.IMAGE_CAPTURE`. Then open an SMS chat.
+- **Do:** in a WhatsApp chat and a Signal chat, with Compose: Inline and then Full screen, tap +. Close it with the down chevron, then with the Back icon, then with the system Back. Then open an SMS chat.
 - **Expect:**
-  - A full page opens with Back and the chat's title in the top bar, unlabelled Camera, Photos and Files icons in a row in the lower part of the page, and a down chevron in the bottom bar.
-  - Camera shows only if that command lists an activity. Without one, the row is Photos and Files.
+  - A full page opens with Back and the chat's title in the top bar, unlabelled Photos and Files icons in a row in the lower part of the page, and a down chevron in the bottom bar.
+  - Only Photos and Files are offered; there is no Camera action.
   - Each way of closing returns to the thread, with the keyboard down.
   - The mic stays where it was, with the same icon in both styles: inline `[+] [field] [mic]` (send once there's text), full screen `[+] [mic] [compose]`.
   - SMS chats have no +.
 
-#### AT2. Camera, Photos and Files send
+#### AT2. Photos and Files send
 - **Do:**
-  1. If Camera shows: tap it, grant camera access when asked, take a photo and accept it. Then take another and cancel.
-  2. Tap Photos and pick a photo, then a video.
-  3. Tap Files and pick a PDF. Look for an audio file in the picker.
+  1. Tap Photos and pick a photo, then a video.
+  2. Tap Files and pick a PDF. Look for an audio file in the picker.
 - **Expect:**
-  1. The accepted photo appears in the thread and arrives on the other phone. The cancelled one sends nothing. Afterwards, `adb shell run-as app.photon ls files/camera` (debug build) lists nothing.
-  2. Android's photo picker opens, and both send and arrive.
-  3. The document picker opens, and the PDF arrives on the other phone as a document. Audio files can't be picked.
+  1. Android's photo picker opens, and both send and arrive.
+  2. The document picker opens, and the PDF arrives on the other phone as a document. Audio files can't be picked.
 - **Caveats:** the file name the recipient sees is AT3's check.
 
 #### AT3. Sent documents keep their file name
@@ -364,7 +378,7 @@ Send only to yourself or a willing contact.
   - Photon's thread shows `[ document: <name> ]`, with no caption.
   - The other phone receives the document under its real file name, on WhatsApp and on Signal.
   - The retried document keeps its name, in Photon and on the other phone.
-- **Caveats:** a received Signal document still shows no name (see README Limitations). Camera photos are sent without a name.
+- **Caveats:** a received Signal document still shows no name (see README Limitations).
 
 ### Message actions
 

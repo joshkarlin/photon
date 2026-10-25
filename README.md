@@ -26,6 +26,12 @@ adb install -r app-release.apk
 
 `-r` upgrades an existing install in place and keeps your chats and links. Downgrading isn't supported: an older build can't open the newer Signal database.
 
+### Upgrading to 0.5.0-rc.2
+
+Install over rc.1 with `adb install -r`; no re-pair is needed. The attachment sheet now offers only Photos and Files, and Photon no longer requests camera permission. To send a new photo, take it in Light's Camera tool first, then attach it through Photos. Voice notes remain beside the message input.
+
+This is a release candidate. The LP3 checks in [`docs/VERIFY.md`](docs/VERIFY.md#start-here-v050-rc2) still need confirmation.
+
 ### Upgrading to 0.5.0
 
 No re-pair is needed.
@@ -129,7 +135,7 @@ Threads follow the LightOS look: no bubbles, received messages on the left, your
 - **View-once media** reads "[ view-once photo · open on your phone ]", and a WhatsApp message your phone hasn't passed on yet reads "[ waiting for this message · open on your phone ]" until it arrives. Both count as unread. Photon never downloads view-once media.
 - **Locations** (WhatsApp) show the place's name or address with its coordinates beneath. Tap one to open it in a map app (Organic Maps on the LP3).
 - **Long-press** a WhatsApp or Signal message for its actions, whichever apply: Reply, React (not on your own messages), Retry, Delete (in Photon only) or Delete for Everyone (after a confirm page). View-once and waiting messages offer only Delete.
-- **Attach (+)** opens a sheet with Camera (when an app on the phone can take photos), Photos and Files. The voice-note mic stays beside the text field.
+- **Attach (+)** opens a sheet with Photos and Files. The voice-note mic stays beside the text field.
 - **Photos, videos and documents** open full screen when tapped. Save is at the top right: photos go to Pictures/Photon, videos to Movies/Photon and everything else to Download/Photon. Documents keep their real name.
 
 ## Settings
@@ -182,7 +188,7 @@ Per-platform status, Refresh Connection, and Reset (clear data + re-pair). Reset
 - [x] Failed-send recovery (WhatsApp, Signal, SMS): a failed message reads "failed · tap to retry". WhatsApp and Signal retries preserve the wire id/timestamp so recipients dedupe, and WhatsApp retry re-uploads media too.
 - [x] Message actions (WhatsApp + Signal): long-press a message for a LightOS menu of Reply, React, Retry, Delete and Delete for Everyone, offering only what applies. Delete removes it from Photon. Your own sent messages offer Delete for Everyone (WhatsApp revoke / Signal remote delete) after a confirm page. Reactions go on other people's messages only.
 - [x] New message: find anyone by name or number across LP3 contacts and every platform's chats, then open their chat or start one on WhatsApp, Signal or SMS
-- [x] Attachments (WhatsApp + Signal): Camera (when a camera app is available), Photos (the system photo picker) and Files (documents such as PDFs, sent under their own file name). Saved documents keep their real name, and every saved file gets its proper extension.
+- [x] Attachments (WhatsApp + Signal): Photos (the system photo picker) and Files (documents such as PDFs, sent under their own file name). Saved documents keep their real name, and every saved file gets its proper extension.
 - [x] Voice notes: record and send on WhatsApp and Signal; incoming voice notes autoplay on open
 - [x] In-app contact editor: tap a DM's title → save/update directly via `ContactsContract` (no AOSP handoff)
 - [x] Ephemeral retention (configurable count + days) on WhatsApp and Signal, kept across bridge restarts
@@ -201,6 +207,7 @@ This section lists open bugs and by-design limitations, one line each. Fixes wai
 
 ### Bugs
 
+- **Photos attachment failure reported**: choosing a photo reportedly returned to the chat without sending, but repeats on 0.5.0-rc.1 succeeded both before and after reopening Photon; the earlier failure remains unexplained.
 - **WhatsApp received images may not load**: tapping a received image can still fail to show it. The stale-cache cause is fixed, but real download failures (expired CDN media, bridge errors) need on-device logs to diagnose.
 - **Signal sent-transcript results unchecked**: the sync transcript to your own devices ignores per-device results, so a sync failure that doesn't throw can leave a sent message missing from your other linked devices.
 - **Replying from your phone can break a Signal contact's name**: a sent transcript's profile key is your own, but Photon stores it as the recipient's, so their profile name can fail to resolve until they next message you.
@@ -244,7 +251,7 @@ This section lists open bugs and by-design limitations, one line each. Fixes wai
 - **SMS delivery reports aren't requested**: an SMS shows as sent once it leaves the phone, never as delivered.
 - **SMS retry leaves the failed copy**: a failed SMS that the system already stored is sent again as a new message, and the failed one stays in the thread, because only the default SMS app can change the SMS store.
 - **Delete only removes a message in Photon**: it doesn't sync to your primary or other linked devices. Delete for Everyone does.
-- **Camera may be unavailable**: the attachment sheet only offers Camera when an app on the LP3 handles photo capture. Photos and Files still work.
+- **Taking photos from Photon is unavailable**: take the photo in Light's Camera tool, then attach it with Photos or Files.
 - **Fictional UK numbers written nationally aren't recognised** (low priority): Android's number parser rejects the reserved `07700 900xxx` range unless it's written with +44, so New message offers no "Send to" row for it.
 - **The LP3 keyboard has empty space above it**: docked inline, the Light keyboard leaves about 30dp of blank space above its first row.
 - **Media re-download expires**: viewed media is deleted after 5 minutes and downloaded again on tap. That fails once WhatsApp's CDN copy expires or Signal's attachment pointer lapses (about 45 days).

@@ -1,6 +1,5 @@
 package app.photon.ui.shared
 
-import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.ActivityInfo
@@ -19,7 +18,6 @@ import app.photon.data.model.Platform
 import app.photon.ui.RegisterComposeHostActivity
 import app.photon.ui.preview.PreviewSamples
 import app.photon.ui.shared.components.ATTACHABLE_FILE_TYPES
-import app.photon.ui.shared.components.captureFile
 import app.photon.ui.theme.PhotonTheme
 import org.junit.Rule
 import org.junit.Test
@@ -34,10 +32,9 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Attach's sheet in the thread: Camera, Photos and Files, as the platform and phone allow. */
+/** Attach's sheet in the thread: Photos and Files, as the platform allows. */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(sdk = [34], qualifiers = "w360dp-h413dp-xxhdpi")
@@ -103,11 +100,12 @@ class AttachSheetTest {
     private fun lastStarted(): Intent = assertNotNull(shadowOf(rule.activity).nextStartedActivityForResult).intent
 
     @Test
-    fun withACameraAppTheSheetOffersCameraPhotosAndFiles() {
+    fun evenWithACameraAppTheSheetOffersOnlyPhotosAndFiles() {
         installCameraApp()
         showDm()
         openSheet()
-        listOf("Camera", "Photos", "Files", "Close").forEach { described(it).assertExists() }
+        listOf("Photos", "Files", "Close").forEach { described(it).assertExists() }
+        rule.onAllNodesWithContentDescription("Camera").assertCountEquals(0)
         // Voice notes stay a top-level control, not part of the sheet.
         rule.onAllNodesWithContentDescription("Voice note").assertCountEquals(1)
     }
@@ -172,64 +170,6 @@ class AttachSheetTest {
         assertEquals(Intent.ACTION_OPEN_DOCUMENT, intent.action)
         assertContentEquals(ATTACHABLE_FILE_TYPES, intent.getStringArrayExtra(Intent.EXTRA_MIME_TYPES))
         assertFalse(sheetOpen())
-    }
-
-    @Test
-    fun cameraAsksForThePermissionFirst() {
-        installCameraApp()
-        showDm()
-        openSheet()
-        described("Camera").performClick()
-        val asked = shadowOf(rule.activity).lastRequestedPermission
-        assertNotNull(asked)
-        assertTrue(Manifest.permission.CAMERA in asked.requestedPermissions)
-    }
-
-    /**
-     * One test for both outcomes: FileProvider caches its roots statically,
-     * and each Robolectric test has its own files directory.
-     */
-    @Test
-    fun aTakenPhotoIsStagedAndSentAndACancelledOneDropped() {
-        installCameraApp()
-        shadowOf(rule.activity.application).grantPermissions(Manifest.permission.CAMERA)
-        showDm()
-        val capture = captureFile(rule.activity)
-
-        fun takePhoto(): Intent {
-            openSheet()
-            described("Camera").performClick()
-            return lastStarted()
-        }
-
-        // Cancelled: nothing is sent, and the camera's file goes.
-        val cancelled = takePhoto()
-        capture.writeBytes(byteArrayOf(1))
-        shadowOf(rule.activity).receiveResult(cancelled, Activity.RESULT_CANCELED, null)
-        rule.waitForIdle()
-        assertTrue(sentMedia.isEmpty())
-        assertFalse(capture.exists())
-
-        // Taken: the camera app writes through Photon's FileProvider, then reports success.
-        val request = takePhoto()
-        assertEquals(MediaStore.ACTION_IMAGE_CAPTURE, request.action)
-        @Suppress("DEPRECATION")
-        val output = assertNotNull(request.getParcelableExtra<Uri>(MediaStore.EXTRA_OUTPUT))
-        assertEquals("content", output.scheme)
-        assertEquals("${rule.activity.packageName}.camera", output.authority)
-        capture.writeBytes(byteArrayOf(1, 2, 3))
-        shadowOf(rule.activity).receiveResult(request, Activity.RESULT_OK, null)
-        rule.waitForIdle()
-
-        // Staged where the platforms send from, as a JPEG with no name of its own.
-        val (path, mime, name) = sentMedia.single()
-        val staged = File(path)
-        assertEquals(rule.activity.filesDir, staged.parentFile)
-        assertTrue(staged.name.matches(Regex("send_media_\\d+\\.jpg")), staged.name)
-        assertContentEquals(byteArrayOf(1, 2, 3), staged.readBytes())
-        assertEquals("image/jpeg", mime)
-        assertNull(name)
-        assertFalse(capture.exists())
     }
 
     /** A document from Files is staged under Photon's name and sent with its own. */

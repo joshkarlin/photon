@@ -102,7 +102,6 @@ class MainActivity : ComponentActivity() {
     private fun requestPermissionsIfNeeded() {
         val needed = listOf(
             Manifest.permission.RECORD_AUDIO,
-            Manifest.permission.CAMERA,
             Manifest.permission.READ_SMS,
             Manifest.permission.SEND_SMS,
             Manifest.permission.READ_CONTACTS,
