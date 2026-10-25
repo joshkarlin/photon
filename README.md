@@ -26,11 +26,11 @@ adb install -r app-release.apk
 
 `-r` upgrades an existing install in place and keeps your chats and links. Downgrading isn't supported: an older build can't open the newer Signal database.
 
-### Upgrading to 0.5.0-rc.2
+### Upgrading to 0.5.0-rc.3
 
-Install over rc.1 with `adb install -r`; no re-pair is needed. The attachment sheet now offers only Photos and Files, and Photon no longer requests camera permission. To send a new photo, take it in Light's Camera tool first, then attach it through Photos. Voice notes remain beside the message input.
+Install over rc.1 or rc.2 with `adb install -r`; no re-pair is needed. The attachment sheet now offers only Photos and Files, and Photon no longer requests camera permission. To send a new photo, take it in Light's Camera tool first, then attach it through Photos. Voice notes remain beside the message input.
 
-This is a release candidate. The LP3 checks in [`docs/VERIFY.md`](docs/VERIFY.md#start-here-v050-rc2) still need confirmation.
+rc.3 supersedes rc.2 and also removes the unused camera permission inherited from the SDK. This is a release candidate. The LP3 checks in [`docs/VERIFY.md`](docs/VERIFY.md#start-here-v050-rc3) still need confirmation.
 
 ### Upgrading to 0.5.0
 

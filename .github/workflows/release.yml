@@ -87,6 +87,32 @@ jobs:
             -PversionNameOverride=${{ steps.ver.outputs.name }} \
             -PversionCodeOverride=${{ steps.ver.outputs.code }}
 
+      - name: Verify release APK
+        env:
+          EXPECTED_VERSION_NAME: ${{ steps.ver.outputs.name }}
+          EXPECTED_VERSION_CODE: ${{ steps.ver.outputs.code }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          apk = Path("app/build/outputs/apk/release/app-release.apk")
+          aapt = max(
+              Path(os.environ["ANDROID_HOME"]).glob("build-tools/*/aapt2"),
+              key=lambda path: tuple(map(int, re.findall(r"\d+", path.parent.name))),
+          )
+          subprocess.run([str(aapt.with_name("apksigner")), "verify", str(apk)], check=True)
+          package = subprocess.check_output([str(aapt), "dump", "badging", str(apk)], text=True).splitlines()[0]
+          assert "name='app.photon'" in package, package
+          assert f"versionName='{os.environ['EXPECTED_VERSION_NAME']}'" in package, package
+          assert f"versionCode='{os.environ['EXPECTED_VERSION_CODE']}'" in package, package
+          permissions = subprocess.check_output([str(aapt), "dump", "permissions", str(apk)], text=True)
+          assert "android.permission.CAMERA" not in permissions, "Unexpected CAMERA permission in release APK"
+          print("Verified signed APK, package/version and absence of CAMERA permission")
+          PY
+
       - name: Rename APK
         run: |
           mkdir -p out

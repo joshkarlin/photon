@@ -4,6 +4,13 @@ Fixes that are implemented (with tests where practical) but not yet confirmed on
 
 Each check has an id (A1, W3, …) so a result can be reported in one line, for example "W3 fails: no missed-call row".
 
+## Start here (v0.5.0-rc.3)
+
+rc.3 supersedes rc.2, whose APK still declared the SDK's unused CAMERA permission.
+
+1. [AT5](#at5-the-release-apk-does-not-declare-camera-access) Check the release APK's permission cleanup.
+2. [AT4](#at4-only-photos-and-files-are-offered) Check the two-icon attachment sheet and Photos/Files sending on rc.3.
+
 ## Start here (v0.5.0-rc.2)
 
 1. [AT4](#at4-only-photos-and-files-are-offered) Upgrade in place, check the two-icon attachment sheet in both compose styles, and send through Photos and Files.
@@ -49,13 +56,22 @@ sqlite3 /tmp/photon/app.db
 
 "Other phone" means your primary phone or a contact's phone, whichever the step needs.
 
+## v0.5.0-rc.3
+
+### Attachments
+
+#### AT5. The release APK does not declare camera access
+- **Was:** rc.2 removed Photon's camera request, but sdk-ui's manifest still added CAMERA to the APK.
+- **Do:** inspect `photon-0.5.0-rc.3.apk` with `aapt2 dump permissions`, then upgrade in place and repeat AT4.
+- **Expect:** CAMERA is absent from the APK's requested permissions. The release workflow's Verify release APK step passes before publication. Photos and Files work without a camera permission prompt.
+
 ## v0.5.0-rc.2
 
 ### Attachments
 
 #### AT4. Only Photos and Files are offered
 - **Was:** confirming a photo in a camera app could return to the chat without sending or showing an error.
-- **Do:** install the v0.5.0-rc.2 APK over rc.1 with `adb install -r`; chats and linked accounts should remain intact. Open + in WhatsApp and Signal in both compose styles; inspect the full page and close with Back and the down chevron. Check a long chat title too. Send an existing photo with Photos and a document with Files; cancel each picker once. Quit and reopen Photon and check the sheet again.
+- **Do:** install the v0.5.0-rc.3 APK over rc.1 or rc.2 with `adb install -r`; chats and linked accounts should remain intact. Open + in WhatsApp and Signal in both compose styles; inspect the full page and close with Back and the down chevron. Check a long chat title too. Send an existing photo with Photos and a document with Files; cancel each picker once. Quit and reopen Photon and check the sheet again.
 - **Expect:** only the two centred Photos and Files icons appear, with the usual top and bottom controls. No camera permission is requested and no camera app opens. Picked items send as before; cancellation sends nothing.
 
 ## v0.5.0-rc.1
